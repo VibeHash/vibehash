@@ -21,12 +21,25 @@ def items(spec, round_seed: int, step: int = 0) -> list:
     spec's `lenient`, each checked by es_tasks.lenient (a right answer counts without its tags)."""
     from . import es_tasks
     if getattr(spec, "mix", False):  # problem i of step s: task (s * problems + i) mod the count, its own draw
-        n = len(spec.tasks)
-        got = [es_tasks.get(spec.tasks[(step * spec.problems + i) % n]).items(mix_seed(round_seed, i), 1)[0]
-               for i in range(spec.problems)]
+        got = [es_tasks.get(t).items(mix_seed(round_seed, i), 1)[0] for i, t in enumerate(task_names(spec, step))]
     else:
         got = es_tasks.get(es2.task_at(spec, step)).items(round_seed, spec.problems)
     return [es_tasks.lenient(p) for p in got] if getattr(spec, "lenient", False) else got
+
+
+def task_names(spec, step: int = 0) -> list[str]:
+    """Each of the round's problems' task, in order (items' problem i is one of task_names(...)[i])."""
+    if getattr(spec, "mix", False):
+        n = len(spec.tasks)
+        return [spec.tasks[(step * spec.problems + i) % n] for i in range(spec.problems)]
+    return [es2.task_at(spec, step)] * spec.problems
+
+
+def caps(spec, step: int = 0) -> list[int]:
+    """Each of the round's problems' most answer tokens (Spec2.task_tokens, else max_tokens), in order."""
+    if not getattr(spec, "task_tokens", ()):
+        return [spec.max_tokens] * spec.problems
+    return [spec.tokens_for(t) for t in task_names(spec, step)]
 
 
 def mix_seed(round_seed: int, i: int) -> int:
@@ -69,11 +82,13 @@ def rescore(spec, round_seed: int, raw: bytes, unit_id: str, step: int = 0):
         # accepted member's right answer can become a replay target (es2.replay_targets), which every later round
         # scores, and checkers sample only some members, so a [-1] in another one ended every worker's and checker's
         # scoring for good. (Ids past the model's vocabulary are left out of targets instead, by the spec's vocab:
-        # a spec that said too few mustn't make honest answers a fraud.)
+        # a spec that said too few mustn't make honest answers a fraud.) None is longer than its problem's task allows
+        # (Spec2.task_tokens; max_tokens for a job without it).
+        top = caps(spec, step)
         for member in answers:
-            for a in member:
+            for a, cap in zip(member, top):
                 if not (isinstance(a, dict) and isinstance(a.get("text"), str) and isinstance(a.get("ids"), list)
-                        and 0 < len(a["ids"]) <= spec.max_tokens and all(type(t) is int and t >= 0 for t in a["ids"])):
+                        and 0 < len(a["ids"]) <= cap and all(type(t) is int and t >= 0 for t in a["ids"])):
                     return None
         ps = items(spec, round_seed, step)
         ok = [[bool(p.check(a["text"])) for p, a in zip(ps, member)] for member in answers]

@@ -46,7 +46,7 @@ def lowrank_factors(linears, pair_seeds: list[int], device="cuda", dtype=torch.b
     the same float32 bits on every machine; the cast to `dtype` is the worker's."""
     layout = stream_layout(linears)
     total = sum(o + i for _, o, i in layout)
-    streams = np.stack([es.noise(int(s), total) for s in pair_seeds]) if pair_seeds else np.zeros((0, total), np.float32)
+    streams = es.noise_many(pair_seeds, total)  # (threads side by side, the same bits as one at a time)
     out, at = {}, 0
     for name, o, i in layout:
         A = torch.from_numpy(np.ascontiguousarray(streams[:, at:at + o]))[:, :, None]
@@ -108,11 +108,13 @@ def _shared_cache(rt, rows):
 # --- answering ------------------------------------------------------------------------------------------------------
 
 def answer_members(rt: es.Runtime, linears, fac: dict, members: list, rows: list, max_tokens: int, sigma: float,
-                   rank: int = 1, max_rows: int = 512, loop=()) -> list:
+                   rank: int = 1, max_rows: int = 512, loop=(), caps=None, expect=None) -> list:
     """Every member's greedy answers to every prompt under the shared-prompt rule: answers[member][prompt] = token
-    ids, ending at an end-of-turn token (kept), at max_tokens, or (loop: a job's loop_stop) at the first token where
-    it loops (es2.loop_end). members: [(pair index j, sign +1/-1)]. Qwen3.5's engine stops a looping row there; the
-    others write it to its end and cut it, the same tokens, since a greedy answer's start doesn't depend on its end."""
+    ids, ending at an end-of-turn token (kept), at max_tokens or its prompt's cap (caps[prompt]: a job's
+    task_tokens), or (loop: a job's loop_stop) at the first token where it loops (es2.loop_end). members: [(pair index
+    j, sign +1/-1)]. Qwen3.5's engine stops a row there (and takes the prompts expected longest first, given each
+    one's `expect`ed length); the others write it to max_tokens and cut it, the same tokens, since a greedy answer's
+    start doesn't depend on its end."""
     from .es2 import cut_loop
 
     p = next(rt.model.parameters())
@@ -121,11 +123,13 @@ def answer_members(rt: es.Runtime, linears, fac: dict, members: list, rows: list
     with torch.no_grad():
         if _hybrid(rt):
             from . import es_hybrid
-            return es_hybrid.answer(rt, linears, fac, members, rows, max_tokens, sigma, rank, loop)
+            return es_hybrid.answer(rt, linears, fac, members, rows, max_tokens, sigma, rank, loop, caps, expect)
         if p.device.type == "cuda" and p.dtype == torch.bfloat16:
             got = _answer_engine(rt, linears, fac, members, rows, max_tokens, sigma, rank)
         else:
             got = _answer_plain(rt, linears, fac, members, rows, max_tokens, sigma, rank, max_rows)
+    if caps is not None:
+        got = [[a[:c] for a, c in zip(member, caps)] for member in got]
     return [[cut_loop(a, loop) for a in member] for member in got] if loop else got
 
 

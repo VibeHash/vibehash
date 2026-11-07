@@ -56,6 +56,7 @@ import fnmatch
 import hashlib
 import json
 import math
+import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -185,6 +186,25 @@ def noise(seed: int, n: int, start: int = 0) -> np.ndarray:
                 _cache.pop(next(iter(_cache)))
         return out
     return _noise(seed, n, start)
+
+
+# Streams made side by side by noise_many. Philox's random_raw and the Box-Muller ufuncs let go of the GIL, so threads
+# run in parallel; each stream is still noise(seed, n), the same bits. Measured (2026-11-07, 28-thread CPU, 64 pairs of
+# Qwen3.5-0.8B's ~1.1M numbers): 8.3 s one at a time, 3.2 s on 4 threads, 2.5 s on 8, no faster past that.
+NOISE_THREADS = 8
+
+
+def noise_many(seeds, n: int) -> np.ndarray:
+    """[len(seeds), n] float32: noise(seed, n) for each seed in order, made on up to NOISE_THREADS threads."""
+    seeds = [int(s) for s in seeds]
+    if not seeds:
+        return np.zeros((0, n), np.float32)
+    workers = min(NOISE_THREADS, len(seeds), os.cpu_count() or 1)
+    if workers <= 1:
+        return np.stack([noise(s, n) for s in seeds])
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(workers, thread_name_prefix="vibehash-noise") as ex:
+        return np.stack(list(ex.map(lambda s: noise(s, n), seeds)))
 
 
 def _noise(seed: int, n: int, start: int) -> np.ndarray:

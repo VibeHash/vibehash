@@ -139,6 +139,43 @@ blind against the base model told the goal; `agents/README.md`, `tests/test_agen
 
 ## Current state
 
+**Unreleased (branch `evo-speed`, 2026-11-07): faster Evo rounds, and a job setting that caps the long tasks' answers
+(`task_tokens`).** The owner asked why training is slow and to cut the math and work on the engine. A worker's round
+on vibe-08b-2's line, profiled offline on the RTX 4070 SUPER (64 members x 16 problems, 4 units; 4 claims checked):
+answering 27.6 s, scoring the members on the 16 replay targets 28.7 s, making the round's noise 4.7 s, and per 4
+claims checked 13.2 s of gaps plus 12.7 s of replay. Two findings: **the update's fitness is the replay** (es2:
+each member's mean log-probability of last round's right answers, z-scored; answers' right/wrong only pick the next
+targets), and **the long tasks are most of every phase**: of the 16 targets two (a math and a gsm8k answer, 483 and
+297 tokens) are 92% of the replay's tokens, math is 44% of answering's, and a check's pass runs as long as its longest
+answer. What changed, the first three keeping every number (checked on the GPU with the real line: answers token for
+token, gaps and log-probabilities bit for bit; and in `tests/test_task_tokens.py` on the tiny model):
+- `es.noise_many`: the round's 64 noise streams on 8 threads (numpy's Philox and ufuncs let go of the GIL), the same
+  bits; 4.7 s to 1.3 s a round, and the same for every round a rebuild replays.
+- `es_hybrid.longest_first`: teacher forcing takes the longest rows into the pass first, so a long row doesn't run on
+  alone at the full pass's cost; the replay 28.6 s to 22.2 s.
+- `es_hybrid.answer_order`: with an `expect`ed length per prompt (a worker's running mean by task,
+  `es_client.learn_lengths`), answering takes the longest prompts first; used only under `task_tokens`, where 5
+  recorded rounds took 1,128 steps to 1,012 (without caps it made no difference, 1,334 against 1,332).
+- **A rule change, `Spec2.task_tokens`** ({task: tokens}, each 1 to max_tokens; left out when off, so earlier specs
+  and hashes are the same; a node or miner without it refuses a spec with it, so both upgrade before a job uses it):
+  an answer to that task's problem ends there (`es_hybrid` stops the row, `es2.ends_right(..., cap)` for checkers,
+  `es2_rounds.rescore` for the node; `es2_rounds.task_names`/`caps`). `job template --evo --tasks vibe` sets
+  `es_tasks.VIBE_TASK_TOKENS` = math 448, gsm8k 384, ifeval 256 (`--task-tokens TASK=N,...|off`; a default at or past
+  `--max-tokens` is left out). Chosen by measurement (vibe-08b-2's line, 320 answers a task at 512 tokens, each cut
+  at a length and checked as the job checks): math's right answers have a median of 358 tokens, 448 keeps 97% of them
+  (384 would keep 71%), gsm8k 99% at 384, ifeval 97% at 256, the pairs whose members differ likewise.
+- Together, on the same profiled round: answering 27.6 s to 21.3 s (1,093 decode steps to 832), replay 28.7 s to
+  21.3 s, noise 4.7 to 1.3 s, so a worker's part of a round ~61 s to ~44 s; 4 claims' checks 25.9 s to 23.5 s.
+- Tried and dropped: replay as one teacher-forced forward per member group (transformers' chunked Gated DeltaNet
+  continuing from the prompt's states) was 8x slower than the steps on Windows without flash-linear-attention's
+  kernels (117.7 s against 13.9 s for 8 members), its per-member means within 0.007 of the steps'.
+- Left, needing the owner's call: a `replay_tokens` cap (score each target's first N tokens; the replay is now the
+  biggest phase, and at 128 it would be ~2.5x shorter) changes the fitness itself, so it needs a quality run first; the
+  CPU's apply_round (es2.Change on the CPU, ~1.5 s) and the checks' pass floor (a check runs as long as its longest
+  answer) are next.
+Rollout: miners' code only for the first three (any job); `task_tokens` needs both droplet nodes and the miners on the
+release before a new job (vibe-08b-3, with `loop_stop` and PR #66's `cross_margin`) is posted with it.
+
 **The public Evo node's missing datasets (2026-11-06, deploy/setup-node.sh; no PyPI release needed).** For its first
 26 blocks `vibehash-evo-1` accepted no Evo work: at reveal the node re-scores every answer with the task's own
 questions (`es2_rounds.rescore`, es_tasks), which come from Hugging Face datasets, and setup-node.sh installed plain

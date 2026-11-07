@@ -70,6 +70,10 @@ VIBE = ("ifeval", "gsm8k", "math", "medmcqa", "arc_challenge", "arc_easy", "sciq
         "qasc", "social_iqa", "piqa", "winogrande", "hellaswag", "boolq", "aqua_rat")
 VIBE_MAX_TOKENS = 512  # VIBE's jobs' longest answer: gsm8k, math and ifeval reason or write at length
 VIBE_LOOP_STOP = (32, 48)  # VIBE's jobs' es2 loop_stop: 279 of 1,832 answers at 512 tokens were loops (es2.Spec2)
+# VIBE's jobs' es2 task_tokens: each long task's answers cut where nearly all its right answers have ended (measured
+# on vibe-08b-2's line, 2026-11-07: math keeps 97% of its right answers at 448, gsm8k 99% at 384, ifeval 97% at 256;
+# es2.Spec2.task_tokens), about 12% fewer tokens decoded a round.
+VIBE_TASK_TOKENS = {"math": 448, "gsm8k": 384, "ifeval": 256}
 MAX_LONG = 520  # a Hugging Face task's longest prompt, in characters (about 150 tokens)
 MAX_REASON = 1000  # the longest prompt of the tasks with room to think (ifeval, gsm8k, math), about 300 tokens
 POOL = 20_000  # the most rows a task keeps the indices of for each part

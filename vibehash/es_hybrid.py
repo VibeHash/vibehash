@@ -131,6 +131,7 @@ class _Hybrid:
         self.bias = torch.full((n, L), float("-inf"), dtype=dt, device=dev)
         self.zero = z(())
         self.tok = z(n, d=torch.long)
+        self.cap = torch.full((n,), T, dtype=torch.long, device=dev)  # each row's most tokens (Spec2.task_tokens)
         self.pos = z(n, d=torch.long)
         self.col = z(n, d=torch.long)  # each row's step: the answer token it reads next is number col
         self.slot = z(n, d=torch.long)  # the KV cache slot it writes: W - 1 + col
@@ -239,7 +240,7 @@ class _Hybrid:
         else:
             nxt = logits.argmax(-1)
             self.out.index_put_((rows, col), nxt)
-            fin = (nxt[:, None] == self.eos).any(-1) | (self.col + 1 >= self.T)
+            fin = (nxt[:, None] == self.eos).any(-1) | (self.col + 1 >= self.cap)
             if self.loop:  # the token p back is in the row's own answer so far: out[row, col - p], for col >= p
                 lag = self.col[:, None] - self.lags[None, :]
                 hit = (lag >= 0) & (self.out[rows[:, None], lag.clamp(min=0)] == nxt[:, None])
@@ -273,10 +274,13 @@ class _Hybrid:
         cur.wait_stream(self.stream)
         self.graphs[forced] = g
 
-    def decode(self, rt, rows, members, fac, sigma, rank, forced: bool, order):
-        """Every row in `order` (row ids) through the resident pass, waiting rows taking slots as rows finish."""
+    def decode(self, rt, rows, members, fac, sigma, rank, forced: bool, order, caps=None):
+        """Every row in `order` (row ids) through the resident pass, waiting rows taking slots as rows finish. caps:
+        each prompt's most answer tokens (answering stops a row there), T for all when None."""
         dev, dt, n = self.dev, self.dt, self.n
         nq = len(rows)
+        capq = torch.tensor([min(int(c), self.T) for c in caps] if caps is not None else [self.T] * nq,
+                            dtype=torch.long, device=dev)
         self.load({nm: (A.to(dt), B.to(dt)) for nm, (A, B) in fac.items()})
         r = next(iter(fac.values()))[0].shape[2]
         M = len(members)
@@ -315,6 +319,7 @@ class _Hybrid:
                         self.vc[l][slots] = b[q]
                 self.bias[slots] = pbias[q]
                 self.tok[slots] = last_tok[q]
+                self.cap[slots] = capq[q]
                 self.pos[slots] = last_pos[q]
                 self.col[slots] = 0
                 if self.loop:
@@ -345,6 +350,15 @@ def _engine(rt, linears, fac, R, rows, T, loop=()):
     return eng
 
 
+def longest_first(lens) -> list[int]:
+    """The rows with something to read (length > 0), longest first (ties in row order): the order teacher forcing
+    takes them into the pass. A row's numbers don't depend on when it starts or what shares its pass (the module's
+    docstring), so the order only decides how long the pass runs: one long row started last runs on alone at the
+    full pass's cost. Measured on vibe-08b-2's replay (2026-11-07, RTX 4070 SUPER; 64 members x 16 targets of 2 to
+    483 tokens, 846 steps' work for 64 slots): 28.6 s in row order, 22.2 s longest first."""
+    return sorted((r for r, n in enumerate(lens) if n > 0), key=lambda r: -lens[r])
+
+
 def _pin_precision():
     # The recurrent state's products are float32 GEMMs: TF32 would round them otherwise, and differently from a
     # checker that left it off (on Intel GPUs too, through oneDNN). compute.pin_precision: only writes the settings.
@@ -352,19 +366,33 @@ def _pin_precision():
     pin_precision()
 
 
-def answer(rt, linears, fac, members, rows, T, sigma, rank, loop=()):
+def answer_order(nq: int, M: int, expect=None) -> list[int]:
+    """The order answering takes rows (member k's answer to prompt q is row k * nq + q) into the pass: member by member
+    without `expect`; with it (each prompt's expected answer length), the prompts expected longest first, every
+    member's row of a prompt before the next prompt's. Like longest_first, it decides only how long the pass runs."""
+    if expect is None:
+        return list(range(M * nq))
+    qs = sorted(range(nq), key=lambda q: -float(expect[q]))
+    return [k * nq + q for q in qs for k in range(M)]
+
+
+def answer(rt, linears, fac, members, rows, T, sigma, rank, loop=(), caps=None, expect=None):
     """Every member's greedy answers to every prompt (es_fast.answer_members on a hybrid model). loop: the job's
-    loop_stop, () for none: a looping row stops there (its tokens past that are another row's, left in the buffer)."""
+    loop_stop, () for none: a looping row stops there (its tokens past that are another row's, left in the buffer).
+    caps: each prompt's most tokens (Spec2.task_tokens), T for all when None. expect: each prompt's expected answer
+    length, to take the long ones first (answer_order); the answers are the same either way."""
     from .es2 import cut_loop
 
     _pin_precision()
     nq, M = len(rows), len(members)
     R = M * nq
     eng = _engine(rt, linears, fac, R, rows, T, loop)
-    eng.decode(rt, rows, members, fac, sigma, rank, False, torch.arange(R))
+    eng.decode(rt, rows, members, fac, sigma, rank, False, answer_order(nq, M, expect), caps)
     toks = eng.out[:R].tolist()
     answers = []
-    for row in toks:
+    for i, row in enumerate(toks):
+        if caps is not None:
+            row = row[:caps[i % nq]]  # a row stopped at its cap: what's past it is stale
         row = cut_loop(row, loop)  # first: a row that stopped looping has stale tokens past its end
         cut = next((i + 1 for i, t in enumerate(row) if t in rt.eos), len(row))
         answers.append(row[:cut])
@@ -390,7 +418,7 @@ def forced(rt, linears, fac, members, rows, answers, T, sigma, rank):
     eng.alen.copy_(alen)
     eng.gap.zero_()
     eng.lp.zero_()
-    eng.decode(rt, rows, members, fac, sigma, rank, True, torch.nonzero(alen[:R]).squeeze(1).tolist())
+    eng.decode(rt, rows, members, fac, sigma, rank, True, longest_first(alen[:R].tolist()))
     cols = torch.arange(T, device=eng.dev)[None, :] < eng.alen[:R, None]
     gaps = torch.where(cols, eng.gap[:R], 0.0).max(-1).values.view(M, nq)
     lps = torch.where(cols, eng.lp[:R], 0.0).sum(-1) / eng.alen[:R].clamp(min=1)
