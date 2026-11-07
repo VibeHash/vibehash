@@ -22,6 +22,7 @@ TEMPLATE = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content']
             "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}")
 _done: dict[str, dict] = {}
 _lock = threading.Lock()
+RETRY_S = 600.0  # how long a self-check that errored stands before it's tried again
 
 
 def tiny_qwen35(folder: Path, seed: int = 0) -> Path:
@@ -97,14 +98,17 @@ def check(device: str) -> dict:
 
 
 def cached(device: str) -> dict:
-    """check(device), once a device and process; an error is {"ok": False, "error": "..."}."""
+    """check(device), once a device and process; an error is {"ok": False, "error": "..."}. A result is kept for
+    good, an error only for RETRY_S: it may be passing (the card briefly full while another program loads)."""
     with _lock:
-        if device not in _done:
+        got = _done.get(device)
+        if got is None or ("error" in got and time.monotonic() - got["at"] >= RETRY_S):
             try:
-                _done[device] = check(device)
-            except Exception as e:  # noqa: BLE001 - whatever stops it, the device can't mine Evo
-                _done[device] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
-        return _done[device]
+                got = check(device)
+            except Exception as e:  # noqa: BLE001 - whatever stops it, the device can't mine Evo for now
+                got = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}", "at": time.monotonic()}
+            _done[device] = got
+        return got
 
 
 def problem(device: str) -> str | None:

@@ -38,6 +38,22 @@ class ProblemTests(unittest.TestCase):
             self.assertIsNone(evo_selftest.problem("cuda:0"))
         check.assert_called_once_with("cuda:0")
 
+    def test_an_error_is_tried_again_after_a_while_a_result_never(self):
+        """A check that errored (the card briefly full) stands RETRY_S, then is tried again; a failed result stays."""
+        clock = [1000.0]
+        with mock.patch.object(evo_selftest.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(evo_selftest, "check", side_effect=RuntimeError("out of memory")) as check:
+            self.assertIn("out of memory", evo_selftest.problem("cuda:0"))
+            clock[0] += evo_selftest.RETRY_S - 1
+            evo_selftest.problem("cuda:0")
+            self.assertEqual(check.call_count, 1)
+            check.side_effect, check.return_value = None, {"ok": False, "worst": 0.5, "swap": 0.2, "seconds": 1.0}
+            clock[0] += 2
+            self.assertIn("came back 0.5", evo_selftest.problem("cuda:0"))
+            clock[0] += 10 * evo_selftest.RETRY_S
+            evo_selftest.problem("cuda:0")
+            self.assertEqual(check.call_count, 2)
+
     def test_what_a_failure_says(self):
         with mock.patch.object(evo_selftest, "check", return_value={"ok": False, "worst": 0.125, "swap": 0.2,
                                                                      "seconds": 1.0}):

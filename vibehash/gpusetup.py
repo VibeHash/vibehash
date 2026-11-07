@@ -286,10 +286,11 @@ def devices() -> list[dict]:
     try:
         out = subprocess.run([sys.executable, "-m", "vibehash", "devices", "--json"], capture_output=True, text=True,
                              timeout=300, env=env)
-        if out.returncode not in (0, 1) and not out.stdout.strip():
-            # The test died without a word: on Windows an access violation (0xC0000005) as PyTorch loads, which a
-            # graphics driver too old for the build causes (INTEL_MIN_DRIVER).
-            code = out.returncode & 0xFFFFFFFF
+        code = out.returncode & 0xFFFFFFFF
+        if sys.platform == "win32" and code >= 0xC0000000 and not out.stdout.strip():
+            # The test died without a word, of a Windows exception (an NTSTATUS error code): an access violation
+            # (0xC0000005) as PyTorch loads, which a graphics driver too old for the build causes (INTEL_MIN_DRIVER).
+            # Anything else that fails without output (a usage error, Linux's OOM killer) is "no GPU found", as before.
             return [{"id": "gpu", "label": "Your graphics card", "ready": False,
                      "problem": f"PyTorch crashed as it started (exit code {code:#x}), which an outdated graphics "
                                 "driver usually causes"}]

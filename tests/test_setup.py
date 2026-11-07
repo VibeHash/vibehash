@@ -345,7 +345,21 @@ class CrashTests(unittest.TestCase):
 
         from vibehash import gpusetup
         died = mock.Mock(returncode=-1073741819, stdout="", stderr="")
-        with mock.patch.object(gpusetup.subprocess, "run", return_value=died):
+        with mock.patch.object(gpusetup.subprocess, "run", return_value=died), \
+                mock.patch.object(gpusetup.sys, "platform", "win32"):
             [d] = gpusetup.devices()
         self.assertFalse(d["ready"])
         self.assertIn("crashed as it started (exit code 0xc0000005)", d["problem"])
+
+    def test_other_silent_failures_are_still_no_gpu(self):
+        """Only a Windows exception code reads as a crash: a usage error (2), or a kill on Linux, finds nothing as
+        before."""
+        from unittest import mock
+
+        from vibehash import gpusetup
+        for platform, code in (("win32", 2), ("linux", -9), ("linux", -1073741819)):
+            with self.subTest(platform=platform, code=code):
+                died = mock.Mock(returncode=code, stdout="", stderr="")
+                with mock.patch.object(gpusetup.subprocess, "run", return_value=died), \
+                        mock.patch.object(gpusetup.sys, "platform", platform):
+                    self.assertEqual(gpusetup.devices(), [])
