@@ -1,6 +1,7 @@
 """Evo across machine kinds (docs/CROSS-HARDWARE.md, es2.Spec2.cross_margin): a tight margin between machines with the
-same number setup and a wider one across, each claim's first checker paired with its worker's setup, and a same-setup
-approval overruling a cross-setup rejection on gaps alone up to the job's referee floor (twice its cross_margin)."""
+same number setup and a wider one across, a referee of its worker's setup added to a claim whose drawn checkers don't
+share it, and a same-setup approval overruling a cross-setup rejection on gaps alone up to the job's referee floor
+(twice its cross_margin)."""
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -106,20 +107,31 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(self.judge([task("alike", True), task("mac", False, gap=0.75)], 0.0).verdict, Verdict.UNCHECKED)
 
     def test_the_paired_checker_cant_carry_a_claim_alone(self):
-        """A worker naming a setup only it and a friend share gets the friend first: if the checker drawn from
-        everyone doesn't answer, the friend's approval alone pays nothing."""
+        """A worker naming a setup only it and a friend share gets the friend as referee: if the checkers drawn from
+        everyone don't answer, the friend's approval alone pays nothing."""
         from vibehash.tasks import Verdict
         self.assertEqual(self.judge([task("friend", True, paired=True)]).verdict, Verdict.UNCHECKED)
         self.assertEqual(self.judge([task("friend", True, paired=True), task("mac", True)]).verdict, Verdict.ACCEPTED)
         self.assertEqual(self.judge([task("friend", True, paired=True)], 0.0).verdict, Verdict.ACCEPTED)  # (no field)
         self.assertEqual(self.judge([]).verdict, Verdict.UNCHECKED)
 
+    def test_a_referees_approval_doesnt_outweigh_a_cheats_gap(self):
+        """The friend approves, one drawn checker is a friend too and the other honest: the honest one's rejection
+        with a cheat's gap stands, and so does one for anything but gaps."""
+        from vibehash.tasks import Verdict
+        for honest in (task("mac", False, gap=3.5), task("mac", False)):
+            got = [task("friend", True, paired=True), task("alike", True), honest]
+            self.assertEqual(self.judge(got).verdict, Verdict.UNCHECKED)
+        # an honest machine of another kind a little over the cross margin: the referee overrules it
+        got = [task("friend", True, paired=True), task("mac", False, gap=0.75)]
+        self.assertEqual(self.judge(got).verdict, Verdict.ACCEPTED)
+
 
 class PairingTests(unittest.TestCase):
-    def tasks(self, cross_margin, regs, worker="w"):
-        c = fake_round(regs, holders={"u1": {worker}})
-        c.r.reveals = {("u1", worker): None}
-        c.r.units = {"u1": SimpleNamespace(unit_id="u1")}
+    def tasks(self, cross_margin, regs, worker="w", uid="u1"):
+        c = fake_round(regs, holders={uid: {worker}})
+        c.r.reveals = {(uid, worker): None}
+        c.r.units = {uid: SimpleNamespace(unit_id=uid)}
         job = SimpleNamespace(spec=spec(cross_margin=cross_margin))
         pool = lambda exclude: sorted(a for a in regs if a not in exclude)  # noqa: E731
         with mock.patch("vibehash.coordinator.es.sample", return_value=[0, 1]):
@@ -127,13 +139,44 @@ class PairingTests(unittest.TestCase):
         self.paired = [t.verifier for t in got.values() if t.paired]
         return [t.verifier for t in got.values()]
 
-    def test_the_first_checker_shares_the_workers_setup(self):
+    @staticmethod
+    def old_draw(regs, worker="w", uid="u1"):
+        from vibehash.coordinator import Draw, _pick
+        c = fake_round(regs)
+        mine = Draw(b"check", c.r.beacon, c.r.secret, uid.encode(), worker.encode())
+        return sorted(_pick(mine, sorted(a for a in regs if a != worker), CHECKERS))
+
+    def test_a_referee_of_the_workers_setup_is_added(self):
+        """The CHECKERS drawn from everyone, as without pairing, and the only other CUDA machine as a third, unless
+        it was drawn anyway."""
         regs = {"w": CUDA, "alike": CUDA, **{f"mac{i}": MAC for i in range(12)}}
-        got = self.tasks(0.5, regs)
-        self.assertEqual(len(got), CHECKERS)
-        self.assertIn("alike", got)  # the only other CUDA machine, among 13 candidates: always picked
-        self.assertNotIn("w", got)  # never its own unit's holder
-        self.assertEqual(self.paired, ["alike"])  # and marked so: it can't carry the claim alone (_judge_es2)
+        cases = set()
+        for n in range(40):
+            got = self.tasks(0.5, regs, uid=f"u{n}")
+            drawn = sorted(v for v in got if v not in self.paired)
+            self.assertEqual(drawn, self.old_draw(regs, uid=f"u{n}"))
+            self.assertIn("alike", got)
+            self.assertNotIn("w", got)  # never its own unit's holder
+            if "alike" in drawn:
+                self.assertEqual((len(got), self.paired), (CHECKERS, []))  # drawn: it referees as it checks
+            else:
+                self.assertEqual((len(got), self.paired), (CHECKERS + 1, ["alike"]))  # can't carry it (_judge_es2)
+            cases.add(bool(self.paired))
+        self.assertEqual(cases, {True, False})
+
+    def test_a_ring_gets_no_more_of_the_deciding_checkers(self):
+        """Five friends naming a made-up setup only they registered, among sixteen others: one always referees a
+        friend's claim, but the two checkers that decide it are the draw from everyone, so both are friends as
+        rarely as without pairing."""
+        ring = dict(CUDA, units=57)
+        regs = {**{f"h{i:02d}": (CUDA if i % 2 else MAC) for i in range(16)}, **{f"r{i}": ring for i in range(5)}}
+        for n in range(40):
+            got = self.tasks(0.5, regs, worker="r0", uid=f"u{n}")
+            drawn = sorted(v for v in got if v not in self.paired)
+            self.assertEqual(drawn, self.old_draw(regs, worker="r0", uid=f"u{n}"))
+            if not any(v.startswith("r") for v in drawn):
+                self.assertEqual(len(self.paired), 1)
+                self.assertTrue(self.paired[0].startswith("r"))
 
     def test_without_a_match_its_the_draw_as_before(self):
         """A paired job whose worker's setup nobody else registered (or that has none): the old draw exactly."""

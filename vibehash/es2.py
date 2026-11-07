@@ -88,10 +88,10 @@ class Spec2(es.EsSpec):
     loop_stop: tuple = ()
     # The margin between machines that do Evo's arithmetic differently (hardware.numerics: bf16 against float32,
     # another card's SM count, another CUDA or PyTorch), `margin` being then for two with the same setup, whose gaps
-    # are exactly 0. Set, it also pairs each claim's first checker with the worker's setup when one registered, and
-    # lets a same-setup approval overrule a cross-setup rejection on gaps alone up to referee_floor()
-    # (Coordinator._es_tasks and _settle_es2; docs/CROSS-HARDWARE.md). 0: one margin for every pair and checkers drawn
-    # from everyone, as before it (left out of the spec).
+    # are exactly 0. Set, it also gives a claim whose drawn checkers don't share the worker's setup a referee who
+    # does, when one registered, and lets a same-setup approval overrule a cross-setup rejection on gaps alone up to
+    # referee_floor() (Coordinator._es_tasks and _settle_es2; docs/CROSS-HARDWARE.md). 0: one margin for every pair
+    # and no referee, as before it (left out of the spec).
     cross_margin: float = 0.0
 
     def __post_init__(self):

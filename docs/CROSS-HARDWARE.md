@@ -28,7 +28,7 @@ honest worker loses the round and nothing tells that apart from a checker turnin
 | G | Checkers send their **worst gap** with each verdict the gaps alone decided; the node counts them by pair of setups at `/network` (`gaps`) | no | **built** |
 | F1 | AMD: matmuls on rocBLAS, not hipBLASLt (deterministic mode covers it; GPUS.md risk 3) | no | **built** |
 | F2 | macOS 14: `install-gpu` installs PyTorch 2.14, which still uses the GPU there (GPUS.md risk 12) | no | **built** |
-| C | **Pair checkers by setup**: each claim's first checker, when there is one, shares the worker's setup | yes | **built** |
+| C | **Pair checkers by setup**: a claim whose two drawn checkers don't share the worker's setup gets a third that does, when there is one, as referee | yes | **built** |
 | D | **Margin by pair**: `margin` for the same setup (tight: their gaps are 0), `cross_margin` across setups | yes | **built** |
 | E | **A matching machine referees**: a cross-setup rejection on gaps alone, up to twice `cross_margin`, is overruled when a same-setup checker approved | yes | **built** |
 | F3 | Evo without bf16 split-K rounding (GPUS.md risk 2), as a spec field, after a two-card measurement | yes | after |
@@ -40,6 +40,9 @@ and a node or miner without the code refuses a spec with it (as with `loop_stop`
 job uses it. `vibehash job template --evo` turns it on: `margin` 0.1 for alike machines and `cross_margin` 0.5
 across (`es_local.V2_PAIRED_MARGIN`, `V2_CROSS_MARGIN`); `--cross-margin X` or `off` changes it.
 
+A referee is one more check of the claim, so a paired job's checkers do up to half again as much checking: none
+more for a claim whose worker's setup nobody else registered, or one of whose drawn checkers shares it.
+
 Where each part is: pairing in `Coordinator._es_tasks`; the worker's setup goes to its checkers with the task
 (`Coordinator.es_task`), and a checker picks its margin with `Spec2.margin_for` (`es_client.Es2Work.check_many`);
 the referee is `Coordinator._overruled`, in `_settle_es2`. The census counts each gap against its pair's margin.
@@ -48,8 +51,14 @@ the referee is `Coordinator._overruled`, in `_settle_es2`. The census counts eac
 
 A worker names its own setup, and could lie to be paired with a friend. That buys little:
 
-- only the first checker is chosen by setup; the second is drawn from everyone, as now, and the first can't carry
-  a claim alone: if only it answered, the claim is unchecked and unpaid (`Coordinator._judge_es2`);
+- the two checkers that decide a claim are drawn from everyone, exactly as without pairing; the one chosen by setup
+  is a third, added only when neither of them shares the worker's setup, and it only referees: if only it answered,
+  the claim is unchecked and unpaid, and a drawn checker's rejection stands unless it's overruled
+  (`Coordinator._judge_es2`);
+- so a ring of friends that all name one made-up setup always gets a friend as referee, but still needs both drawn
+  checkers to be friends to wave through a claim with a cheat's gaps, as now. (An earlier draft drew the first
+  checker by setup and the second from everyone: a ring holding 20% of the checkers then had both of a claim's
+  checkers 16% of the time, against 3.5% for two drawn from everyone);
 - a worker can't leave its setup out to be held to the wider margin by everyone: a job with a cross margin refuses
   a registration without one;
 - a rejection with a gap over twice `cross_margin` (1.0 for the template's 0.5; a cheat on Qwen3.5-0.8B sits 3.5

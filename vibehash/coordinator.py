@@ -194,7 +194,7 @@ class VerifyTask:
     score: tuple[float, float] | None = None  # what a scorer reported: (loss, accuracy)
     donor: str = ""  # a DeepSeek prep canary's: the unit whose claim it presents as `unit`'s
     gap: float | None = None  # an Evo check's worst gap, when the checker sent it (valid_gap)
-    paired: bool = False  # an Evo check drawn for sharing its worker's number setup (Spec2.cross_margin)
+    paired: bool = False  # an Evo referee, added for sharing its worker's number setup (Spec2.cross_margin)
 
 
 @dataclass
@@ -1473,9 +1473,11 @@ class Coordinator:
     def _es_tasks(self, job: TrainingJob, draw: Draw, pool, task_id) -> dict[str, VerifyTask]:
         """An ES round's checks: each claim to CHECKERS staked checkers (never its unit's holder), who teacher-force the
         same beacon-chosen members of it (es.sample, the task's `segments`) and reject naming the first bad one. No
-        canaries yet: approving without checking isn't caught (es.py's notes). In a job with a cross_margin the first
-        checker is drawn from those that registered the worker's number setup, when any did, and the rest from
-        everyone: a worker can name a setup to be paired with a friend, but only the one (docs/CROSS-HARDWARE.md)."""
+        canaries yet: approving without checking isn't caught (es.py's notes). In a job with a cross_margin, a claim
+        whose drawn checkers don't include one of the worker's number setup gets one more, a referee drawn from those
+        that registered it, when any did (docs/CROSS-HARDWARE.md). The CHECKERS are drawn from everyone exactly as
+        without it: a worker can name a setup only it and its friends registered, and always get a friend as referee,
+        but a referee can't carry a claim (_judge_es2), so a ring still needs both drawn checkers to be friends."""
         r = self.r
         tasks = []
         paired = bool(getattr(job.spec, "cross_margin", 0.0))
@@ -1483,15 +1485,14 @@ class Coordinator:
             chosen = es.sample(job.spec, r.beacon, r.secret, uid, addr)
             mine = Draw(b"check", r.beacon, r.secret, uid.encode(), addr.encode())
             candidates = pool(set(r.holders[uid]))
-            if paired:
-                setup = self._setup(addr)
-                first = _pick(mine, [a for a in candidates if setup is not None and self._setup(a) == setup], 1)
-                verifiers = first + _pick(mine, [a for a in candidates if a not in first], CHECKERS - len(first))
-            else:
-                verifiers = _pick(mine, candidates, CHECKERS)
-            for verifier in verifiers:
+            verifiers = _pick(mine, candidates, CHECKERS)
+            referee = []
+            setup = self._setup(addr) if paired else None
+            if setup is not None and not any(self._setup(v) == setup for v in verifiers):
+                referee = _pick(mine, [a for a in candidates if a not in verifiers and self._setup(a) == setup], 1)
+            for verifier in verifiers + referee:
                 tasks.append(VerifyTask(task_id(uid, addr, verifier), verifier, r.units[uid], addr, chosen, {}, kind="es",
-                                        paired=paired and verifier in first))
+                                        paired=verifier in referee))
         tasks.sort(key=lambda t: t.task_id)
         return {tasks[i].task_id: tasks[i] for i in draw.shuffle(range(len(tasks)))}
 
@@ -2518,9 +2519,9 @@ class Coordinator:
     def _judge_es2(self, key, got: list, spec) -> UnitResult:
         """A rule-2 claim's result from its checkers' verdicts (`got`, those that answered): accepted when someone
         approved and nobody rejected, or (cross_margin) when every rejection is overruled (_overruled); else unchecked,
-        unpaid and out of the update. In a cross_margin job the checker paired by setup can't carry a claim alone:
-        a worker naming a setup only it and a friend registered always gets that friend first, so an approval also
-        needs a checker drawn from everyone to have answered."""
+        unpaid and out of the update. In a cross_margin job the referee paired by setup can't carry a claim: a worker
+        naming a setup only it and a friend registered always gets that friend as referee, so an approval also needs
+        a checker drawn from everyone to have answered, and every rejection by one stands unless overruled."""
         unit, worker = self.r.units[key[0]], key[1]
         if spec.cross_margin and got and all(t.paired for t in got):
             return UnitResult(unit, worker, Verdict.UNCHECKED, None,
