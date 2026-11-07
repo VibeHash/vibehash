@@ -477,7 +477,9 @@ class Es2Work:
             runtime2(job.spec, self.work.device())
         except Exception as e:  # noqa: BLE001 - whatever stops it, this worker can't take the job
             return f"job {job.job_id}: {e}"
-        return None
+        from . import evo_selftest
+        why = evo_selftest.problem(self.work.device())  # its own answers check exactly, or no Evo work (once a device)
+        return f"job {job.job_id}: {why}" if why else None
 
     def runtime(self, job: TrainingJob) -> es.Runtime:
         from .es_local import find_base

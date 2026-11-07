@@ -541,6 +541,34 @@ def finetune_check(rep: Report, device: Device | None, found: list[Device]) -> N
                 device=gpu.id, worst=got["worst"])
 
 
+def evo_check(rep: Report, device: Device | None, found: list[Device]) -> None:
+    """Evo on the GPU it would mine on: its own answers on a tiny Qwen3.5, checked by itself, are exactly greedy
+    (evo_selftest). A card that fails takes no Evo work."""
+    from . import compute
+
+    gpu = device if device is not None and device.id != "cpu" else next((d for d in found if d.id != "cpu" and not d.problem), None)
+    if not compute.torch_available():
+        rep.add("evo", "skip", "Evo check: skipped (needs PyTorch; `vibehash install-gpu` installs it for a GPU)")
+        return
+    if gpu is None:
+        rep.add("evo", "skip", "Evo check: skipped (Evo mines on a GPU, and none is usable here)")
+        return
+    from . import evo_selftest
+    try:
+        got = evo_selftest.check(gpu.id)
+    except Exception as e:  # noqa: BLE001
+        rep.add("evo", "fail", f"Evo check on {gpu.id}: failed ({type(e).__name__}: {str(e)[:200]}). This computer "
+                "won't take Evo jobs, and can still mine the others", device=gpu.id)
+        return
+    if got["ok"]:
+        rep.add("evo", "ok", f"Evo check on {gpu.id} (a tiny Qwen3.5, {got['seconds']:.1f} s): its own answers check "
+                "exactly (gap 0)" + (f", and a twin's answers claimed as its own are caught ({got['swap']:.3g} below)"
+                                     if got["swap"] is not None else ""), device=gpu.id, worst=got["worst"])
+    else:
+        rep.add("evo", "fail", f"Evo check on {gpu.id}: {evo_selftest.problem_of(gpu.id, got)}. This computer won't "
+                "take Evo jobs, and can still mine the others", device=gpu.id, worst=got["worst"])
+
+
 def model_unit(name: str, device: str, yes: bool = False, ask=None, say=print) -> dict:
     """One real unit of a ready model on `device`: its weights fetched as a worker fetches them (asked first), 16 Adam
     steps at the batch a job would use, on synthetic chats of 512 tokens (the longest `train` makes), timed, with
@@ -1053,6 +1081,7 @@ def run(node: str | None = None, device: str = "auto", offline: bool = False, mo
     found = devices(rep)
     trained = training(rep, found, device)
     finetune_check(rep, trained, found)
+    evo_check(rep, trained, found)
     if model:
         model_check(rep, model, trained if trained is not None and trained.id != "cpu" else None, yes)
     path, address, encrypted = wallet_address()
