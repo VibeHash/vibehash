@@ -992,7 +992,7 @@ vibehash job history fruit-demo --csv fruit-demo.csv
 Write a starter job file, for full control with post-job.
 
 ```
-vibehash job template [-h] [--out OUT] [--id ID] [--gpu] [--evo MODEL] [--tasks TASKS] [--rounds ROUNDS] [--max-tokens N] [--loop-stop PERIOD,RUN]
+vibehash job template [-h] [--out OUT] [--id ID] [--gpu] [--evo MODEL] [--tasks TASKS] [--rounds ROUNDS] [--max-tokens N] [--loop-stop PERIOD,RUN] [--cross-margin X]
 ```
 
 Flags:
@@ -1005,6 +1005,7 @@ Flags:
 - `--rounds ROUNDS`: with --evo: rounds on each task before the next (default 12).
 - `--max-tokens N`: with --evo: the longest answer, in tokens (default 64; 512 with --tasks vibe, whose math and instructions need room to reason).
 - `--loop-stop PERIOD,RUN`: with --evo: end an answer once RUN tokens in a row each repeat the token up to PERIOD before (a loop), or off (default 32,48 with --tasks vibe, else off).
+- `--cross-margin X`: with --evo: the margin, in logits, between machines that do the arithmetic differently, with 0.1 for alike ones and checkers paired by setup (default 0.5), or off for one margin of 0.5 and no pairing.
 
 Examples:
 

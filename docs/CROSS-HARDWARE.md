@@ -28,25 +28,31 @@ honest worker loses the round and nothing tells that apart from a checker turnin
 | G | Checkers send their **worst gap** with each verdict the gaps alone decided; the node counts them by pair of setups at `/network` (`gaps`) | no | **built** |
 | F1 | AMD: matmuls on rocBLAS, not hipBLASLt (deterministic mode covers it; GPUS.md risk 3) | no | **built** |
 | F2 | macOS 14: `install-gpu` installs PyTorch 2.14, which still uses the GPU there (GPUS.md risk 12) | no | **built** |
-| C | **Pair checkers by setup**: each claim's first checker, when there is one, shares the worker's setup | yes | next |
-| D | **Margin by pair**: `margin` for the same setup (tight: their gaps are 0), `cross_margin` across setups | yes | next |
-| E | **A matching machine referees**: a cross-setup rejection on gaps alone, under the cheat floor, is overruled when a same-setup checker approved | yes | next |
+| C | **Pair checkers by setup**: each claim's first checker, when there is one, shares the worker's setup | yes | **built** |
+| D | **Margin by pair**: `margin` for the same setup (tight: their gaps are 0), `cross_margin` across setups | yes | **built** |
+| E | **A matching machine referees**: a cross-setup rejection on gaps alone, up to twice `cross_margin`, is overruled when a same-setup checker approved | yes | **built** |
 | F3 | Evo without bf16 split-K rounding (GPUS.md risk 2), as a spec field, after a two-card measurement | yes | after |
 | F4 | An Evo self-test: a card that can't reproduce its own answers exactly (gap 0) doesn't take Evo work (GPUS.md risk 13) | no | after |
 | H | An integer rule: int8 weights and activations, int32 sums, fixed-point nonlinearities. Bit-identical on every GPU, CPU, Mac and NPU, so the margin is 0 | yes | research |
 
 C, D and E come together, behind one spec field (`cross_margin`), so jobs posted before it run exactly as they did,
 and a node or miner without the code refuses a spec with it (as with `loop_stop`): nodes and miners upgrade before a
-job uses it.
+job uses it. `vibehash job template --evo` turns it on: `margin` 0.1 for alike machines and `cross_margin` 0.5
+across (`es_local.V2_PAIRED_MARGIN`, `V2_CROSS_MARGIN`); `--cross-margin X` or `off` changes it.
+
+Where each part is: pairing in `Coordinator._es_tasks`; the worker's setup goes to its checkers with the task
+(`Coordinator.es_task`), and a checker picks its margin with `Spec2.margin_for` (`es_client.Es2Work.check_many`);
+the referee is `Coordinator._overruled`, in `_settle_es2`. The census counts each gap against its pair's margin.
 
 ### Why pairing by setup is safe
 
 A worker names its own setup, and could lie to be paired with a friend. That buys little:
 
 - only the first checker is chosen by setup; the second is drawn from everyone, as now;
-- a rejection with a gap over the cheat floor, or for anything but gaps (tokens that don't decode to the text, an
+- a rejection with a gap over twice `cross_margin` (1.0 for the template's 0.5; a cheat on Qwen3.5-0.8B sits 3.5
+  or more below), or for anything but gaps (tokens that don't decode to the text, an
   answer that doesn't end right, a replay log-probability off), always stands;
-- so a liar's friend can wave through only answers within the floor of the greedy choice: near-greedy work, which
+- so a liar's friend can wave through only answers within twice `cross_margin` of the greedy choice: near-greedy work, which
   pays no better than honest work (workers are paid by accepted FLOPs, not by rewards);
 - a worker that names a setup it doesn't have is held to that setup's tight margin, and gets its own work rejected.
 

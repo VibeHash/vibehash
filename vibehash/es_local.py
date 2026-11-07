@@ -250,6 +250,12 @@ V2_MIX = True
 # The cheat that pays, skipping work (claiming a twin's answers), sat 3.5 or more below in all 128 members tried.
 # lp_tol 0.05: workers and checkers score the replay answers on the same path (es_fast.score_items).
 V2_COMPUTE_S = 300
+# Margins by pair of number setups (Spec2.cross_margin, docs/CROSS-HARDWARE.md), as `job template --evo` sets them:
+# checkers are paired with the worker's setup when one registered, and two machines that round alike give gaps of
+# exactly 0, so 0.1 (the one-GPU-kind margin above, which catches all but 4.9% of letter swaps); across setups 0.5,
+# the margin above, which the census (/network's gaps) can show to be too tight or loose before the next job.
+V2_PAIRED_MARGIN = 0.1
+V2_CROSS_MARGIN = 0.5
 
 
 def tensors2_for(config) -> tuple:

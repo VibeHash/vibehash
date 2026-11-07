@@ -1271,7 +1271,10 @@ class Node:
                 t = r.tasks.get(str(body["task_id"]))
                 if t is not None and t.gap is not None:
                     setup = lambda a: hardware.numerics_key(r.regs[a].numerics) if a in r.regs else None  # noqa: E731
-                    self.gaps.add(time.time(), setup(t.submitter), setup(addr), t.gap, float(job.spec.margin))
+                    worker, checker = setup(t.submitter), setup(addr)
+                    same = worker is not None and worker == checker
+                    margin = job.spec.margin_for(same) if hasattr(job.spec, "margin_for") else job.spec.margin
+                    self.gaps.add(time.time(), worker, checker, t.gap, float(margin))  # the pair's own margin
                 return {"ok": True, "receipt": self._receipt(kind, env)}
             if kind == "move":
                 view = c.submit_move(addr, {k: body.get(k) for k in ("game", "n", "move")}, envelope=env, now=time.time())

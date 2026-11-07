@@ -305,6 +305,23 @@ class StarterTemplateTests(unittest.TestCase):
                          [es_tasks.VIBE_MAX_TOKENS, 96, 64])
         self.assertTrue(got["vibe"]["mix"])
 
+    def test_the_template_pairs_checkers_by_setup(self):
+        """Spec2.cross_margin: on by default, 0.1 for alike machines and 0.5 across; a given margin, or off."""
+        from vibehash import cli
+        with tempfile.TemporaryDirectory() as d:
+            folder = tiny_model(Path(d) / "tiny", seed=3)
+            for name, extra in (("default", []), ("wide", ["--cross-margin", "1.25"]), ("off", ["--cross-margin", "off"])):
+                with mock.patch("sys.stdout"):
+                    cli.main(["job", "template", "--evo", str(folder), "--id", name, "--out", str(Path(d) / name),
+                              *extra])
+            got = {n: json.loads((Path(d) / n).read_text())["es"] for n in ("default", "wide", "off")}
+            with mock.patch("sys.stdout"), self.assertRaisesRegex(SystemExit, "--cross-margin is a number"):
+                cli.main(["job", "template", "--evo", str(folder), "--out", str(Path(d) / "x"), "--cross-margin", "wide"])
+        self.assertEqual((got["default"]["margin"], got["default"]["cross_margin"]), (0.1, 0.5))
+        self.assertEqual((got["wide"]["margin"], got["wide"]["cross_margin"]), (0.1, 1.25))
+        self.assertEqual(got["off"]["margin"], 0.5)  # one margin for every pair, as before the field
+        self.assertNotIn("cross_margin", got["off"])
+
 
 @unittest.skipUnless(HAVE_TORCH, "needs PyTorch and transformers")
 class NetworkTests2(unittest.TestCase):
@@ -375,7 +392,10 @@ class NetworkTests2(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         folder = tiny_model(root / "tiny", seed=1)
-        spec = tiny_spec2(folder)
+        # Checkers paired by number setup (Spec2.cross_margin): one worker below says it's another kind of machine.
+        # The tiny model's cheats sit far closer to greedy than a real model's (0.4 here, 3.5 on Qwen3.5-0.8B), so its
+        # margins are scaled down with them: 1e-3 for alike machines (tiny_spec2), 2e-3 across.
+        spec = tiny_spec2(folder, cross_margin=2e-3)
         patch = mock.patch.object(es, "reward", fake_reward)  # Countdown's check: a score the tiny model's babble earns
         patch.start()
         self.addCleanup(patch.stop)
@@ -401,6 +421,8 @@ class NetworkTests2(unittest.TestCase):
                                 cache_dir=root / f"cache{i}") for i, k in enumerate(workers)]
         clients[2].es.cheat = "liar"  # right/wrong scores its answers didn't earn: the node's re-score catches it
         clients[3].es.cheat = "forger"  # answers its twisted models didn't write: the checkers' teacher forcing does
+        clients[1].numerics = {"backend": "cuda", "dtype": "bf16", "arch": "sm_89", "units": 24, "torch": "2.15.0",
+                               "toolkit": "cuda13.2"}  # (it isn't: its gaps are still 0, checked at cross_margin)
         job = job_of(spec, "evo2-a", req.address, 6 * VIBE)
         api.send_tx(req, "post_job", "system", job.budget, job.spec_json())
         stop = threading.Event()
@@ -439,9 +461,10 @@ class NetworkTests2(unittest.TestCase):
         self.assertTrue(any(not ok and g > spec.margin for ok, g in gaps), gaps)
         census = api.get("/network")["gaps"]
         self.assertEqual(census["checks"], len(gaps))
-        [pair] = census["pairs"]
-        self.assertTrue(pair["same"] and pair["worker"].startswith("cpu float32 "), pair)
-        self.assertGreater(pair["over"], 0)
+        pairs = census["pairs"]
+        self.assertTrue(any(p["same"] for p in pairs) and any(not p["same"] for p in pairs), pairs)
+        self.assertTrue(all(p["worker"].split()[0] in ("cpu", "cuda") for p in pairs), pairs)
+        self.assertGreater(sum(p["over"] for p in pairs), 0)
         self.assertNotIn(workers[0].address, json.dumps(census))
         self.assertTrue(all("numerics" in e["body"] for b in mine for e in records[b.height]["registrations"]))
         # An Evo round pays for work when a claim was approved and nobody rejected it: those rounds minted 50 VIBE each,
