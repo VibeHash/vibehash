@@ -30,6 +30,7 @@ class Gpu:
     cuda: Version | None = None  # newest CUDA the NVIDIA driver supports
     compute: Version | None = None  # NVIDIA compute capability
     rocm: Version | None = None  # installed ROCm / HIP SDK
+    driver: tuple | None = None  # the graphics driver's version where Windows reports it (an Intel GPU's)
 
     def describe(self) -> str:
         extra = f" (driver supports CUDA {self.cuda[0]}.{self.cuda[1]})" if self.cuda else ""
@@ -111,10 +112,32 @@ def parse_nvidia_smi(header: str, query: str) -> list[Gpu]:
     return gpus
 
 
+# PyTorch's Intel GPU build for 2.15 needs Windows graphics driver 32.0.101.9033 or newer (docs/GPUS.md). With an
+# older one, 32.0.101.5768 on a Core Ultra 7 155H laptop (2026-11-07), `import torch` itself crashes the process
+# (an access violation, exit code 0xC0000005) before anything can say why.
+INTEL_MIN_DRIVER = (32, 0, 101, 9033)
+INTEL_DRIVER_SITE = "https://www.intel.com/content/www/us/en/support/detect.html"
+
+
+def _driver_version(text: str) -> tuple | None:
+    """"32.0.101.5768" -> (32, 0, 101, 5768)."""
+    parts = (text or "").strip().split(".")
+    return tuple(int(p) for p in parts) if len(parts) == 4 and all(p.isdigit() for p in parts) else None
+
+
+def _os_gpus() -> list[tuple[str, tuple | None]]:
+    """(name, driver version or None) for each graphics adapter the operating system lists."""
+    if sys.platform == "win32":
+        out = _run(["powershell", "-NoProfile", "-Command",
+                    "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + '|' + $_.DriverVersion }"])
+        rows = [line.strip().rsplit("|", 1) for line in (out or "").splitlines() if line.strip()]
+        return [(r[0].strip(), _driver_version(r[1]) if len(r) > 1 else None) for r in rows if r[0].strip()]
+    return [(name, None) for name in _os_gpu_names()]
+
+
 def _os_gpu_names() -> list[str]:
     if sys.platform == "win32":
-        out = _run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"])
-        return [line.strip() for line in (out or "").splitlines() if line.strip()]
+        return [name for name, _ in _os_gpus()]
     if sys.platform.startswith("linux"):
         out = _run(["lspci"]) or ""
         return [line.split(": ", 1)[1] for line in out.splitlines()
@@ -151,12 +174,13 @@ def detect() -> list[Gpu]:
         found += parse_nvidia_smi(_run(["nvidia-smi"]) or "", query or "")
     if sys.platform == "darwin" and platform.machine() == "arm64":
         found.append(Gpu("apple", "Apple silicon GPU"))
-    for name in _os_gpu_names():
+    for name, driver in _os_gpus():
         vendor = classify(name)
         if vendor == "nvidia" and any(g.vendor == "nvidia" for g in found):
             continue  # already listed by nvidia-smi, with driver details
         if vendor:
-            found.append(Gpu(vendor, name, rocm=_rocm_version() if vendor == "amd" else None))
+            found.append(Gpu(vendor, name, rocm=_rocm_version() if vendor == "amd" else None,
+                             driver=driver if vendor == "intel" else None))
     return found
 
 
@@ -189,6 +213,11 @@ def builds_for(gpu: Gpu, system: str | None = None, macos: Version | None = None
         if not intel_supported(gpu.name):
             return [], ("PyTorch only supports Intel Arc graphics (Arc cards and Core Ultra laptops) and the Data "
                         "Center GPU Max")
+        if system == "win32" and gpu.driver is not None and tuple(gpu.driver) < INTEL_MIN_DRIVER:
+            return [], (f"its driver ({'.'.join(map(str, gpu.driver))}) is older than the "
+                        f"{'.'.join(map(str, INTEL_MIN_DRIVER))} PyTorch needs, and PyTorch crashes on it as it "
+                        f"starts: update it with Intel Driver & Support Assistant ({INTEL_DRIVER_SITE}), restart, "
+                        "and run this again")
         return [XPU], None
     if gpu.vendor == "amd":
         if system == "win32":  # (a HIP SDK sets HIP_PATH, but there's still no PyTorch build here to install)
@@ -257,6 +286,13 @@ def devices() -> list[dict]:
     try:
         out = subprocess.run([sys.executable, "-m", "vibehash", "devices", "--json"], capture_output=True, text=True,
                              timeout=300, env=env)
+        if out.returncode not in (0, 1) and not out.stdout.strip():
+            # The test died without a word: on Windows an access violation (0xC0000005) as PyTorch loads, which a
+            # graphics driver too old for the build causes (INTEL_MIN_DRIVER).
+            code = out.returncode & 0xFFFFFFFF
+            return [{"id": "gpu", "label": "Your graphics card", "ready": False,
+                     "problem": f"PyTorch crashed as it started (exit code {code:#x}), which an outdated graphics "
+                                "driver usually causes"}]
         return json.loads(out.stdout.strip().splitlines()[-1])
     except subprocess.TimeoutExpired:
         # Not "no GPU": PyTorch is installed and something in it never answered, so reinstalling won't help.
