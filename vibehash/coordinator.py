@@ -194,6 +194,7 @@ class VerifyTask:
     score: tuple[float, float] | None = None  # what a scorer reported: (loss, accuracy)
     donor: str = ""  # a DeepSeek prep canary's: the unit whose claim it presents as `unit`'s
     gap: float | None = None  # an Evo check's worst gap, when the checker sent it (valid_gap)
+    paired: bool = False  # an Evo check drawn for sharing its worker's number setup (Spec2.cross_margin)
 
 
 @dataclass
@@ -835,6 +836,10 @@ class Coordinator:
         numbers = envelope["body"].get("numerics") if envelope else None
         if not hardware.valid_numerics(numbers):
             numbers = None
+        if numbers is None and getattr(self.job(r.job_id).spec, "cross_margin", 0.0):
+            # Checkers' margins go by the worker's setup (Spec2.margin_for): one that left it out would be held to the
+            # wider cross margin by everyone. Every miner that runs such a job sends one (client.Client).
+            raise ProtocolError("this job checks Evo answers by number setup: register with one (a newer vibehash)")
         staked = self.chain.state.staked
         if not staked(addr) and sum(not staked(a) for a in r.regs) >= self.config.max_newcomers:
             raise ProtocolError("this round has all the workers without stake it takes; try the next one")
@@ -1485,7 +1490,8 @@ class Coordinator:
             else:
                 verifiers = _pick(mine, candidates, CHECKERS)
             for verifier in verifiers:
-                tasks.append(VerifyTask(task_id(uid, addr, verifier), verifier, r.units[uid], addr, chosen, {}, kind="es"))
+                tasks.append(VerifyTask(task_id(uid, addr, verifier), verifier, r.units[uid], addr, chosen, {}, kind="es",
+                                        paired=paired and verifier in first))
         tasks.sort(key=lambda t: t.task_id)
         return {tasks[i].task_id: tasks[i] for i in draw.shuffle(range(len(tasks)))}
 
@@ -2509,6 +2515,29 @@ class Coordinator:
         return all(t.gap is not None and t.gap <= floor and not self._same_setup(worker, t.verifier)
                    for t in rejected)
 
+    def _judge_es2(self, key, got: list, spec) -> UnitResult:
+        """A rule-2 claim's result from its checkers' verdicts (`got`, those that answered): accepted when someone
+        approved and nobody rejected, or (cross_margin) when every rejection is overruled (_overruled); else unchecked,
+        unpaid and out of the update. In a cross_margin job the checker paired by setup can't carry a claim alone:
+        a worker naming a setup only it and a friend registered always gets that friend first, so an approval also
+        needs a checker drawn from everyone to have answered."""
+        unit, worker = self.r.units[key[0]], key[1]
+        if spec.cross_margin and got and all(t.paired for t in got):
+            return UnitResult(unit, worker, Verdict.UNCHECKED, None,
+                              "only the checker paired by number setup answered for it (unpaid, out of the update)")
+        if spec.cross_margin and self._overruled(worker, got, spec.referee_floor()):
+            same = next(t for t in got if t.verdict[0] and self._same_setup(worker, t.verifier))
+            return UnitResult(unit, worker, Verdict.ACCEPTED, same.verifier,
+                              "a checker of another number setup rejected it on gaps alone, under "
+                              f"{spec.referee_floor():g}; one of the worker's own setup approved it")
+        if any(not t.verdict[0] for t in got):
+            return UnitResult(unit, worker, Verdict.UNCHECKED, None,
+                              "a checker found an answer that isn't its model's greedy choice, or a "
+                              "replay log-probability off (not refereed yet: unpaid, out of the update)")
+        if got:
+            return UnitResult(unit, worker, Verdict.ACCEPTED, got[0].verifier)
+        return UnitResult(unit, worker, Verdict.UNCHECKED, None, "no checker answered for it")
+
     def _settle_es2(self, proposer: str):
         """A rule-2 Evo round's settlement (es2.py). Claims are accepted, left unchecked or slashed as in rule 1
         (_settle_es). The accepted claims' members, in pair order, give the pair coefficients (es2.coefficients: z of
@@ -2535,20 +2564,7 @@ class Coordinator:
         for key in sorted(r.reveals):
             if key in r.results:
                 continue
-            got = answered[key]
-            if spec.cross_margin and self._overruled(key[1], got, spec.referee_floor()):
-                same = next(t for t in got if t.verdict[0] and self._same_setup(key[1], t.verifier))
-                r.results[key] = UnitResult(r.units[key[0]], key[1], Verdict.ACCEPTED, same.verifier,
-                                            "a checker of another number setup rejected it on gaps alone, under "
-                                            f"{spec.referee_floor():g}; one of the worker's own setup approved it")
-            elif any(not t.verdict[0] for t in got):
-                r.results[key] = UnitResult(r.units[key[0]], key[1], Verdict.UNCHECKED, None,
-                                            "a checker found an answer that isn't its model's greedy choice, or a "
-                                            "replay log-probability off (not refereed yet: unpaid, out of the update)")
-            elif got:
-                r.results[key] = UnitResult(r.units[key[0]], key[1], Verdict.ACCEPTED, got[0].verifier)
-            else:
-                r.results[key] = UnitResult(r.units[key[0]], key[1], Verdict.UNCHECKED, None, "no checker answered for it")
+            r.results[key] = self._judge_es2(key, answered[key], spec)
         offenders = {s[0] for s in r.slashes} | r.forfeit
         worker_flops: dict[str, int] = defaultdict(int)
         rows, units, readings = [], set(), []

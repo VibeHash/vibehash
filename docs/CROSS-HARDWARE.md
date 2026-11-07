@@ -48,7 +48,10 @@ the referee is `Coordinator._overruled`, in `_settle_es2`. The census counts eac
 
 A worker names its own setup, and could lie to be paired with a friend. That buys little:
 
-- only the first checker is chosen by setup; the second is drawn from everyone, as now;
+- only the first checker is chosen by setup; the second is drawn from everyone, as now, and the first can't carry
+  a claim alone: if only it answered, the claim is unchecked and unpaid (`Coordinator._judge_es2`);
+- a worker can't leave its setup out to be held to the wider margin by everyone: a job with a cross margin refuses
+  a registration without one;
 - a rejection with a gap over twice `cross_margin` (1.0 for the template's 0.5; a cheat on Qwen3.5-0.8B sits 3.5
   or more below), or for anything but gaps (tokens that don't decode to the text, an
   answer that doesn't end right, a replay log-probability off), always stands;

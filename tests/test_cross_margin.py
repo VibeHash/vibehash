@@ -52,8 +52,8 @@ def fake_round(regs: dict, holders=None):
     return c
 
 
-def task(verifier, ok, gap=None, submitter="w"):
-    t = VerifyTask("t-" + verifier, verifier, None, submitter, [0], {}, kind="es")
+def task(verifier, ok, gap=None, submitter="w", paired=False):
+    t = VerifyTask("t-" + verifier, verifier, None, submitter, [0], {}, kind="es", paired=paired)
     t.verdict, t.gap = (ok, None if ok else 0), gap
     return t
 
@@ -87,6 +87,34 @@ class RefereeTests(unittest.TestCase):
         self.assertFalse(c._overruled("w", [task("unsaid", True), task("mac", False, gap=0.75)], 1.0))
 
 
+class JudgeTests(unittest.TestCase):
+    """Coordinator._judge_es2: a rule-2 claim's result from the verdicts that came in."""
+    def setUp(self):
+        self.c = fake_round({"w": CUDA, "friend": CUDA, "alike": CUDA, "mac": MAC})
+        self.c.r.units = {"u1": SimpleNamespace(unit_id="u1")}
+
+    def judge(self, got, cross_margin=0.5):
+        return self.c._judge_es2(("u1", "w"), got, spec(cross_margin=cross_margin))
+
+    def test_an_overruled_rejection_is_accepted_and_says_why(self):
+        from vibehash.tasks import Verdict
+        res = self.judge([task("alike", True), task("mac", False, gap=0.75)])
+        self.assertEqual((res.verdict, res.verifier), (Verdict.ACCEPTED, "alike"))
+        self.assertIn("rejected it on gaps alone", res.detail)
+        self.assertEqual(self.judge([task("alike", True), task("mac", False, gap=1.5)]).verdict, Verdict.UNCHECKED)
+        # without a cross_margin, any rejection leaves it unchecked, as before
+        self.assertEqual(self.judge([task("alike", True), task("mac", False, gap=0.75)], 0.0).verdict, Verdict.UNCHECKED)
+
+    def test_the_paired_checker_cant_carry_a_claim_alone(self):
+        """A worker naming a setup only it and a friend share gets the friend first: if the checker drawn from
+        everyone doesn't answer, the friend's approval alone pays nothing."""
+        from vibehash.tasks import Verdict
+        self.assertEqual(self.judge([task("friend", True, paired=True)]).verdict, Verdict.UNCHECKED)
+        self.assertEqual(self.judge([task("friend", True, paired=True), task("mac", True)]).verdict, Verdict.ACCEPTED)
+        self.assertEqual(self.judge([task("friend", True, paired=True)], 0.0).verdict, Verdict.ACCEPTED)  # (no field)
+        self.assertEqual(self.judge([]).verdict, Verdict.UNCHECKED)
+
+
 class PairingTests(unittest.TestCase):
     def tasks(self, cross_margin, regs, worker="w"):
         c = fake_round(regs, holders={"u1": {worker}})
@@ -96,6 +124,7 @@ class PairingTests(unittest.TestCase):
         pool = lambda exclude: sorted(a for a in regs if a not in exclude)  # noqa: E731
         with mock.patch("vibehash.coordinator.es.sample", return_value=[0, 1]):
             got = c._es_tasks(job, SimpleNamespace(shuffle=lambda xs: list(xs)), pool, lambda u, s, v: f"{u}-{v}")
+        self.paired = [t.verifier for t in got.values() if t.paired]
         return [t.verifier for t in got.values()]
 
     def test_the_first_checker_shares_the_workers_setup(self):
@@ -104,15 +133,18 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(len(got), CHECKERS)
         self.assertIn("alike", got)  # the only other CUDA machine, among 13 candidates: always picked
         self.assertNotIn("w", got)  # never its own unit's holder
+        self.assertEqual(self.paired, ["alike"])  # and marked so: it can't carry the claim alone (_judge_es2)
 
-    def test_without_a_match_or_a_cross_margin_its_the_draw_as_before(self):
-        regs = {"w": CUDA, "alike": CUDA, **{f"mac{i}": MAC for i in range(12)}}
-        drawn = [self.tasks(0.0, regs | {"w": CUDA})]
-        self.assertEqual(len(drawn[0]), CHECKERS)
-        no_match = self.tasks(0.5, {"w": CUDA, **{f"mac{i}": MAC for i in range(12)}})
-        self.assertEqual(len(no_match), CHECKERS)
-        unsaid = self.tasks(0.5, {"w": None, "x": None, **{f"mac{i}": MAC for i in range(12)}})
-        self.assertEqual(len(unsaid), CHECKERS)
+    def test_without_a_match_its_the_draw_as_before(self):
+        """A paired job whose worker's setup nobody else registered (or that has none): the old draw exactly."""
+        from vibehash.coordinator import Draw, _pick
+        for regs in ({"w": CUDA, **{f"mac{i}": MAC for i in range(12)}},
+                     {"w": None, "x": None, **{f"mac{i}": MAC for i in range(12)}}):
+            c = fake_round(regs)
+            mine = Draw(b"check", c.r.beacon, c.r.secret, b"u1", b"w")
+            self.assertEqual(sorted(self.tasks(0.5, regs)), sorted(_pick(mine, sorted(a for a in regs if a != "w"),
+                                                                         CHECKERS)))
+            self.assertEqual(self.paired, [])
 
     def test_without_a_cross_margin_the_checkers_are_the_old_draw(self):
         """Jobs posted before the field: the same checkers, so their records replay exactly."""
@@ -121,6 +153,34 @@ class PairingTests(unittest.TestCase):
         c = fake_round(regs)
         mine = Draw(b"check", c.r.beacon, c.r.secret, b"u1", b"w")
         self.assertEqual(sorted(self.tasks(0.0, regs)), sorted(_pick(mine, sorted(a for a in regs if a != "w"), CHECKERS)))
+
+
+class RegistrationTests(unittest.TestCase):
+    def test_a_paired_job_takes_only_workers_that_give_their_setup(self):
+        """Held to the wider cross margin by everyone, a worker that left its setup out would get looser checks."""
+        from vibehash.coordinator import ProtocolError
+        from tests.test_record_v2 import network
+        proto, _ = network(3)
+        c = proto.coord
+        c.open_round()
+        r = c.r
+        w1, w2, _ = proto.workers.values()
+        job = c.job(r.job_id)
+
+        def register(w, extra):
+            body = {"round": r.round_no, "flops_per_sec": w.hardware.flops_per_sec, "memory_mb": w.hardware.memory_mb,
+                    **extra}
+            return c.register(w.address, w.hardware.flops_per_sec, w.hardware.memory_mb,
+                              envelope=proto._signed(w, "register", body))
+        with mock.patch.object(c, "job", return_value=SimpleNamespace(spec=SimpleNamespace(cross_margin=0.5),
+                                                                      memory_mb=job.memory_mb)):
+            with self.assertRaisesRegex(ProtocolError, "number setup"):
+                register(w1, {})
+            register(w2, {"numerics": CUDA})
+        self.assertNotIn(w1.address, r.regs)
+        self.assertEqual(r.regs[w2.address].numerics, CUDA)
+        register(w1, {})  # an ordinary job: as before
+        self.assertIn(w1.address, r.regs)
 
 
 if __name__ == "__main__":

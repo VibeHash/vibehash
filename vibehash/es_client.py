@@ -823,7 +823,8 @@ class Es2Work:
                     # overflow NaN, and a verdict whose gap the node refused would be lost, rejection and all.
                     g = max((worst[(c, k)] for k in chosen), default=0.0)
                     if math.isfinite(g) or g == float("inf"):
-                        self.work.gaps[tid] = round(min(max(g, 0.0), MAX_GAP), 4)
+                        # rounded up, so a gap compared with a limit never comes out on the lower side of it
+                        self.work.gaps[tid] = math.ceil(min(max(g, 0.0), MAX_GAP) * 1e4) / 1e4
                 for k in chosen:
                     if (c, k) in why:
                         ok, bad, reason = False, k, why[(c, k)]
