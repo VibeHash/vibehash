@@ -945,6 +945,16 @@ def _loop_stop(text: str) -> tuple:
     return (period, run)
 
 
+def _cross_margin(text: str) -> float:
+    """--cross-margin X as a spec's cross_margin, or 0 for "off" (es2.Spec2.cross_margin)."""
+    if text.strip().lower() in ("off", "0", "none", ""):
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        sys.exit(f"--cross-margin is a number of logits (such as 0.5) or off, not {text!r}")
+
+
 def _evo_template(a, out: Path):
     """An Evo job that never ends, for a genesis's starter job (`genesis create --starter-job`): Evo v2's settings,
     its tasks taken in turn, `--rounds` each (es2.task_at), fee 0. Only the model's config.json is fetched."""
@@ -961,9 +971,13 @@ def _evo_template(a, out: Path):
         max_tokens = a.max_tokens or (es_tasks.VIBE_MAX_TOKENS if a.tasks == "vibe" else None)
         # A looping answer ends where it loops (es2.loop_end): on by default for vibe, whose answers run long.
         loop = (es_tasks.VIBE_LOOP_STOP if a.tasks == "vibe" else ()) if a.loop_stop is None else _loop_stop(a.loop_stop)
+        # Checkers paired by number setup, a tight margin for the same setup and a wider one across (es2.cross_margin).
+        cross = es_local.V2_CROSS_MARGIN if a.cross_margin is None else _cross_margin(a.cross_margin)
         spec = es_local.spec2_for(found, tasks[0], rounds=a.rounds, tasks=tuple(tasks),
                                   **({"max_tokens": max_tokens} if max_tokens else {}),
-                                  **({"loop_stop": tuple(loop)} if loop else {}))
+                                  **({"loop_stop": tuple(loop)} if loop else {}),
+                                  **({"margin": min(es_local.V2_PAIRED_MARGIN, cross), "cross_margin": cross}
+                                     if cross else {}))
         job = es_local.job2(spec, a.id, "system", budget=1, fee=0)
     except (ValueError, RuntimeError, OSError, InvalidJob) as e:
         sys.exit(f"can't make an Evo job for {a.evo}: {e}")
@@ -971,6 +985,7 @@ def _evo_template(a, out: Path):
     print(f"wrote {out}: an Evo job on {found.repo}, {len(tasks)} tasks{' mixed in every round' if spec.mix else ' in turn'}, "
           f"answers up to {spec.max_tokens} tokens"
           f"{f' (or until one loops: {spec.loop_stop[1]} tokens repeating a stretch of up to {spec.loop_stop[0]})' if spec.loop_stop else ''}"
+          f"{f', checked to {spec.margin:g} on a machine like its worker and {spec.cross_margin:g} across' if spec.cross_margin else ''}"
           f", paying only new coins; give it to `vibehash genesis create --es "
           f"--starter-job {out}`, or post it with `vibehash post-job --spec {out} --budget VIBE`")
 
@@ -2603,6 +2618,9 @@ def parser() -> argparse.ArgumentParser:
                    "512 with --tasks vibe, whose math and instructions need room to reason)")
     p.add_argument("--loop-stop", metavar="PERIOD,RUN", help="with --evo: end an answer once RUN tokens in a row each "
                    "repeat the token up to PERIOD before (a loop), or off (default 32,48 with --tasks vibe, else off)")
+    p.add_argument("--cross-margin", metavar="X", help="with --evo: the margin, in logits, between machines that do "
+                   "the arithmetic differently, with 0.1 for alike ones and checkers paired by setup (default 0.5), or "
+                   "off for one margin of 0.5 and no pairing")
     p.set_defaults(fn=cmd_job_template)
 
     e = sub.add_parser("evo", help="Evo Hash's models").add_subparsers(dest="ecmd", required=True)

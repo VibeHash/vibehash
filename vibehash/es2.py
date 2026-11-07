@@ -86,6 +86,13 @@ class Spec2(es.EsSpec):
     # 22,528 answers), (32, 48) ended 279 of the 1,832 that reached max_tokens and none that ended by themselves.
     # Empty: no such end, as before it (left out of the spec).
     loop_stop: tuple = ()
+    # The margin between machines that do Evo's arithmetic differently (hardware.numerics: bf16 against float32,
+    # another card's SM count, another CUDA or PyTorch), `margin` being then for two with the same setup, whose gaps
+    # are exactly 0. Set, it also gives a claim whose drawn checkers don't share the worker's setup a referee who
+    # does, when one registered, and lets a same-setup approval overrule a cross-setup rejection on gaps alone up to
+    # referee_floor() (Coordinator._es_tasks and _settle_es2; docs/CROSS-HARDWARE.md). 0: one margin for every pair
+    # and no referee, as before it (left out of the spec).
+    cross_margin: float = 0.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -95,6 +102,8 @@ class Spec2(es.EsSpec):
                                                 for s in self.start))
         if isinstance(self.decay, int) and not isinstance(self.decay, bool):
             object.__setattr__(self, "decay", float(self.decay))
+        if isinstance(self.cross_margin, int) and not isinstance(self.cross_margin, bool):
+            object.__setattr__(self, "cross_margin", float(self.cross_margin))
 
     @property
     def n_params(self) -> int:
@@ -134,6 +143,9 @@ class Spec2(es.EsSpec):
                                    and 1 <= self.loop_stop[0] <= LOOP_PERIODS
                                    and 1 <= self.loop_stop[1] <= self.max_tokens):
             out.append(f"loop_stop is [period 1-{LOOP_PERIODS}, run 1 to max_tokens]")
+        if not (isinstance(self.cross_margin, float)
+                and (self.cross_margin == 0.0 or self.margin <= self.cross_margin <= MAX_CROSS_MARGIN)):
+            out.append(f"cross_margin is 0 (off), or from margin to {MAX_CROSS_MARGIN:g}")
         if self.rank != 1 or self.rule != RULE2 or self.precision != "float32":
             out.append("rank is 1, rule 2, precision float32")
         return out
@@ -158,14 +170,15 @@ class Spec2(es.EsSpec):
                        "lp_tol": self.lp_tol, "rank": self.rank, **({"tasks": list(self.tasks)} if self.tasks else {}),
                        **({"decay": self.decay} if self.decay else {}),
                        **({"lenient": True} if self.lenient else {}), **({"mix": True} if self.mix else {}),
-                       **({"loop_stop": list(self.loop_stop)} if self.loop_stop else {})}}
+                       **({"loop_stop": list(self.loop_stop)} if self.loop_stop else {}),
+                       **({"cross_margin": self.cross_margin} if self.cross_margin else {})}}
 
     @classmethod
     def from_json(cls, d: dict) -> "Spec2":
         e = d["es"]
         known = {"rule", "tensors", "n", "tensors_sha", "task", "pairs", "pairs_per_unit", "problems", "max_tokens",
                  "sigma", "lr", "lr_floor", "rounds", "replay", "start", "check", "margin", "lp_tol", "rank", "tasks",
-                 "decay", "lenient", "mix", "loop_stop"}
+                 "decay", "lenient", "mix", "loop_stop", "cross_margin"}
         if set(e) - known:
             raise ValueError(f"a rule-2 ES spec has no field {sorted(set(e) - known)[0]!r}")
         if not isinstance(e["tensors"], list) or not all(isinstance(e.get(k, []), list)
@@ -180,7 +193,28 @@ class Spec2(es.EsSpec):
                    check=int(e["check"]), margin=float(e["margin"]), lp_tol=float(e["lp_tol"]),
                    rank=int(e.get("rank", 1)), rule=int(e["rule"]), tasks=tuple(str(t) for t in e.get("tasks", [])),
                    decay=float(e.get("decay", 0.0)), lenient=e.get("lenient", False), mix=e.get("mix", False),
-                   loop_stop=tuple(e.get("loop_stop", [])))
+                   loop_stop=tuple(e.get("loop_stop", [])), cross_margin=float(e.get("cross_margin", 0.0)))
+
+    def margin_for(self, same_setup: bool) -> float:
+        """The margin a checker holds a worker's tokens to: `margin` when they share a number setup or the job has no
+        cross_margin, else cross_margin."""
+        return self.margin if same_setup or not self.cross_margin else self.cross_margin
+
+    def referee_floor(self) -> float:
+        """The largest cross-setup gap a same-setup approval overrules (Coordinator._overruled): REFEREE_FACTOR times
+        cross_margin, so it scales with the job's model as its margins do."""
+        return REFEREE_FACTOR * self.cross_margin
+
+
+# A rejection by a checker of another number setup, on gaps alone, that a checker of the worker's own setup didn't
+# share is overruled up to REFEREE_FACTOR times the job's cross_margin (Spec2.referee_floor, Coordinator._settle_es2):
+# a gap a little past the cross margin is how machines that round differently disagree, one far past it is a cheat.
+# A multiple of the margin, not a number of logits, since how far a cheat sits from greedy depends on the model: on
+# Qwen3.5-0.8B honest machines of different kinds were at most 0.375 apart and the cheat that pays (claiming a twin's
+# answers) 3.5 or more below in all 128 members tried (es_local.V2_SETTINGS' note), so cross_margin 0.5 overrules up
+# to 1.0; on a tiny test model a forger sits 0.4 below. MAX_CROSS_MARGIN keeps the floor under 3.5 on that model.
+REFEREE_FACTOR = 2.0
+MAX_CROSS_MARGIN = 1.5
 
 
 LOOP_PERIODS = 64  # the longest loop_stop period a spec may ask for (es_hybrid keeps a counter a period a row)

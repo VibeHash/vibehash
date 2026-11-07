@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import es, es2, es2_rounds
+from . import es, es2, es2_rounds, hardware
 from .coordinator import MAX_GAP
 from .crypto import h256
 from .ledger import Block, canonical
@@ -807,8 +807,13 @@ class Es2Work:
                 got_lp = mine.get((c, k), float("nan"))
                 return "" if abs(got_lp - claimed) <= spec.lp_tol else                     f"replay log-probability {claimed:.4f}, worked out {got_lp:.4f}"
 
+            mine_setup = hardware.numerics_key(getattr(self.client, "numerics", None))
             for c, chosen, _, _, lps in parsed:
                 ok, bad, reason = True, None, ""
+                # The worker's number setup comes with the task in a job with a cross_margin: the same as this
+                # computer's, their gaps are 0 and the job's tight margin holds; another, its cross_margin.
+                theirs = hardware.numerics_key(claims[c][0].get("numerics"))
+                margin = spec.margin_for(theirs is not None and theirs == mine_setup)
                 lp_why = {k: lp_wrong(c, k, lps) for k in chosen if (c, k) in worst}
                 tid = claims[c][0].get("task_id")
                 if tid is not None and all((c, k) in worst and not lp_why[k] for k in chosen):
@@ -818,11 +823,12 @@ class Es2Work:
                     # overflow NaN, and a verdict whose gap the node refused would be lost, rejection and all.
                     g = max((worst[(c, k)] for k in chosen), default=0.0)
                     if math.isfinite(g) or g == float("inf"):
-                        self.work.gaps[tid] = round(min(max(g, 0.0), MAX_GAP), 4)
+                        # rounded up, so a gap compared with a limit never comes out on the lower side of it
+                        self.work.gaps[tid] = math.ceil(min(max(g, 0.0), MAX_GAP) * 1e4) / 1e4
                 for k in chosen:
                     if (c, k) in why:
                         ok, bad, reason = False, k, why[(c, k)]
-                    elif worst[(c, k)] > spec.margin:
+                    elif worst[(c, k)] > margin:
                         ok, bad, reason = False, k, f"a token {worst[(c, k)]:.4f} below the greedy choice's logit"
                     elif lp_why[k]:
                         ok, bad, reason = False, k, lp_why[k]
