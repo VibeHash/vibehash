@@ -67,6 +67,14 @@ class EsWork:
             return f"job {job.job_id}: {e}"
         return None
 
+    def retry_in(self, job: TrainingJob) -> float | None:
+        """Seconds until a job why_not refused is worth asking about again, or None when the refusal stands. Only an
+        Evo self-check that errored passes with time (evo_selftest.retry_in: the card was briefly full, say)."""
+        if job.spec.rule != es2.RULE2:
+            return None
+        from . import evo_selftest
+        return evo_selftest.retry_in(self.device())
+
     def device(self) -> str:
         from .finetune import device_of
         return device_of(self.client.backend)
