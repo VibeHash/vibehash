@@ -27,8 +27,9 @@ It is plain Python with nothing but the standard library (tkinter for the progre
 it also runs as a script, and PyInstaller turns it into the .exe (.github/workflows/launcher.yml), with pywebview
 inside so `--window` can host the app's window (vibehash/window.py, imported from the environment it installed)
 under the launcher's own name and icon. It never reads or writes the wallet: `vibehash app` does that, and the
-launcher only passes `--no-password`, so a first wallet is made without a question (the file is then as safe as the
-user's account; `vibehash wallet create` makes a password-protected one for anyone who wants it), and `--avatar`,
+launcher only passes `--no-password`, so a first wallet is made without a question (its key is kept in the user's
+credential store, Windows Credential Manager, and the file holds only ciphertext; `vibehash wallet create` makes a
+password-protected one for anyone who wants it), and `--avatar`,
 the floating pickaxe on the desktop (no screen, and it leaves quietly). The app runs with no console of its own; what
 it prints goes to app.log in the launcher's folder, and the launcher's own lines to launcher.log. `app startup on`
 under the launcher starts the launcher at login (it says where it is in $VIBEHASH_LAUNCHER), so the daily check

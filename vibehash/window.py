@@ -127,13 +127,22 @@ class Api:
     # -- the account --
 
     def wallet(self) -> dict:
-        """The wallet the app runs with: its address and file (from the app's state, which setup writes), and the
-        recovery words while their file is still there (setup saves a new wallet's words to a file only this user can
-        read; the page shows them once and says to keep them somewhere safe)."""
+        """The wallet the app runs with: its address and file (from the app's state, which setup writes), and its
+        recovery words. A new wallet whose key is in the credential store has its words only in the app's memory:
+        the state says `words_pending` and the port of the app's listener (app.serve_words), and they are fetched from
+        there each time until `words_seen()`. An older or headless setup saved them to a file only this user can read,
+        which is parsed here while it is still there; the page shows them once and says to keep them somewhere safe."""
         info = dict((app_module.read_state() or {}).get("wallet") or {})
         words_file = info.get("words_file")
         words: list[str] = []
-        if words_file:
+        port = _words_port(info)
+        if info.get("words_pending") and port:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/wallet/words", timeout=3) as r:
+                    words = [str(w) for w in json.loads(r.read())["words"]]
+            except (OSError, ValueError, KeyError, TypeError):  # the app is gone, or the words were seen
+                words = []
+        elif words_file:
             try:
                 for line in Path(words_file).read_text(encoding="utf-8").splitlines():
                     parts = line.strip().split(". ", 1)
@@ -143,6 +152,19 @@ class Api:
                 info["words_file"] = None
         info["words"] = words
         return info
+
+    def words_seen(self) -> dict:
+        """The user wrote the recovery words down: tell the app, which forgets them and clears `words_pending`."""
+        port = _words_port((app_module.read_state() or {}).get("wallet") or {})
+        if not port:
+            return {"ok": False, "why": "no recovery words are waiting"}
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/wallet/words/seen", data=b"", method="POST")
+            with urllib.request.urlopen(req, timeout=3):
+                pass
+        except OSError as e:
+            return {"ok": False, "why": str(e)}
+        return {"ok": True}
 
     def mfa_status(self) -> dict:
         """Whether the app's wallet asks for an authenticator code before it sends (`vibehash wallet mfa on`), for a
@@ -165,7 +187,7 @@ class Api:
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
                 "deepseek": settings.deepseek_choice(cfg), "deepseek_pilot": settings.deepseek_pilot(),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
-                "words_file": _words_file_present()}
+                "words_file": _words_file_present(), "words_pending": _words_pending()}
 
     def set_option(self, name: str, value) -> dict:
         """One of Settings' switches (OPTIONS: the automatic pauses, reduced motion), or idle_minutes. The running app
@@ -388,6 +410,19 @@ def python(executable: str | None = None, package: Path | None = None, frozen: b
                 if candidate.is_file():
                     return candidate
     return Path(executable)
+
+
+def _words_port(wallet: dict) -> int | None:
+    """The port of the app's recovery-words listener from the state, only if it is a real port: the state is a file,
+    and the window must only ever ask this computer (127.0.0.1), whatever the file says."""
+    port = wallet.get("words_port")
+    return port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else None
+
+
+def _words_pending() -> bool:
+    """Whether a new wallet's recovery words are waiting in the app's memory to be written down (words_seen)."""
+    wallet = (app_module.read_state() or {}).get("wallet") or {}
+    return bool(wallet.get("words_pending")) and _words_port(wallet) is not None
 
 
 def _words_file_present() -> bool:

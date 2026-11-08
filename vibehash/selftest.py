@@ -41,6 +41,7 @@ from pathlib import Path
 import numpy as np
 
 from . import advice, hardware, settings, termui, unattended
+from . import wallet as wallets
 from .crypto import checksummed
 from .tasks import SYN_PER_VIBE
 
@@ -886,19 +887,20 @@ def _eta(net: Net) -> str:
 
 # --- wallet and disk --------------------------------------------------------------------------------------------------
 
-def wallet_address() -> tuple[Path | None, str | None, bool]:
-    """(wallet file, its address, encrypted?) from the saved wallet, without its password."""
+def wallet_address() -> tuple[Path | None, str | None, str]:
+    """(wallet file, its address, how its key is kept: "store" (the OS credential store), "password" or "plain")
+    from the saved wallet, without its password."""
     path = settings.wallet_path()
     if not path or not path.exists():
-        return path, None, False
+        return path, None, "plain"
     try:
         doc = json.loads(path.read_text())
-        return path, doc["address"], "crypto" in doc
+        return path, doc["address"], wallets.kind(path)
     except (OSError, ValueError, KeyError):
-        return path, None, False
+        return path, None, "plain"
 
 
-def wallet(rep: Report, net: Net, path: Path | None, address: str | None, encrypted: bool) -> None:
+def wallet(rep: Report, net: Net, path: Path | None, address: str | None, storage: str) -> None:
     rep.title("Wallet")
     cfg = settings.load()
     home = settings.home()
@@ -918,11 +920,15 @@ def wallet(rep: Report, net: Net, path: Path | None, address: str | None, encryp
         rep.add("wallet", "warn", "no wallet yet: `vibehash setup` makes one" if not path or not path.exists()
                 else f"{path} isn't a wallet file Vibe Hash can read", path=str(path) if path else None)
         return
-    unlock = ("encrypted; the worker asks for its password, or reads $VIBEHASH_PASSWORD when there's no terminal "
-              + ("(set now)" if os.environ.get("VIBEHASH_PASSWORD") else "(not set)")) if encrypted else "not encrypted"
+    unlock = {"password": "encrypted; the worker asks for its password, or reads $VIBEHASH_PASSWORD when there's no terminal "
+                          + ("(set now)" if os.environ.get("VIBEHASH_PASSWORD") else "(not set)"),
+              "store": "key in this account's credential store",
+              "plain": "key stored in the clear in the file"}[storage]
     # The text as people copy the address (its checksum in the letters' case); the data as the ledger has it (--json).
-    rep.add("wallet", "ok", f"wallet {path}: {checksummed(address)} ({unlock})", path=str(path), address=address,
-            encrypted=encrypted)
+    rep.add("wallet", "warn" if storage == "plain" else "ok", f"wallet {path}: {checksummed(address)} ({unlock})"
+            + ("; anyone who can read the file can spend from it: set a password (`vibehash wallet create`) or move the "
+               "coins to a wallet kept in the credential store" if storage == "plain" else ""),
+            path=str(path), address=address, encrypted=storage != "plain", storage=storage)
     if net.account is None:
         if net.status is not None:
             rep.add("balance", "skip", "balance: the node didn't say")
@@ -1084,12 +1090,12 @@ def run(node: str | None = None, device: str = "auto", offline: bool = False, mo
     evo_check(rep, trained, found)
     if model:
         model_check(rep, model, trained if trained is not None and trained.id != "cpu" else None, yes)
-    path, address, encrypted = wallet_address()
+    path, address, storage = wallet_address()
     net = network(rep, url, address, offline)
     gpu_mb = trained.total_mb if trained is not None and trained.id != "cpu" else None
     waiting_lines(rep, net, gpu_mb)
     hf = hugging_face(rep, offline)
-    wallet(rep, net, path, address, encrypted)
+    wallet(rep, net, path, address, storage)
     room = disk(rep)
     result = summary(rep, found, trained, net, room, offline, hf, address, device)
     report = {"ok": result["can_mine"], "version": version(), "node": url, "checks": [c.__dict__ for c in rep.checks],

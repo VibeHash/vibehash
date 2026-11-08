@@ -22,8 +22,9 @@ login; it appears in Settings > Apps with an uninstaller that stops Vibe Hash,
 removes everything it put on the machine and asks whether to delete your
 wallet (kept unless you say so). The first run then installs a Python of its
 own, Vibe Hash and the GPU build of PyTorch into `%LOCALAPPDATA%\VibeHash`,
-makes a wallet (no password; the recovery words are shown once in the window
-and kept in a file only you can read), and mines; every run after that just
+makes a wallet (no password: its key is kept in Windows Credential Manager,
+not in the wallet file; the recovery words are shown once in the window and not
+saved anywhere), and mines; every run after that just
 mines, and checks for a newer Vibe Hash once a day. Windows warns that it's
 from an unknown publisher, since it isn't code-signed yet: choose "More
 info", then "Run anyway". The wizard is [installer/VibeHash.iss](installer/VibeHash.iss)
@@ -65,7 +66,9 @@ Docker `CMD`), nothing waits for an answer. The wallet password comes from
 and the worker stop at once and say so. A new wallet's 24 recovery words are
 then not printed into the log, which other people may be able to read: they go
 to `recovery-words-ADDRESS.txt` in the settings folder, readable only by you,
-and the log says where. Copy them somewhere offline and delete the file.
+and the log says where. Copy them somewhere offline and delete the file. (This is for headless runs: on
+a desktop the app keeps a password-less wallet's key in the OS credential store
+and saves no words file at all; see `vibehash wallet create --no-password`.)
 `setup --deepseek yes` (or `no`) answers the DeepSeek question in advance, and
 `--yes` installs GPU support without asking:
 
@@ -218,7 +221,8 @@ Every command, with its flags and an example, is in [docs/CLI.md](docs/CLI.md);
 
 Or let it look after itself. `python -m vibehash app` does setup without
 questions (the wallet's password from `$VIBEHASH_PASSWORD`, or asked once; a
-new wallet's recovery words go to a file only you can read), installs GPU
+new wallet's recovery words are shown once in the window and, headless, go to
+a file only you can read), installs GPU
 support, mines with the worker's live feed on, opens the window, and starts
 the worker again if it ever stops. `app pause`, `app resume`, `app stop` and
 `app status` drive it from another terminal, and `app startup on` starts it
@@ -410,6 +414,16 @@ is lost, and anyone who sees them can take its coins:
 ```bash
 python -m vibehash wallet restore
 ```
+
+A wallet made with `--no-password` keeps its key in the OS credential store
+(Windows Credential Manager, macOS Keychain, Secret Service), and its file holds
+only ciphertext: the file alone, copied to another computer or user, can't be
+opened, so restore from the words there. Where no store works, the key is kept in
+the file in the clear (and a loud line says so); `--insecure-plaintext` asks for
+that on purpose, for tests and throwaway keys. A plaintext wallet from an earlier
+release is moved into the store on the next start of the app, keeping
+`wallet.json.bak` until the new file has opened once. Files in this format need
+0.5.28 or later.
 
 `wallet restore` asks for the words (the first four letters of each are
 enough) and a new password. Add `--passphrase` if you gave the words one, and

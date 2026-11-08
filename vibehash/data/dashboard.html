@@ -442,7 +442,7 @@
     <div id="cer-3" hidden>
       <div class="eyebrow">Done</div>
       <h3>Your copy matches</h3>
-      <p>The words are cleared from this window. Vibe Hash recommends deleting the words file from this computer now: the paper is your backup.</p>
+      <p id="cer-3-note">The words are cleared from this window. Vibe Hash recommends deleting the words file from this computer now: the paper is your backup.</p>
       <div class="btns"><button class="btn" type="button" id="cer-keep">Keep the file for now</button><button class="btn bad" type="button" id="cer-delete">Delete the words file</button></div>
     </div>
   </div>
@@ -865,8 +865,9 @@
       $("set-home").textContent = c.home;
       version = c.version; $("foot-version").textContent = "v" + c.version;
       $("settings-note").textContent = "Changes apply right away. Mining picks them up within a few seconds.";
-      $("words-actions").hidden = !c.words_file;
-      $("words-note").textContent = c.words_file ? "The 24 words that restore this wallet are in a file in your Vibe Hash folder. Once they're on paper, delete the file: anyone who can read it can take your coins." : "The recovery-words file isn't on this computer. Your paper copy is the backup.";
+      $("words-actions").hidden = !c.words_file && !c.words_pending;
+      $("words-delete").hidden = !c.words_file;  // the delete button is for an old words file only: a new wallet's words were never saved
+      $("words-note").textContent = c.words_pending ? "Your 24 recovery words haven't been written down yet. They are shown once and are not saved on this computer: write them on paper, then check three of them." : c.words_file ? "The 24 words that restore this wallet are in a file in your Vibe Hash folder. Once they're on paper, delete the file: anyone who can read it can take your coins." : "The recovery words aren't saved on this computer. Your paper copy is the backup.";
       if (!c.welcomed && !welcomeOffered) { welcomeOffered = true; welcome(1); }  // once a window: a later reload mustn't restart the tour
     }).catch(function () {});
   }
@@ -928,7 +929,7 @@
   }
 
   // ---- the recovery words: shown, three checked, cleared ----
-  var words = null, asked = [], ceremonyDone = null;
+  var words = null, asked = [], ceremonyDone = null, wordsFromApp = false;  // wordsFromApp: shown once from the app's memory, no file
   function wipe() { words = null; asked = []; $("cer-words").textContent = ""; $("cer-quiz").textContent = ""; }
   function cerStep(n) { [1, 2, 3].forEach(function (i) { $("cer-" + i).hidden = i !== n; }); $("cer-dot-2").className = n >= 2 ? "on" : ""; }
   function closeCeremony() { wipe(); $("ceremony").hidden = true; }
@@ -936,7 +937,8 @@
     if (!api) return;
     ceremonyDone = onDone || null;
     api.wallet().then(function (w) {
-      if (!(w.words || []).length) { ask("No recovery-words file", "The file setup saved the words in isn't on this computer any more. Your paper copy is the backup.", "OK", null); return; }
+      if (!(w.words || []).length) { ask("No recovery words here", "The words are shown once and aren't saved on this computer. Your paper copy is the backup.", "OK", null); return; }
+      wordsFromApp = !!w.words_pending;
       wipe(); words = w.words; cerStep(1); $("cer-written").checked = false; $("cer-next").disabled = true;
       words.forEach(function (word, i) { var s = document.createElement("span"), b = document.createElement("b"); b.textContent = i + 1; s.appendChild(b); s.appendChild(document.createTextNode(word)); $("cer-words").appendChild(s); });
       $("ceremony").hidden = false;
@@ -969,7 +971,14 @@
     $("cer-done").disabled = !all;
   }
   $("cer-back").addEventListener("click", function () { var f = ceremonyDone; closeCeremony(); ceremony(f); });
-  $("cer-done").addEventListener("click", function () { wipe(); cerStep(3); if (ceremonyDone) ceremonyDone(); });
+  $("cer-done").addEventListener("click", function () { wipe();
+    var fromApp = wordsFromApp;
+    cerStep(3);
+    $("cer-3-note").textContent = fromApp ? "The words are cleared from this window and Vibe Hash did not save them anywhere: the paper is your backup." : "The words are cleared from this window. Vibe Hash recommends deleting the words file from this computer now: the paper is your backup.";
+    $("cer-keep").textContent = fromApp ? "Close" : "Keep the file for now"; $("cer-delete").hidden = fromApp;
+    if (fromApp && api) api.words_seen().then(loadSettings).catch(function () {});  // the app forgets them too
+    if (ceremonyDone) ceremonyDone();
+  });
   $("cer-keep").addEventListener("click", closeCeremony);
   $("cer-cancel").addEventListener("click", closeCeremony);
   $("cer-delete").addEventListener("click", function () { closeCeremony(); deleteWords(); });
@@ -989,7 +998,7 @@
     $("welcome").hidden = false;
     [1, 2, 3].forEach(function (i) { $("w-" + i).hidden = i !== step; $("dot-" + i).className = i <= step ? "on" : ""; });
     if (step === 1) setupProgress();
-    if (step === 2 && api) api.settings().then(function (c) { $("w-words-part").hidden = !c.words_file; }).catch(function () {});
+    if (step === 2 && api) api.settings().then(function (c) { $("w-words-part").hidden = !c.words_file && !c.words_pending; }).catch(function () {});
     if (step === 2) $("w-address").textContent = address || "–";
   }
   function welcomeDone() { closeCeremony(); $("welcome").hidden = true; if (api) api.welcomed().catch(function () {}); }

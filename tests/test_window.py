@@ -215,6 +215,40 @@ class ApiTests(Home):
         w = self.api.wallet()
         self.assertEqual((w["words"], w["words_file"]), ([], None))
 
+    def test_new_words_come_from_the_apps_listener_and_words_seen_clears_them(self):
+        words = " ".join(f"w{i}" for i in range(1, 25))
+        seen = []
+        port = app.serve_words(words, on_seen=lambda: seen.append(1))
+        self.addCleanup(app.stop_words)
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port})
+        w = self.api.wallet()
+        self.assertEqual(w["words"], words.split())
+        self.assertEqual(self.api.wallet()["words"], words.split())  # a restarted window still gets them
+        self.assertNotIn("w1 ", Path(app.state_path()).read_text())  # (the state holds the port, not the words)
+        with mock.patch.object(app, "_winreg", return_value=None):
+            self.assertTrue(self.api.settings()["words_pending"])
+        self.assertEqual(self.api.words_seen(), {"ok": True})
+        self.assertEqual(seen, [1])
+        self.assertEqual(self.api.wallet()["words"], [])  # the app answers 404 now
+
+    def test_words_pending_with_nobody_listening_is_no_words_not_an_error(self):
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port})
+        self.assertEqual(self.api.wallet()["words"], [])
+        self.assertFalse(self.api.words_seen()["ok"])
+        self.alive(wallet={"address": "0xabc", "path": "w.json"})
+        self.assertFalse(self.api.words_seen()["ok"])  # nothing was waiting
+
+    def test_the_window_only_asks_this_computer_whatever_the_state_says(self):
+        self.alive(wallet={"address": "0xabc", "words_pending": True, "words_port": "80@attacker.example"})
+        with mock.patch("urllib.request.urlopen") as opened:
+            self.assertEqual(self.api.wallet()["words"], [])
+            self.assertFalse(self.api.words_seen()["ok"])
+        opened.assert_not_called()
+
     def test_deepseek_is_remembered_and_a_running_app_restarts_its_worker(self):
         with mock.patch.object(app, "_winreg", return_value=None):
             self.assertEqual(self.api.settings()["deepseek"], "no")

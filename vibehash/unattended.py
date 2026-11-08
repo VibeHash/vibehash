@@ -6,7 +6,8 @@ task. Nothing may wait for an answer that can't come, and whatever needs one say
 - `need(what, how)`: the one-line error for an answer that's needed when there's no terminal.
 - `save_words(...)`: a new wallet's 24 recovery words when nobody is watching the screen. They'd otherwise land in a
   log (nohup.out, `docker logs`, a pod's web log), so they go to a file only this user can read, and the log gets a
-  loud note saying where it is and to move the words offline.
+  loud note saying where it is and to move the words offline. (`vibehash app` on a desktop with a credential store
+  writes no such file: the words are shown once in the window and kept nowhere, cli.ensure_wallet.)
 - `WorkerLock`: one worker per wallet on a computer. Two workers with one wallet share its cache (each start prunes
   the other's checkpoints) and look like one worker to the node, so the second is stopped with what to do instead.
 """
