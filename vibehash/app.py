@@ -50,7 +50,7 @@ HOLD_COOLDOWN_S = 60.0  # how long a reason to hold off must stay gone before th
 #                          flicking out of full screen, or a mouse nudged, mustn't reload the model each time
 LABEL = "org.vibehash.app"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"  # start at login under the launcher: a Run value, no console flash
-ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off")
+ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off", "restart")  # restart: the worker, to read new settings
 
 
 def app_dir() -> Path:
@@ -314,6 +314,9 @@ class Supervisor:
             self.paused = False
             self.next_start = 0.0
             self.say("resumed")
+        elif word == "restart" and self.worker_alive():  # a setting the worker reads as it starts (deepseek) changed
+            self.stop_worker("restarting with new settings")
+            self.next_start = 0.0
         self.update_hold(now)
         if self.held and self.worker_alive():
             self.stop_worker(f"held off: {self.held}")

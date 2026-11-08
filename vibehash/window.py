@@ -24,6 +24,7 @@ and the avatar is clicked, say) sees it and leaves quietly.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -42,7 +43,7 @@ TITLE = "Vibe Hash"
 SIZE = (1100, 760)
 MIN_SIZE = (760, 520)
 DASHBOARD = Path(__file__).resolve().parent / "data" / "dashboard.html"
-ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off")
+ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off", "restart")  # app.ORDERS (app imports this module)
 # The only places the page can send someone, by name (Api.open_link): never a URL the page makes up, so nothing in the
 # page, or put into it, can open an arbitrary address. They open in the system's browser, never inside this window.
 LINKS = {"site": "https://vibehash.org", "whitepaper": "https://vibehash.org/whitepaper.pdf",
@@ -83,11 +84,20 @@ def page(port: int = DEFAULT_PORT) -> str:
 
 def page_file(port: int = DEFAULT_PORT) -> Path:
     """page(port) written to the app's folder, in a folder of its own: pywebview serves the file's folder, and that
-    folder holds nothing else."""
+    folder holds nothing else.
+    The file's name carries a hash of what's in it: the web view caches pages by address, and under the same name an
+    updated app could go on showing the old page."""
     folder = app_module.app_dir() / "window"
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"dashboard-{port}.html"
-    path.write_text(page(port), encoding="utf-8")
+    text = page(port)
+    path = folder / f"dashboard-{port}-{hashlib.sha256(text.encode()).hexdigest()[:12]}.html"
+    for old in folder.glob(f"dashboard-{port}*.html"):
+        if old != path:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -141,6 +151,7 @@ class Api:
         return {"avatar": bool(cfg.get("avatar", True)), "welcomed": bool(cfg.get("welcomed", False)),
                 "startup": app_module.startup_is_on(), "home": str(settings.home()), "version": _version(),
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
+                "deepseek": cfg.get("deepseek", "ask"),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
                 "words_file": _words_file_present()}
 
@@ -156,6 +167,17 @@ class Api:
             return {"ok": False, "why": f"no such setting: {name}"}
         settings.save(**{name: value})
         return {"ok": True, name: value}
+
+    def set_deepseek(self, on: bool) -> dict:
+        """Whether the worker takes DeepSeek work (about 30 GB of model files, deleted when the job ends), as
+        `vibehash worker --deepseek yes|no` would remember it. The worker reads it as it starts, so a running app is
+        told to start its worker again."""
+        if not isinstance(on, bool):
+            return {"ok": False, "why": "on is true or false"}
+        settings.save(deepseek="yes" if on else "no")
+        if app_module.running():
+            app_module.order("restart")
+        return {"ok": True, "deepseek": "yes" if on else "no"}
 
     def set_avatar(self, on: bool) -> dict:
         """The floating avatar: kept in settings for the next start, and told to the running app now."""

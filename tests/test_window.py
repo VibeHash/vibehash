@@ -87,6 +87,16 @@ class WindowTests(Home):
         self.assertTrue(wv.started["http_server"])  # an http origin, which the feed's CORS allows
         self.assertTrue(window.Lock(7000).acquire())  # the lock was let go when the window closed
 
+    def test_a_changed_page_gets_a_new_address_and_the_old_file_goes(self):
+        """The web view caches by address: an updated app under the old name could go on showing the old page."""
+        first = window.page_file(7000)
+        self.assertEqual(window.page_file(7000), first)  # the same page, the same address
+        with mock.patch.object(window, "page", return_value="<html>changed</html>"):
+            second = window.page_file(7000)
+        self.assertNotEqual(second, first)
+        self.assertFalse(first.exists())
+        self.assertEqual(os.listdir(second.parent), [second.name])
+
     def test_without_pywebview_the_browser_gets_the_feeds_page(self):
         opened, said = [], []
         with mock.patch.dict(sys.modules, {"webview": None}):  # import webview -> ImportError
@@ -167,6 +177,18 @@ class ApiTests(Home):
         words.unlink()  # the user deleted the file, as told: no words, no error
         w = self.api.wallet()
         self.assertEqual((w["words"], w["words_file"]), ([], None))
+
+    def test_deepseek_is_remembered_and_a_running_app_restarts_its_worker(self):
+        with mock.patch.object(app, "_winreg", return_value=None):
+            self.assertEqual(self.api.settings()["deepseek"], "ask")
+            self.assertEqual(self.api.set_deepseek(True), {"ok": True, "deepseek": "yes"})
+            self.assertEqual(settings.load()["deepseek"], "yes")  # what `vibehash worker` reads as it starts
+            self.assertIsNone(app.take_order())  # no app running: the setting is enough
+            self.alive()
+            self.api.set_deepseek(False)
+            self.assertEqual(self.api.settings()["deepseek"], "no")
+            self.assertEqual(app.take_order(), "restart")
+            self.assertFalse(self.api.set_deepseek("yes")["ok"])
 
     def test_settings_the_avatar_and_the_welcome(self):
         with mock.patch.object(app, "_winreg", return_value=None):

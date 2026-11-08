@@ -357,6 +357,7 @@ class WorkerStats:
     progress: tuple[int, int] | None = None  # /status's [in, of] of what the phase waits for (termui.parse_progress)
     height: int = 0
     job: TrainingJob | None = None
+    skipped: TrainingJob | None = None  # the round's job, when this worker can't take it (`activity` says why)
     flops_per_sec: float = 0.0
     activity: str = "connecting to the node"
     busy: bool = False  # training or checking right now
@@ -747,9 +748,10 @@ class WorkerClient:
         job = self.job(s["job_id"])
         if job.job_id in self.cannot:
             st.activity = self.cannot[job.job_id]
+            st.skipped = job
             self.done[key] = True
             return
-        st.job, st.flops_per_sec = job, self.speed[job.job_id]
+        st.job, st.skipped, st.flops_per_sec = job, None, self.speed[job.job_id]
         k = self.keys
 
         if phase == "register":

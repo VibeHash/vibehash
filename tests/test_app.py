@@ -132,6 +132,15 @@ class SupervisorTests(AppHome):
         self.assertEqual(app.read_state()["beat"], 0)
         self.assertFalse(app.control_path().exists())  # orders are taken, not left lying
 
+    def test_restart_starts_the_worker_again_to_read_new_settings(self):
+        s = app.Supervisor(child_command(), 7545, beat_s=0.05, grace_s=5)
+        self.start(s)
+        self.assertTrue(wait_for(lambda: s.worker_alive()))
+        first = s.child.pid
+        app.order("restart")
+        self.assertTrue(wait_for(lambda: s.worker_alive() and getattr(s.child, "pid", first) != first))
+        self.assertFalse(s.paused)
+
     def test_a_worker_that_stops_on_its_own_is_started_again_after_a_wait(self):
         s = app.Supervisor(child_command(exit_code=3), 7545, beat_s=0.05, backoff=(0.2, 0.2, 0.2), grace_s=5)
         app.app_dir().mkdir(parents=True)
