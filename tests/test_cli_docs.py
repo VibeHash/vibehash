@@ -24,6 +24,16 @@ class CliDocs(unittest.TestCase):
         current = (ROOT / "docs" / "CLI.md").read_text(encoding="utf-8").replace("\r\n", "\n")
         self.assertEqual(current, self.text, "docs/CLI.md is out of date: run python scripts/cli_docs.py")
 
+    def test_the_books_reference_matches_the_parser(self):
+        """docs/book (the GitBook): a page per command and SUMMARY.md's list of them, written by the same script."""
+        for path, text in self.gen.outputs().items():
+            current = path.read_text(encoding="utf-8").replace("\r\n", "\n") if path.exists() else ""
+            self.assertEqual(current, text, f"{path.relative_to(ROOT)} is out of date: run python scripts/cli_docs.py")
+        summary = (ROOT / "docs" / "book" / "SUMMARY.md").read_text(encoding="utf-8")
+        for name in self.gen.subcommands(cli.parser()).choices:
+            self.assertIn(f"reference/{name}.md", self.gen.book_pages())
+            self.assertIn(f"(reference/{name}.md)", summary)
+
     def test_every_command_documented(self):
         for name, _ in self.gen.leaves(cli.parser()):
             self.assertIn(f"# vibehash {name}\n", self.text, f"`vibehash {name}` has no section")
