@@ -339,8 +339,7 @@ model would take, and stops there: it posts nothing and spends nothing. Run
 in a terminal with no data file, `train` offers the same choice as a
 numbered menu, with today's CSV model first. A data file without `--base` is
 read as a table, as before. When a fine-tune trains, its dashboard forges the
-model maker's emblem in place of the blade (`scripts/preview_forge.py NAME`
-shows one now).
+model maker's emblem in place of the blade.
 
 **Fine-tuning** a model the list marks `ready` (one GPU holds it, and it's a
 Llama, Mistral, Qwen or SmolLM) works on any network whose node runs this
@@ -885,11 +884,11 @@ to follow the chain, spot deposits, send withdrawals and read the supply.
 
 ## Simulate the economics
 
-Runs the same round logic as a real node, with 14 simulated rigs (7 of them
-cheating), in a few seconds:
+`vibehash testnet` runs the same round logic as a real node on one computer, in
+a few seconds, so you can watch rewards, checks and penalties play out:
 
 ```bash
-python simulate.py --rounds 20
+vibehash testnet
 ```
 
 ## Tests
@@ -953,7 +952,7 @@ rule; `tests/test_setup.py` runs `setup` and `worker` with no terminal.
 | `vibehash/records.py` | What's kept on disk: workers' event logs and a line per round, a job's history, the page beside a downloaded model |
 | `vibehash/minerui.py` | The terminal mining dashboard (plain ANSI, ASCII fallback) |
 | `vibehash/trainui.py` | The terminal training dashboard: a job followed live from the node, politely, with a log-line mode |
-| `vibehash/emblems.py` | Pixel-art emblems of the model makers, which the training dashboard forges instead of a blade for a fine-tune (`scripts/preview_forge.py NAME` plays one) |
+| `vibehash/emblems.py` | Pixel-art emblems of the model makers, which the training dashboard forges instead of a blade for a fine-tune |
 | `vibehash/termui.py` | What the two dashboards share: palette, the mine's rock, banner, phase bar, event feed, the alternate screen |
 | `vibehash/tabular.py` | CSV files to training datasets, and downloaded models to predictions |
 | `vibehash/catalog.py` | The open-weight models `models` lists and `train --base` describes: live facts from Hugging Face, cached, the GPUs a team would need, and which are ready to fine-tune. `scripts/bake_models.py` writes them into the guide |
@@ -974,7 +973,6 @@ rule; `tests/test_setup.py` runs `setup` and `worker` with no terminal.
 | `vibehash/filelock.py` | Locks between processes on one computer, so workers sharing it don't fetch the same model into the same files |
 | `vibehash/settings.py` | `~/.vibehash`: the default wallet, and the node address and its TLS trust that `setup` saves |
 | `vibehash/gpusetup.py` | GPU detection before PyTorch is installed; picks and installs the PyTorch build for the card |
-| `vibehash/protocol.py` | In-process driver for simulations |
 | `vibehash/shards.py` | Prototype, not yet used by the protocol: a model split into shards across workers, checked one shard at a time ([SHARDING.md](SHARDING.md)) |
 
 ## Status

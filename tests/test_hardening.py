@@ -30,7 +30,7 @@ from vibehash.coordinator import Coordinator, CoordinatorConfig, ProtocolError
 from vibehash.crypto import KeyPair, public_key
 from vibehash.ledger import SYSTEM, Chain, InvalidBlock, RoundSummary, State, Tx, apply_block
 from vibehash.node import Node, PhaseTimes
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.replay import replay_block
 from vibehash.ratelimit import Limits, RateLimiter, bucket_of
 from vibehash.storage import Store

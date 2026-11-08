@@ -83,8 +83,8 @@ Ryzen AI, QNN), not PyTorch, with fixed shapes. fp16 can't meet a classic job's 
 needs float32, so an NPU is unlikely to land inside a bf16 checker's margin as it is. The steps:
 
 1. On an NPU laptop, mine on its integrated GPU first (Intel Arc and AMD Radeon already work), and have it check a
-   CUDA worker's dump (`scripts/evo_margin_xgpu.py check --device xpu`): a measurement GPUS.md doesn't have yet.
-2. Add an NPU answering path to `evo_margin_xgpu.py`: the twist is low-rank (`spec.rank`), so one compiled model takes
+   CUDA worker's dump (the margin script, removed in 0.5.28; see git history): a measurement GPUS.md doesn't have yet.
+2. Add an NPU answering path to the margin script (see git history): the twist is low-rank (`spec.rank`), so one compiled model takes
    every member's factors as inputs. Measure its gaps against a CUDA checker.
 3. If its worst gap is under half the cross margin, an `npu` setup (`hardware.BACKENDS` has it) that answers but
    doesn't check, until the census backs it.

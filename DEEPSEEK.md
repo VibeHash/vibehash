@@ -320,7 +320,7 @@ the engram bucket primes give the real tables' row counts (384,006,168 and
 
 **Speed and memory**, one real layer (layer 2), RTX 4070 SUPER, forward with
 autograd plus backward to the input stream and the layer's bf16/float32
-weights (`scripts/deepseek_bench.py`):
+weights (`scripts/deepseek_bench.py` (removed in 0.5.28; see git history)):
 
 | Tokens | Experts | Forward s | Backward s | Activations GiB | ms a token |
 |---|---|---|---|---|---|
@@ -598,7 +598,7 @@ for 10M.
 
 **The split prep: the design** (settled by the owner, 2026-11-01; prototype in
 `vibehash/deepseek_split.py`, tests in `tests/test_deepseek_split.py`, numbers
-from `scripts/deepseek_split_plan.py`). One person or one machine doing the prep
+from `scripts/deepseek_split_plan.py` (removed in 0.5.28; see git history)). One person or one machine doing the prep
 would break "nobody controls it", and even 70 GB a person is too much. So:
 - The protocol knows only units. There's no preparer role: a big machine simply
   takes many units, even all of them in a row, with no special path.
@@ -645,7 +645,7 @@ The stream is all but 1–3% of it, so where the cuts fall barely matters. Side
 channels pack as the FP4 values they are, and picks as a bitmap.
 
 *Hand-offs stay exact, compressed losslessly.* Measured on real weights, on the
-CPU (`scripts/deepseek_stream_stats.py`). The chain: the embedding, then layer 2
+CPU (`scripts/deepseek_stream_stats.py` (removed in 0.5.28; see git history)). The chain: the embedding, then layer 2
 standing in as layer 20, then the real layers 36–39, over 4,096 tokens of
 everyday chats.
 - **Lossless.** Byte planes (every value's high byte, then every low byte) through
@@ -861,7 +861,7 @@ commitments. The options:
     from the pinned commit on Hugging Face, and a game's record keeps none.
   - The four trained layers and the head (31 GB) are checked tensor by tensor
     against `vibehash/data/deepseek_flash_top.json`. That's a per-tensor
-    manifest made from the pinned files (`scripts/deepseek_tensor_manifest.py`,
+    manifest made from the pinned files (`scripts/deepseek_tensor_manifest.py` (removed in 0.5.28; see git history),
     each file's sha256 checked against the Hub's), and its sha256 is pinned in
     `deepseek_job`.
   - The frozen layers and the engram tables are read by range and checked only
@@ -900,12 +900,12 @@ the whole dataset, then is deleted, and the next is fetched.
 **The training footprint.** Trained layers change every step, so they stay
 inside one miner: no live relay. The per-miner knob is K, counting the 1.3 GB
 head: K = 4 is 30.9 GB, K = 2 16.1 GB, K = 1 8.7 GB. What each step down costs in
-quality is for live jobs to show. `scripts/topk_quality.py` would also run
+quality is for live jobs to show. `scripts/topk_quality.py` (removed in 0.5.28; see git history) would also run
 Qwen3's top 2 layers and top 1, standing in by fraction for DeepSeek's top 2.9
 and 1.4.
 
 **Quality: what training only the top costs.** The first live job's loss
-curve answers it. The offline comparison, `scripts/topk_quality.py`, is skipped
+curve answers it. The offline comparison, `scripts/topk_quality.py` (removed in 0.5.28; see git history), is skipped
 but kept:
 - Qwen3-0.6B (28 layers), LoRA-FA on q, k, v and o, the same steps and data,
   held-back loss on 237 everyday chats;
@@ -955,7 +955,7 @@ data is built by `scripts/make_think_shorter.py`; the card is
 | Id | contains "think-shorter"; the front page's featured panel shows 1,500 and 500 |
 
 The input format is `deepseek_prep`'s, unchanged. Its prep, at G = 4 in
-32K-token chunks (`scripts/deepseek_split_plan.py`; sequences average 171
+32K-token chunks (`scripts/deepseek_split_plan.py` (removed in 0.5.28; see git history); sequences average 171
 tokens, so no picks or candidate blocks cross a cut):
 - **Units:** 11 chunks, so 30 rows units and 99 layers units (9 pieces × 11).
 - **From Hugging Face:**
@@ -1219,9 +1219,9 @@ The fine-tune path can use the store the same way.
 2. Done, prototype: LoRA on it, precompute, layer-major and expert-major
    training, records and their root, exactness tests, PEFT format.
 3. *Off the critical path:* the offline runs, skipped by the owner. The scripts
-   stay: `scripts/deepseek_top_bench.py` (speed, with layer 2 standing in for
+   stay: `scripts/deepseek_top_bench.py` (removed in 0.5.28; see git history) (speed, with layer 2 standing in for
    each top layer), the streamed schedule's 6 and 8 GB caps, and
-   `scripts/topk_quality.py`. Their numbers come from the first live job.
+   `scripts/topk_quality.py` (removed in 0.5.28; see git history). Their numbers come from the first live job.
 4. *Train the top 4 for real*, as the first live job: think shorter's pilot
    (above). Its 30.9 GB are downloaded (2026-11-01). DeepSeek's own top 4
    against top 8 (60.4 GB, not downloaded) is for a later job.

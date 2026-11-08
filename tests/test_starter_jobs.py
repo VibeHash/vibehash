@@ -8,7 +8,7 @@ from vibehash import economics as econ
 from vibehash.coordinator import CoordinatorConfig
 from vibehash.crypto import KeyPair
 from vibehash.ledger import GENESIS_JOB, STARTER_ESCROW, SYSTEM, Block, Chain, InvalidBlock, State, Tx, apply_block, canonical
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.tasks import SYN_PER_VIBE, TrainingJob
 from vibehash.worker import OFFICE_DESKTOP, HardwareProfile, Worker
 from tests.test_hardening import replayed

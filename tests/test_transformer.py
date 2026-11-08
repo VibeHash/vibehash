@@ -1,12 +1,12 @@
-"""The transformer reference (vibehash/transformer.py): exact gradients, LoRA as W + (alpha/r)·B·A, causal attention
+"""The transformer reference (tests/reference/transformer.py): exact gradients, LoRA as W + (alpha/r)·B·A, causal attention
 with RoPE and grouped-query heads, stages that train to exactly the whole model's bits, and deterministic training."""
 import unittest
 from dataclasses import replace
 
 import numpy as np
 
-from vibehash import transformer as tf
-from vibehash.transformer import Stage, TransformerSpec
+from tests.reference import transformer as tf
+from tests.reference.transformer import Stage, TransformerSpec
 
 
 def tiny(**settings) -> TransformerSpec:

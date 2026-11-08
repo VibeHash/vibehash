@@ -472,7 +472,7 @@ class ModelTests(unittest.TestCase):
     def test_matches_the_numpy_reference_in_float64(self):
         """llm.py and transformer.py are written apart; on a Llama they agree to float64 rounding, loss and LoRA
         gradient both."""
-        from vibehash import transformer as tr
+        from tests.reference import transformer as tr
 
         config = {k: v for k, v in CONFIGS["llama"].items() if k != "rope_scaling"} | {"rope_theta": 10000.0}
         tiny = TinyModel(tmpdir(self), "llama", **{k: config[k] for k in ("rope_theta",)}, rope_scaling=None)
@@ -736,7 +736,7 @@ class ProtocolTests(unittest.TestCase):
     """Fine-tune rounds through the same Coordinator a node runs, with cheaters, then replayed and rechecked."""
 
     def test_rounds_train_pay_catch_cheats_and_replay(self):
-        from vibehash.protocol import Protocol
+        from tests.protocol import Protocol
         from vibehash.replay import replay_block
         from vibehash.worker import HardwareProfile, Worker
 
@@ -862,7 +862,7 @@ class NodeFreeRoundTests(unittest.TestCase):
     def network(self, behaviors, **cfg):
         from unittest import mock
 
-        from vibehash.protocol import Protocol
+        from tests.protocol import Protocol
         from vibehash.worker import HardwareProfile, Worker
 
         d = tmpdir(self)
@@ -942,7 +942,7 @@ class NodeFreeRoundTests(unittest.TestCase):
 
     def _play(self, policy):
         from vibehash.program import Program
-        from vibehash.protocol import _Blobs
+        from tests.protocol import _Blobs
         from vibehash.tracer import Party
         from vibehash.worker import tamper
 

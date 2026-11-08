@@ -11,7 +11,7 @@ from vibehash.crypto import KeyPair
 from vibehash.ledger import Chain
 from vibehash.model import ModelSpec
 from vibehash.node import Node, PhaseTimes
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.replay import replay_block
 from vibehash.tasks import REF_UPLOAD, SYN_PER_VIBE, InvalidJob, TrainingJob
 from vibehash.worker import OFFICE_DESKTOP, HardwareProfile, Worker
@@ -175,7 +175,7 @@ class AllInTests(unittest.TestCase):
                        envelope=proto._signed(w, "register", body))
 
     def seal(self, proto, beacon):
-        from vibehash.protocol import report_ts
+        from tests.protocol import report_ts
         return proto.coord.finalize(proposer_keys=proto._proposer(beacon), timestamp=report_ts(proto.chain))
 
     def test_each_phase_is_all_in_once_its_last_message_is(self):

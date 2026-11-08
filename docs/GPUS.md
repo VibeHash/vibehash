@@ -233,10 +233,10 @@ RTX 4070 SUPER, PyTorch 2.14.1+cu126, driver 616.92, Windows 11, 2026-11-07. One
 It uses the network's own code: `es_client.runtime2`, `es_fast.answer_members`, `gaps_members` and `score_items`.
 "float32" is the model as `runtime2` loads it on Intel, Apple and the CPU, run on CUDA here so it takes minutes. The
 arithmetic is float32 either way; only the kernels differ, and kernels matter far less than bf16 versus float32 does.
-The answers came from `scripts/evo_margin_xgpu.py answer`. Two small scratch scripts did the float32 answering and
+The answers came from the margin script (`answer`; removed in 0.5.28, see git history). Two small scratch scripts did the float32 answering and
 the checks: they load `runtime2(spec, "cpu")` and move it to CUDA, then call `gaps_members` for every member and its
 twin swap, and `score_items` on member 0's answers as a replay set. Answering took about a minute, each check about
-2 minutes. On real hardware no special script is needed: `scripts/evo_margin_xgpu.py check <a CUDA dump> --device mps`
+2 minutes. On real hardware no special script is needed: the margin script (`check <a CUDA dump> --device mps`; removed in 0.5.28, see git history)
 (or `xpu`, or `cpu`) already runs the float32 path a Mac, Intel card or CPU checker runs.
 
 | Answered in | Checked in | Worst honest gap | Honest members over margin 0.5 | Smallest twin-swap gap | Replay log-probabilities, furthest apart |
@@ -262,7 +262,7 @@ Most harmful first. "Fixed" means fixed on branch `gpu-compat`, with tests; "pro
    the PyTorch and CUDA version, and on the card's SM count. If any one card kind lands past 0.5, its checkers reject
    honest work. To do, in order:
    - finish the Turing measurement (docs/evo-margin-measurement.md);
-   - have one Mac and one Intel Arc check a 4070 SUPER dump with `scripts/evo_margin_xgpu.py check --device mps` or
+   - have one Mac and one Intel Arc check a 4070 SUPER dump with the margin script (`check --device mps`; removed in 0.5.28, see git history) or
      `xpu`, and one AMD card (a RunPod MI300X or RX 7900 pod) answer and check;
    - repeat this page's bf16-vs-float32 runs with a trained line (any testnet's saved line);
    - add PyTorch, CUDA/ROCm and dtype to the hardware class, so the census can show version skew. **Done**: workers
@@ -302,7 +302,7 @@ Most harmful first. "Fixed" means fixed on branch `gpu-compat`, with tests; "pro
     Linux-only". Proposed next step: install from AMD's Windows index, which needs the card's gfx name before PyTorch
     exists (a name-to-gfx table), and a check that 10.x on Windows trains.
 11. **An Evo engine on a GPU other than the current one** (fixed). `cli.pin_gpu` already handled the worker. But
-    `scripts/evo_margin_xgpu.py --device cuda:1`, which the margin measurement's instructions tell a second card to
+    the margin script (`--device cuda:1`; removed in 0.5.28, see git history), which the margin measurement's instructions tell a second card to
     use, captured empty graphs and decoded forever. Now:
     - the script pins the GPU the way the worker does;
     - `es_fast._same_gpu` refuses a mismatch with a clear error;

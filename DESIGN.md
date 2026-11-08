@@ -472,7 +472,7 @@ round it completes work instead of almost never, as in lottery mining.
   nobody can tell which units are replicated.
 - Arrays travel as raw little-endian floats at the job's precision (float32
   jobs move half the bytes). Nothing is ever unpickled.
-- The simulator (`simulate.py`) drives the **same** `Coordinator` class, so
+- The in-process test driver (`tests/protocol.py`, and `vibehash testnet`) drives the **same** `Coordinator` class, so
   economic experiments and the real network can't drift apart.
 
 ---
@@ -667,7 +667,7 @@ same step.
 |---|---|
 | Logits against Hugging Face transformers (float32, eager attention) | 2.1e-6 rms relative |
 | Tiny Llama, Qwen2, Qwen3, SmolLM3 and Llama 3 rotary scaling against transformers | within 1e-4 absolute (`HuggingFaceTests`) |
-| Loss and B's gradient against `transformer.py` (NumPy, float64) | 1e-12 (loss), 1e-9 relative (gradient) |
+| Loss and B's gradient against `tests/reference/transformer.py` (NumPy, float64) | 1e-12 (loss), 1e-9 relative (gradient) |
 | Same GPU, same inputs, twice | bit-identical |
 | A CUDA segment (4 steps) replayed on the CPU: B / m / v | 1.0e-6 / 2.3e-6 / 1.5e-7 of their size; 2.6e-6 / 3.9e-6 / 2.0e-6 of the segment's change |
 | One unit (16 steps × 8 chats of up to 320 tokens) on the GPU | 9.5 s, about 15 TFLOP/s of the job's nominal FLOPs |

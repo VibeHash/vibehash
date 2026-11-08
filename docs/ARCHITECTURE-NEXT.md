@@ -83,7 +83,7 @@ attested device.
 
 ## 3. The hardware census, and checks between like machines
 
-**Today.** A worker registers with `{round, flops_per_sec, memory_mb}` (`protocol.py:107`,
+**Today.** A worker registers with `{round, flops_per_sec, memory_mb}` (`protocol.py:107` (now `tests/protocol.py`),
 `coordinator.py:170-174`). No device name or vendor. Checkers are drawn at random from the staked
 workers with enough memory who don't hold the unit (`coordinator.py:1332-1395`). Replays are compared
 by distance, never hash: a fine-tune's B within 1e-4, its Adam moments within 1e-3, sign flips set
