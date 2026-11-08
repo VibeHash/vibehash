@@ -450,6 +450,23 @@ class EnsureWalletTests(unittest.TestCase):
                       "to encrypt it", out)
         self.assertIsNone(words)  # they are in the file, which is where the window looks
 
+    def test_a_store_that_passes_the_probe_but_refuses_the_key_falls_back_loudly(self):
+        from vibehash import credstore
+        from vibehash import wallet as wallets
+        with mock.patch("vibehash.credstore.put", side_effect=credstore.Unavailable("locked")):
+            (address, pw, words), out = self.ensure(no_password=True)
+        self.assertEqual(wallets.kind(self.path), "plain")
+        self.assertEqual(len(list(self.home.glob("recovery-words-*.txt"))), 1)
+        self.assertIn("no credential store on this system", out)
+        self.assertIn("locked", out)
+
+    def test_nobody_to_show_the_words_means_the_file_even_with_a_store(self):
+        from vibehash import wallet as wallets
+        (address, pw, words), out = self.ensure(no_password=True, caller_shows_words=False)
+        self.assertEqual(wallets.kind(self.path), "store")
+        self.assertIsNone(words)
+        self.assertEqual(len(list(self.home.glob("recovery-words-*.txt"))), 1)
+
     def test_an_existing_plaintext_wallet_is_moved_into_the_store_once(self):
         from vibehash import wallet as wallets
         from vibehash.crypto import KeyPair
