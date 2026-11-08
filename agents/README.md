@@ -1,5 +1,7 @@
 # The Muse agents
 
+`agents/` is part of VibeHash's B2B managed fine-tune pipeline, contributed by Luh Labs LLC, and licensed under the root repository's license (`LICENSE`). The standalone hackathon project lives in its own repository.
+
 Plain English in, a judged fine-tune out. Two agents built on Meta's **Muse Spark** (through Meta's Model API,
 `https://api.meta.ai/v1`, OpenAI-compatible chat completions) sit on either side of a fine-tune:
 
