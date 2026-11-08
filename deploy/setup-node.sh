@@ -33,9 +33,16 @@
 # The domain's A record must already point at this server (or at Cloudflare's proxy, in front of it). Getting the certificate accepts Let's Encrypt's terms
 # (https://letsencrypt.org/repository/). The email is optional: certificates renew by themselves, and Let's Encrypt
 # only uses it for account notices.
+#
+# --trust-proxy-dns skips the check that the domain points at this server: for a domain behind a proxy whose answers
+# the check can't recognise (Cloudflare with "Always Use HTTPS" and more), when you know the record is right.
+#
+# The node's service restarts it after a crash, but not after it halted on a block it couldn't save (exit status 42:
+# a full disk, or a second node on its folder): starting again would only halt again every few seconds. Read the log
+# (journalctl -u vibehash-node), fix the cause, and start it with systemctl.
 set -euo pipefail
 
-DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 ES="" TOR="" STAKES=()
+DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 ES="" TOR="" STAKES=() TRUST_DNS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
@@ -48,12 +55,13 @@ while [ $# -gt 0 ]; do
     --es) ES=1; shift ;;
     --enable-tor) TOR=1; shift ;;
     --stake) STAKES+=("$2"); shift 2 ;;
+    --trust-proxy-dns) TRUST_DNS=1; shift ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac
 done
 if [ -z "$DOMAIN" ]; then
   echo "usage: bash setup-node.sh --domain node.example.org [--fund vibe1...=VIBE] [--email you@example.org]"
-  echo "       [--name NAME --port PORT --chain-id ID] [--es] [--stake vibe1...=VIBE] [--enable-tor]"
+  echo "       [--name NAME --port PORT --chain-id ID] [--es] [--stake vibe1...=VIBE] [--enable-tor] [--trust-proxy-dns]"
   exit 1
 fi
 [[ -z "$NAME" || "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "--name takes lowercase letters, digits and dashes"; exit 1; }
@@ -78,14 +86,19 @@ as_node() { (cd "$DATA" && sudo -u vibehash --preserve-env=VIBEHASH_PASSWORD,VIB
 
 say "Checking $DOMAIN points at this server"
 POINTS_AT=$(getent ahostsv4 "$DOMAIN" | awk 'NR == 1 { print $1 }' || true)
-if ! hostname -I | tr ' ' '\n' | grep -qxF "${POINTS_AT:-none}"; then
+if [ -n "$TRUST_DNS" ]; then
+  echo "--trust-proxy-dns: not checking ($DOMAIN resolves to ${POINTS_AT:-nothing}). Its record must point at this server."
+elif ! hostname -I | tr ' ' '\n' | grep -qxF "${POINTS_AT:-none}"; then
   # Behind Cloudflare's proxy the name resolves to Cloudflare, which answers /cdn-cgi/trace itself. That's fine: it
-  # passes port 80 through for the certificate, and HTTPS on 443 or 8443 on to this server.
-  if curl -fsS -m 10 "http://$DOMAIN/cdn-cgi/trace" 2>/dev/null | grep -q '^fl='; then
+  # passes port 80 through for the certificate, and HTTPS on 443 or 8443 on to this server. With "Always Use HTTPS"
+  # on, plain http only gets a redirect, so https is asked too.
+  if { curl -fsS -m 10 "http://$DOMAIN/cdn-cgi/trace" 2>/dev/null || curl -fsS -m 10 "https://$DOMAIN/cdn-cgi/trace" 2>/dev/null; } \
+       | grep -q '^fl='; then
     echo "$DOMAIN is behind Cloudflare's proxy ($POINTS_AT): going on. Its record must point at this server."
   else
     echo "$DOMAIN points at ${POINTS_AT:-nothing}, not this server ($(hostname -I | awk '{ print $1 }'))."
-    echo "Add an A record for it at your DNS provider, wait a few minutes, and run this again."
+    echo "Add an A record for it at your DNS provider, wait a few minutes, and run this again (or, behind a proxy"
+    echo "whose record you know is right, add --trust-proxy-dns)."
     exit 1
   fi
 fi
@@ -232,6 +245,7 @@ WorkingDirectory=$DATA
 ExecStart=$VH node --genesis $GENESIS --wallet $WALLET --data-dir $DATA/data --host 0.0.0.0 --port $PORT --announce $URL --tls-cert $ETC/tls/cert.pem --tls-key $ETC/tls/key.pem $NODE_ARGS $ONION_ARGS
 Restart=always
 RestartSec=5
+RestartPreventExitStatus=42
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict

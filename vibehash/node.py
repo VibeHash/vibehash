@@ -197,6 +197,14 @@ class PhaseTimes:
         return self.register_s + self.compute_s + self.reveal_s + self.verify_s + self.dispute_s
 
 
+# How the `node` command ends (cli.cmd_node), for its supervisor: setup-node.sh's unit has Restart=always with
+# RestartPreventExitStatus=HALT_EXIT, so a node that halted on a block it couldn't save (a full disk, a second node on
+# its folder) stays down for its operator instead of starting, halting and exiting every few seconds; RESTART_EXIT is
+# an admin's restart (POST /admin/restart), which systemd starts again.
+HALT_EXIT = 42
+RESTART_EXIT = 75
+
+
 class Node:
     def __init__(self, data_dir, genesis: dict, keys: KeyPair, host="127.0.0.1", port=8545,
                  times: PhaseTimes | None = None, config: CoordinatorConfig | None = None, keep_rounds: int = 10,
@@ -270,6 +278,8 @@ class Node:
         # What /status and refusals say about it: the height, not the folder or the database's own error text, which
         # name this computer's paths and user to anyone who asks (the full reason is in the log and `vibehash node`'s exit).
         self.halted_public: str | None = None
+        self.started_at = time.time()  # for the admin app's uptime (nodeadmin.ops)
+        self.restart_requested: str | None = None  # an admin's restart (nodeadmin.restart): the `node` command ends
         try:
             self.server = GuardedServer((host, port), _handler(self), limits, tls)  # limits=None: the defaults, which spare localhost
         except BaseException:  # the port is taken: the folder is free for whoever tries next (the menu goes on)
@@ -1590,6 +1600,8 @@ def _handler(node: Node):
                 self._send(403, {"error": str(e)})
             except nodeadmin.TooMany as e:
                 self._send(403, {"error": str(e)}, headers={"Retry-After": str(e.retry_after)})
+            except nodeadmin.Conflict as e:  # an operation that would do harm now, or can't be done here
+                self._send(409, {"error": str(e)})
             except (ProtocolError, WireError, InvalidJob, BlobError, ValueError, TypeError, OverflowError) as e:
                 self._send(400, {"error": str(e)})
             except Busy as e:
@@ -1714,6 +1726,15 @@ def _handler(node: Node):
                     return node.handle(parts[0], body, ip=self._ip())
                 if parts == ["admin", "login"]:  # the authenticator app's code for a sign-in (nodeadmin.py)
                     return node.admin.login(self.headers.get("Authorization"), body.get("code"), self._ip())
+                if parts in (["admin", "prune"], ["admin", "backup"], ["admin", "restart"]):
+                    # operations on the server itself: a fresh authenticator code too (X-Admin-Code, nodeadmin.py)
+                    node.admin.check(self.headers.get("Authorization"), self.headers.get(nodeadmin.LOGIN_HEADER),
+                                     self._ip(), code=self.headers.get(nodeadmin.CODE_HEADER), fresh=True)
+                    if parts[1] == "prune":
+                        return nodeadmin.prune(node, STALE_PART_S)
+                    if parts[1] == "backup":
+                        return nodeadmin.request_backup(node)
+                    return nodeadmin.restart(node, force=body.get("force") is True)
                 if parts[:1] == ["admin"]:  # the operators' orders (nodeadmin.py): 404 without a token, 401 with the wrong one
                     order = parts == ["admin", "review"] or (len(parts) == 4 and parts[1] == "jobs" and parts[3] in ("hold", "release"))
                     self._admin(fresh=order)  # (an unknown route takes no code)

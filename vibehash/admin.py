@@ -84,6 +84,7 @@ GEO_TTL_S = 30 * 86400
 GEO_BATCH = 100
 NODE_TIMEOUT = 15.0
 MAX_BODY = 256 * 1024
+OPS = ("prune", "backup", "restart")  # what POST /api/ops/<op> asks one node for (nodeadmin.py), with a fresh code
 BLOCKS_PAGE = 100
 INSECURE = "the admin token is only sent over https:// (or to this computer or a private network): change the URL"
 RETRY_REFUSED_S = 300  # a node that refused the token is asked again this often, not on every refresh: each refusal
@@ -317,7 +318,7 @@ class NodeLink:
         return json.loads(self.client._req("GET", path, headers=self._headers()))  # noqa: SLF001
 
     def admin_post(self, path: str, body: dict, code: str | None = None):
-        """`code`: a fresh authenticator code, for an order that wants one (nodeadmin's X-Admin-Code)."""
+        """`code`: a fresh authenticator code, for an order or an operation on the server itself (nodeadmin's X-Admin-Code)."""
         headers = self._headers()
         if code:
             headers[nodeadmin.CODE_HEADER] = str(code).strip()
@@ -434,7 +435,7 @@ class AdminApp:
             # Its place: the address it announces to other nodes (the public one, behind a proxy), else the one we reach it at
             place = self.geo.place(urlsplit(n.get("url") or "").hostname) or self.geo.place(urlsplit(v["url"]).hostname)
             n.update(url=v["url"], announce=n.get("url"), admin=v.get("admin", False), error=v.get("error"), review=v.get("review"),
-                     mfa=bool(v.get("mfa")), login_until=v.get("login_until"),
+                     mfa=bool(v.get("mfa")), login_until=v.get("login_until"), ops=v.get("ops"),
                      place=place, peers=v.get("peers") or [], mempool=len(v.get("mempool") or []), devices=len(v.get("devices") or []))
             nodes.append(n)
         validators = {}
@@ -502,6 +503,24 @@ class AdminApp:
     def review(self, on: bool, code: str | None = None, urls: list[str] | None = None) -> dict:
         code = _fresh_code(code)
         return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post("/admin/review", {"on": bool(on)}, code), urls)}
+
+    def operate(self, url: str, op: str, code: str, force: bool = False) -> dict:
+        """One server's operation (OPS: prune, backup, restart), with a fresh authenticator code: on the one node
+        `url` names, never all of them at once (a restart of every validator together stops the chain). A node's
+        refusal comes back as {"ok": False, "status", "error"}: 409 for "not now" (a restart that would stop the
+        chain says so, and the page offers to force it), 401 for a wrong or missing code."""
+        if op not in OPS:
+            raise AdminError(f"no such operation: {op}")
+        link = next((l for l in self.links if l.url == str(url or "").rstrip("/")), None)
+        if link is None or not link.token:
+            raise AdminError("that node isn't one with an admin token here")
+        if not re.fullmatch(r"\d{6}", str(code or "").strip()):
+            raise AdminError("type the 6-digit code from your authenticator app")
+        body = {"force": True} if op == "restart" and force else {}
+        try:
+            return {"ok": True, "url": link.url, "op": op, "result": link.admin_post(f"/admin/{op}", body, code=code)}
+        except NodeError as e:
+            return {"ok": False, "url": link.url, "op": op, "status": e.status, "error": str(e)}
 
     def sign_in(self, code: str, url: str | None = None) -> dict:
         """One authenticator code for every node that asked for one (or the one `url` names): admins of several nodes
@@ -700,6 +719,9 @@ class AdminApp:
                         out = app.unlock(str(body.get("password") or ""))
                     elif parts == ["login"]:
                         out = app.sign_in(str(body.get("code") or ""), str(body.get("url") or "") or None)
+                    elif len(parts) == 2 and parts[0] == "ops":
+                        out = app.operate(str(body.get("url") or ""), parts[1], str(body.get("code") or ""),
+                                          body.get("force") is True)
                     elif parts == ["settings"]:
                         out = app.set_settings(body.get("nodes"), body.get("wallet"), body.get("geo"))
                     else:

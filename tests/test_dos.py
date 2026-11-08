@@ -1007,8 +1007,9 @@ class SaveFirstTests(unittest.TestCase):
                 out["code"] = e.code
         logging.disable(logging.INFO)  # cli.main turns on INFO logging for the whole process
         self.addCleanup(logging.disable, logging.NOTSET)
+        self.stderr = io.StringIO()  # what it said as it ended
         with mock.patch.object(logging.root, "handlers", []), contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stderr(self.stderr):
             t = threading.Thread(target=run, daemon=True)
             t.start()
             t.join(timeout=seconds)
@@ -1031,7 +1032,10 @@ class SaveFirstTests(unittest.TestCase):
         (d / "genesis.json").write_text(json.dumps(SOLO))
         with mock.patch("vibehash.node.Node", Halting), mock.patch.object(cli, "load_wallet", return_value=NODE):
             code = self.run_quietly(["node", "--genesis", str(d / "genesis.json"), "--wallet", "w", "--data-dir", str(d)], 10)
-        self.assertEqual(code, f"error: {reason}", "`vibehash node` ran on after its node stopped")
+        from vibehash.node import HALT_EXIT
+        # its own exit status, so systemd leaves it down (setup-node.sh: RestartPreventExitStatus) instead of looping
+        self.assertEqual(code, HALT_EXIT, "`vibehash node` ran on after its node stopped")
+        self.assertIn(f"error: {reason}", self.stderr.getvalue())
 
     def test_a_testnet_ends_with_why_and_gives_its_folder_back(self):
         """In-process, as the menu runs it (so through SystemExit): its first block can't be saved."""
