@@ -146,10 +146,15 @@ class Api:
 
     def mfa_status(self) -> dict:
         """Whether the app's wallet asks for an authenticator code before it sends (`vibehash wallet mfa on`), for a
-        send from the page to call the same gate; {"on": False} with no wallet or no credential store. The page has
+        send from the page to call the same gate; {"on": False} with no wallet, {"on": None, "why": ...} when the store can't be read. The page has
         no send today."""
         address = str(((app_module.read_state() or {}).get("wallet") or {}).get("address") or "").lower()
-        return {"on": bool(address and credstore.get(credstore.WALLET_TOTP, address))}
+        if not address:
+            return {"on": False}
+        try:
+            return {"on": bool(credstore.get(credstore.WALLET_TOTP, address))}
+        except credstore.Unavailable as e:  # unknown, not off: the page must not offer a send as ungated
+            return {"on": None, "why": str(e)}
 
     # -- settings --
 

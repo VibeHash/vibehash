@@ -75,7 +75,24 @@ class CredstoreTests(Store):
     def test_without_the_package_nothing_is_available_and_nothing_is_stored(self):
         with mock.patch.dict("sys.modules", {"keyring": None}):
             self.assertFalse(credstore.available())
-            self.assertIsNone(credstore.get("svc", "acct"))
+            for call in (lambda: credstore.get("svc", "acct"), lambda: credstore.put("svc", "acct", "v"),
+                         lambda: credstore.delete("svc", "acct")):
+                with self.assertRaises(credstore.Unavailable):
+                    call()
+
+    def test_a_backend_error_is_unavailable_and_a_clean_miss_is_none(self):
+        self.assertIsNone(credstore.get("svc", "nothing"))  # answered: absent
+
+        def boom(*a):
+            raise RuntimeError("locked")
+        self.mem.get_password = self.mem.set_password = self.mem.delete_password = boom
+        with self.assertRaisesRegex(credstore.Unavailable, "locked"):
+            credstore.get("svc", "acct")
+        with self.assertRaises(credstore.Unavailable):
+            credstore.put("svc", "acct", "v")
+        with self.assertRaises(credstore.Unavailable):
+            credstore.delete("svc", "acct")
+        self.assertFalse(credstore.available())  # a bool, never an exception
 
 
 class WalletMfaTests(Store):
@@ -180,6 +197,18 @@ class WalletMfaTests(Store):
             client.send_tx.assert_not_called()
             client.min_fee.assert_not_called()
             self.assertEqual(client.mock_calls, [], fn.__name__)  # not even the node was asked
+
+    def test_a_store_that_cannot_be_read_does_not_open_the_gate(self):
+        self.turn_on()
+        self.mem.get_password = mock.Mock(side_effect=RuntimeError("locked keychain"))
+        for fn, extra in ((cli.cmd_stake, {}), (cli.cmd_unstake, {}),
+                          (cli.cmd_send, {"to": checksummed(KeyPair.generate(b"other").address)})):
+            status, client = self.sends(fn, code="123456", **extra)
+            self.assertEqual(status, 1, fn.__name__)
+            self.assertEqual(client.mock_calls, [], fn.__name__)
+        status, _, err = self.run_cmd(cli.cmd_wallet_mfa, action="status")
+        self.assertEqual(status, 1)
+        self.assertIn("locked keychain", err)
 
     def test_a_blank_prompt_ends_before_a_transaction_is_built(self):
         self.turn_on()

@@ -4,7 +4,8 @@ wallet's authenticator key lives here (`vibehash wallet mfa`), and so can anythi
 from the config folder.
 
 `keyring` is imported inside the functions, so the core package imports without it (it is in the `app` extra); with
-it missing, or with no backend on this machine (a headless server), `available()` is False and `get` answers None.
+it missing, or with no backend on this machine (a headless server), `available()` is False and the others raise
+Unavailable (get answers None only for an entry that is absent from a store that answered).
 
 What this is not: a defence against malware that already runs as this user, which can ask the same store."""
 from __future__ import annotations
@@ -41,36 +42,43 @@ def available() -> bool:
         return False
 
 
-def get(service: str, account: str) -> str | None:
-    """What is kept for (service, account), or None: nothing, no store, or one that can't be read now."""
+class Unavailable(RuntimeError):
+    """The credential store can't answer: the package is missing, the store is locked or has no backend here. Never
+    "nothing is kept": a caller that gates something on an entry must not treat this as the entry's absence."""
+
+
+def _need():
     keyring = _keyring()
     if keyring is None:
-        return None
+        raise Unavailable("the keyring package isn't installed (pip install keyring)")
+    return keyring
+
+
+def get(service: str, account: str) -> str | None:
+    """What is kept for (service, account); None only when the store answered and holds nothing. Unavailable when it
+    could not answer (no package, a locked keychain, no backend)."""
+    keyring = _need()
     try:
         return keyring.get_password(service, account)
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as e:  # noqa: BLE001
+        raise Unavailable(f"the credential store can't be read: {e}") from e
 
 
 def put(service: str, account: str, value: str) -> None:
-    """Keep `value` for (service, account), replacing what was there. RuntimeError if there is no store."""
-    keyring = _keyring()
-    if keyring is None:
-        raise RuntimeError("the keyring package isn't installed (pip install keyring)")
+    """Keep `value` for (service, account), replacing what was there. Unavailable if the store refuses."""
+    keyring = _need()
     try:
         keyring.set_password(service, account, value)
     except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the credential store refused it: {e}") from e
+        raise Unavailable(f"the credential store refused it: {e}") from e
 
 
 def delete(service: str, account: str) -> None:
-    """Forget (service, account); nothing kept is not an error."""
-    keyring = _keyring()
-    if keyring is None:
-        return
+    """Forget (service, account); nothing kept is not an error. Unavailable if the store can't be reached."""
+    keyring = _need()
     try:
         keyring.delete_password(service, account)
     except keyring.errors.PasswordDeleteError:
         pass
     except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"the credential store refused it: {e}") from e
+        raise Unavailable(f"the credential store refused it: {e}") from e

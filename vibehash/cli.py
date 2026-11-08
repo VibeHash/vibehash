@@ -395,7 +395,6 @@ def cmd_node(a):
             compute.use(compute.get_backend(a.device, logging.getLogger("vibehash.node")))
         except RuntimeError as e:
             sys.exit(f"error: {e}")
-    from . import nodeadmin
     try:  # an admin token too short to be safe, or an authenticator key that isn't one: say so before anything starts
         nodeadmin.check_token(a.admin_token)
         if a.admin_mfa and not a.admin_token:
@@ -936,7 +935,11 @@ def _wallet_mfa(address: str) -> str | None:
 
 def _gate(a, keys: KeyPair, what: str) -> None:
     """The opt-in code check (`wallet mfa on`) before anything is signed: nothing to do without a stored key."""
-    key = _wallet_mfa(keys.address)
+    try:
+        key = _wallet_mfa(keys.address)
+    except credstore.Unavailable as e:  # never "off": a broken store must not open a gate the user closed
+        sys.exit(f"error: the credential store can't be read, so the send gate can't be checked; {e}. Fix the store or "
+                 f"turn the gate off with `{prog()} wallet mfa off` from a session where it works. Nothing was sent")
     if key is None:
         return
     if not _take_wallet_code(key, _ask_wallet_code(a, what)):
@@ -982,7 +985,10 @@ def cmd_wallet_mfa(a):
     except (OSError, ValueError, KeyError) as e:
         sys.exit(f"error: can't read the wallet {path}: {e}")
     shown = checksummed(address)
-    key = _wallet_mfa(address)
+    try:
+        key = _wallet_mfa(address)
+    except credstore.Unavailable as e:
+        sys.exit(f"error: the credential store can't be read, so whether the gate is on is unknown; {e}")
     if a.action == "status":
         print(f"authenticator code on sends for {shown}: " + ("on" if key else "off"))
         return
@@ -992,7 +998,10 @@ def cmd_wallet_mfa(a):
             return
         if not _take_wallet_code(key, _ask_wallet_code(a, "turn this off")):
             sys.exit("error: that authenticator code is wrong, or was used already; it stays on")
-        credstore.delete(credstore.WALLET_TOTP, address)
+        try:
+            credstore.delete(credstore.WALLET_TOTP, address)
+        except credstore.Unavailable as e:
+            sys.exit(f"error: {e}; it stays on")
         print(f"off: sends from {shown} no longer ask for a code")
         return
     if key is not None:
@@ -1004,7 +1013,7 @@ def cmd_wallet_mfa(a):
     new = nodeadmin.new_mfa_key()
     try:
         credstore.put(credstore.WALLET_TOTP, address, new)
-    except RuntimeError as e:
+    except credstore.Unavailable as e:
         sys.exit(f"error: {e}")
     uri = nodeadmin.otpauth_uri(new, shown)
     print(f"on: sends, stakes and unstakes from {shown} now ask for a 6-digit code.\n\n"

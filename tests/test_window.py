@@ -188,6 +188,11 @@ class ApiTests(Home):
         self.assertEqual(self.api.mfa_status(), {"on": True})
         with mock.patch("vibehash.credstore.get", return_value=None):
             self.assertEqual(self.api.mfa_status(), {"on": False})
+        from vibehash import credstore
+        with mock.patch("vibehash.credstore.get", side_effect=credstore.Unavailable("locked")):
+            out = self.api.mfa_status()
+        self.assertIsNone(out["on"])  # unknown, not off
+        self.assertIn("locked", out["why"])
 
     def test_orders_go_to_the_running_app_only(self):
         self.assertEqual(self.api.order("pause")["ok"], False)  # not running
