@@ -34,6 +34,17 @@
 # (https://letsencrypt.org/repository/). The email is optional: certificates renew by themselves, and Let's Encrypt
 # only uses it for account notices.
 #
+# A second server for a network that already runs (a standby, or a validator to be) follows it instead of starting a
+# new one: --follow fetches the network's genesis from one of its nodes and keeps that node as a peer to sync from.
+#
+#   sudo bash setup-node.sh --domain node2.example.org --follow https://node.example.org --genesis-hash <hex>
+#
+# The genesis is checked against what the seed itself says (/status) and, with --genesis-hash, against the hash you
+# read from a node you already trust (its /status genesis_hash, or `vibehash admin`), so a seed that isn't the
+# network's can't hand this server another chain. --fund, --stake, --es, --economics and --chain-id only shape a new
+# genesis, so they don't go with --follow. The server starts as a follower; it becomes a validator only by staking
+# and joining (`vibehash validator join`), which the last lines say how to do.
+#
 # --trust-proxy-dns skips the check that the domain points at this server: for a domain behind a proxy whose answers
 # the check can't recognise (Cloudflare with "Always Use HTTPS" and more), when you know the record is right.
 #
@@ -43,30 +54,40 @@
 set -euo pipefail
 
 DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 ES="" TOR="" STAKES=() TRUST_DNS=""
+FOLLOW="" GENESIS_HASH="" SHAPES=""  # SHAPES: an option that only shapes a new genesis was given
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
     --email) EMAIL="$2"; shift 2 ;;
-    --fund) FUND="$2"; shift 2 ;;
-    --chain-id) CHAIN_ID="$2"; shift 2 ;;
-    --economics) ECONOMICS="$2"; shift 2 ;;
+    --fund) FUND="$2"; SHAPES=1; shift 2 ;;
+    --chain-id) CHAIN_ID="$2"; SHAPES=1; shift 2 ;;
+    --economics) ECONOMICS="$2"; SHAPES=1; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
-    --es) ES=1; shift ;;
+    --es) ES=1; SHAPES=1; shift ;;
     --enable-tor) TOR=1; shift ;;
-    --stake) STAKES+=("$2"); shift 2 ;;
+    --stake) STAKES+=("$2"); SHAPES=1; shift 2 ;;
     --trust-proxy-dns) TRUST_DNS=1; shift ;;
+    --follow) FOLLOW="${2%/}"; shift 2 ;;
+    --genesis-hash) GENESIS_HASH="$2"; shift 2 ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac
 done
 if [ -z "$DOMAIN" ]; then
   echo "usage: bash setup-node.sh --domain node.example.org [--fund vibe1...=VIBE] [--email you@example.org]"
   echo "       [--name NAME --port PORT --chain-id ID] [--es] [--stake vibe1...=VIBE] [--enable-tor] [--trust-proxy-dns]"
+  echo "       [--follow https://a-node-of-the-network --genesis-hash HEX]"
   exit 1
 fi
 [[ -z "$NAME" || "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "--name takes lowercase letters, digits and dashes"; exit 1; }
 [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "--port takes a port number"; exit 1; }
-if [ -n "$NAME" ] && [ "$CHAIN_ID" = "vibehash-public-1" ]; then
+if [ -n "$FOLLOW" ]; then
+  [[ "$FOLLOW" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { echo "--follow takes a node's address, such as https://node.example.org"; exit 1; }
+  [ -z "$SHAPES" ] || { echo "--fund, --stake, --es, --economics and --chain-id make a new network: not with --follow"; exit 1; }
+  [ -z "$GENESIS_HASH" ] || [[ "$GENESIS_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo "--genesis-hash takes 64 hex digits"; exit 1; }
+elif [ -n "$GENESIS_HASH" ]; then
+  echo "--genesis-hash goes with --follow"; exit 1
+elif [ -n "$NAME" ] && [ "$CHAIN_ID" = "vibehash-public-1" ]; then
   echo "a named node runs its own network: give it its own --chain-id (vibehash-public-1 is the main node's)"; exit 1
 fi
 [ "$(id -u)" = 0 ] || { echo "run it as root"; exit 1; }
@@ -147,7 +168,21 @@ if [ ! -f "$WALLET" ]; then
 fi
 ADDRESS=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['address'])" "$WALLET")
 
-if [ ! -f "$GENESIS" ]; then
+if [ -n "$FOLLOW" ] && [ ! -f "$GENESIS" ]; then
+  say "Fetching the network's genesis from $FOLLOW"
+  as_node curl -fsS -m 30 "$FOLLOW/genesis" -o "$GENESIS.part" || { echo "$FOLLOW didn't give its genesis"; exit 1; }
+  GOT=$("$VENV/bin/python" -c 'import json, sys; from vibehash.ledger import Chain; print(Chain.from_genesis(json.load(open(sys.argv[1]))).genesis_hash)' "$GENESIS.part") \
+    || { rm -f "$GENESIS.part"; echo "what $FOLLOW gave isn't a genesis"; exit 1; }
+  SAYS=$(curl -fsS -m 30 "$FOLLOW/status" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("genesis_hash", ""))' || true)
+  if [ "$GOT" != "$SAYS" ]; then
+    rm -f "$GENESIS.part"; echo "$FOLLOW's genesis ($GOT) isn't the one its own status names (${SAYS:-none})"; exit 1
+  fi
+  if [ -n "$GENESIS_HASH" ] && [ "$GOT" != "$GENESIS_HASH" ]; then
+    rm -f "$GENESIS.part"; echo "$FOLLOW runs another network: genesis $GOT, not the $GENESIS_HASH you gave"; exit 1
+  fi
+  [ -n "$GENESIS_HASH" ] || echo "Genesis $GOT: compare it with a node you trust (its /status genesis_hash); --genesis-hash checks it for you."
+  mv "$GENESIS.part" "$GENESIS"
+elif [ ! -f "$GENESIS" ]; then
   say "Creating the network's genesis"
   args=(genesis create --chain-id "$CHAIN_ID" --economics "$ECONOMICS" --out "$GENESIS"
         --bootstrap "$ADDRESS=10" --validator "$ADDRESS=$URL")
@@ -165,8 +200,9 @@ fi
 # task, which took longer than an Evo job's own ~67 s on vibehash-evo-1, so checks were left undone and the checkers
 # missed the next round's registration (every other round empty). The node takes the longer of its own and the job's.
 NODE_ARGS=""
+[ -z "$FOLLOW" ] || NODE_ARGS="--peer $FOLLOW"  # where it syncs from (the validators it finds on chain as well)
 if python3 -c "import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get('es') is True else 1)" "$GENESIS"; then
-  NODE_ARGS="--verify-s 180"
+  NODE_ARGS="$NODE_ARGS --verify-s 180"
   say "Getting the Evo tasks' questions (the node re-scores answers with them)"
   "$VENV/bin/pip" install -q --upgrade 'datasets>=2.18'
   grep -q '^HF_HOME=' "$ETC/env" || echo "HF_HOME=$DATA/hf" >> "$ETC/env"
@@ -284,7 +320,16 @@ for _ in $(seq 1 30); do
 done
 if status=$(curl -fsS "$URL/status" 2>/dev/null); then
   echo "$status" | python3 -c "import json, sys; s = json.load(sys.stdin); print(f\"network {s['chain_id']}, block {s['height']}\")"
-  printf '\nDone. The node address is %s\n  validator %s\n  logs:     journalctl -u %s -f\n' "$URL" "$ADDRESS" "$SERVICE"
+  if [ -n "$FOLLOW" ]; then
+    printf '\nDone. The node address is %s, following %s\n  wallet   %s\n  logs:    journalctl -u %s -f\n' "$URL" "$FOLLOW" "$ADDRESS" "$SERVICE"
+    printf 'To make it a validator once it has caught up: send its wallet at least 100 VIBE and a little for fees, then
+'
+    printf '  sudo -u vibehash --preserve-env=VIBEHASH_PASSWORD,VIBEHASH_HOME %s stake --amount 100 --wallet %s --node %s\n' "$VH" "$WALLET" "$URL"
+    printf '  sudo -u vibehash --preserve-env=VIBEHASH_PASSWORD,VIBEHASH_HOME %s validator join --url %s --wallet %s --node %s\n' "$VH" "$URL" "$WALLET" "$URL"
+    printf '(with %s'"'"'s variables loaded: set -a; . %s; set +a). Never run this wallet on two servers at once.\n' "$ETC/env" "$ETC/env"
+  else
+    printf '\nDone. The node address is %s\n  validator %s\n  logs:     journalctl -u %s -f\n' "$URL" "$ADDRESS" "$SERVICE"
+  fi
   if [ -n "$TOR" ]; then
     printf '  onion:    %s (port 443; trust its certificate by fingerprint, below)\n' "$ONION"
     # (`vibehash setup --tls-fingerprint` takes it with or without the colons; a renewed certificate has a new one)

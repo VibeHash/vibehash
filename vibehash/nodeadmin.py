@@ -32,6 +32,13 @@ steps, one step either side for a clock that drifts, each code good once) and gi
 X-Admin-Login; it lasts SESSION_S and is kept in memory only, so a restart signs everyone out. Every admin of a node
 adds the same key to their own app. A stolen token is then not enough: the phone is needed too.
 
+Where from: $VIBEHASH_ADMIN_ALLOW_IPS, a comma-separated list of networks (CIDR), limits the admin routes to clients
+in them, e.g. "100.64.0.0/10,127.0.0.1/32" for a Tailscale tailnet and this computer. Anyone else gets 404, as from a
+node with no admin routes, before the token is looked at and without counting as a wrong try. The address checked is
+the one wrong tries count against (`client_ip`): behind a proxy on this computer it is the client the proxy names, so
+a node reached through a public proxy (Cloudflare) needs its admins to reach it over the tailnet instead (their hosts
+file naming the node's domain at its tailnet address keeps the certificate valid).
+
 Wrong guesses: an address that sends MAX_FAILS wrong tokens or codes within FAIL_WINDOW_S is turned away (403,
 Retry-After) for the rest of that window, before its token is even looked at; and MAX_CODE_FAILS wrong codes from
 anywhere, which take the right token to send, stop codes being taken at all for the window, since someone holding the
@@ -143,6 +150,37 @@ def mfa_key(text: str) -> bytes:
     return key
 
 
+ALLOW_ENV = "VIBEHASH_ADMIN_ALLOW_IPS"
+
+
+def parse_allow(text: str | None) -> tuple:
+    """The networks $VIBEHASH_ADMIN_ALLOW_IPS names ("100.64.0.0/10,127.0.0.1/32"; a bare address is one host);
+    () for none, which allows every address. ValueError for one that isn't a network."""
+    nets = []
+    for part in str(text or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            raise ValueError(f"{ALLOW_ENV}: {part!r} isn't an address or a network such as 100.64.0.0/10") from None
+    return tuple(nets)
+
+
+def allowed(ip: str | None, nets: tuple) -> bool:
+    """Whether `ip` is in one of `nets` (no networks: every address is)."""
+    if not nets:
+        return True
+    try:
+        addr = ipaddress.ip_address(str(ip or "").split("%")[0])
+    except ValueError:
+        return False
+    if getattr(addr, "ipv4_mapped", None):  # ::ffff:100.64.0.7 is 100.64.0.7
+        addr = addr.ipv4_mapped
+    return any(addr.version == n.version and addr in n for n in nets)
+
+
 def check_token(token: str | None) -> None:
     """ValueError for a token too short to be safe from guessing."""
     if token and len(token) < MIN_TOKEN:
@@ -190,9 +228,11 @@ def client_ip(peer: str, forwarded_for: str | None) -> str:
 
 
 class Admin:
-    def __init__(self, store, token: str | None, now=time.time, mfa: str | None = None):
+    def __init__(self, store, token: str | None, now=time.time, mfa: str | None = None, allow: str | None = None):
+        """`allow`: the networks the admin routes answer (parse_allow); None reads $VIBEHASH_ADMIN_ALLOW_IPS."""
         check_token(token)
         self.store, self.token, self.now = store, token or None, now
+        self.allow = parse_allow(os.environ.get(ALLOW_ENV) if allow is None else allow)
         if mfa and not self.token:
             raise ValueError("an authenticator key (--admin-mfa) needs an admin token (--admin-token) too")
         self.mfa: bytes | None = mfa_key(mfa) if mfa else None
@@ -277,7 +317,7 @@ class Admin:
             self.last_code = taken
 
     def _token(self, authorization: str | None, ip: str | None) -> None:
-        if not self.enabled:
+        if not self.enabled or not allowed(ip, self.allow):  # (from elsewhere: as if there were no admin routes)
             raise KeyError("admin")
         with self.lock:
             now = self.now()

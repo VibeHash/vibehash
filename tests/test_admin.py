@@ -3,6 +3,8 @@ orders (admin.py), and the globe's land dots (scripts/make_globe.py)."""
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -396,6 +398,14 @@ class NodeRouteTests(unittest.TestCase):
         sent = {**signed, nodeadmin.CODE_HEADER: nodeadmin.totp(key, step())}
         self.assertEqual(self.call("/admin/review", {"on": True}, token=NODE_TOKEN, headers=sent)[1]["review"], True)
 
+    def test_an_allowlist_hides_the_routes_from_other_addresses(self):
+        self.node.admin.allow = nodeadmin.parse_allow("100.64.0.0/10")  # the test talks from 127.0.0.1
+        self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 404)
+        self.assertEqual(self.call("/admin/login", {"code": "123456"}, token=NODE_TOKEN)[0], 404)
+        self.assertEqual(self.call("/status")[0], 200)  # the public routes don't change
+        self.node.admin.allow = nodeadmin.parse_allow("100.64.0.0/10,127.0.0.1/32")
+        self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 200)
+
     def test_a_node_without_a_token_has_no_admin_routes(self):
         self.node.admin.token = None
         self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 404)
@@ -492,6 +502,33 @@ class OpsRouteTests(NodeRouteTests):
             self.assertIn("forced", self.node.restart_requested)
 
 
+class AllowTests(unittest.TestCase):
+    """$VIBEHASH_ADMIN_ALLOW_IPS: the admin routes answer only clients in those networks (a tailnet, this computer)."""
+
+    def test_networks_are_read_and_matched(self):
+        nets = nodeadmin.parse_allow("100.64.0.0/10, 127.0.0.1/32;fd7a:115c:a1e0::/48")
+        for ip, ok in [("100.101.5.9", True), ("127.0.0.1", True), ("8.8.8.8", False), ("::ffff:100.64.0.7", True),
+                       ("fd7a:115c:a1e0::5", True), ("::1", False), (None, False), ("not an address", False)]:
+            self.assertEqual(nodeadmin.allowed(ip, nets), ok, ip)
+        self.assertTrue(nodeadmin.allowed("8.8.8.8", nodeadmin.parse_allow("")))  # none set: every address
+        with self.assertRaises(ValueError):
+            nodeadmin.parse_allow("100.64.0.0/10,tailnet")
+
+    def test_from_elsewhere_the_routes_arent_there_and_it_isnt_a_wrong_try(self):
+        a = nodeadmin.Admin(FakeStore(), TOKEN, allow="100.64.0.0/10")
+        a.check("Bearer " + TOKEN, ip="100.70.1.2")
+        for _ in range(nodeadmin.MAX_FAILS + 2):
+            with self.assertRaises(KeyError):  # 404, as from a node with no admin routes
+                a.check("Bearer " + TOKEN, ip="8.8.8.8")
+            with self.assertRaises(KeyError):
+                a.login("Bearer " + TOKEN, "123456", ip="8.8.8.8")
+        self.assertEqual(a.fails, {})
+        with mock.patch.dict(os.environ, {nodeadmin.ALLOW_ENV: "127.0.0.1/32"}):
+            b = nodeadmin.Admin(FakeStore(), TOKEN)  # from the environment when not given
+        with self.assertRaises(KeyError):
+            b.check("Bearer " + TOKEN, ip="100.70.1.2")
+
+
 class QuorumTests(unittest.TestCase):
     """Whether finality survives a validator's restart, from who signed the last blocks' certificates."""
 
@@ -550,6 +587,19 @@ class HaltExitTests(unittest.TestCase):
         self.assertEqual(HALT_EXIT, 42)
         self.assertEqual(self.run_node(halted="block 9 couldn't be saved"), HALT_EXIT)
         self.assertEqual(self.run_node(restart_requested="an admin asked"), RESTART_EXIT)
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_follow_refuses_options_that_make_a_new_network(self):
+        script = str(ROOT / "deploy" / "setup-node.sh")
+        cases = [(["--follow", "https://node.example.org", "--fund", "vibe1x=5"], "make a new network"),
+                 (["--follow", "https://node.example.org", "--es"], "make a new network"),
+                 (["--follow", "ftp://node.example.org"], "a node's address"),
+                 (["--follow", "https://node.example.org", "--genesis-hash", "abc"], "64 hex digits"),
+                 (["--genesis-hash", "0" * 64], "goes with --follow")]
+        for extra, says in cases:
+            out = subprocess.run(["bash", script, "--domain", "node2.example.org", *extra], capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.returncode, 1, extra)
+            self.assertIn(says, out.stdout + out.stderr, extra)
 
     def test_the_service_never_restarts_a_halted_node(self):
         unit = (ROOT / "deploy" / "setup-node.sh").read_text(encoding="utf-8")

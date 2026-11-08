@@ -441,6 +441,7 @@ def cmd_node(a):
             raise ValueError(f"the admin routes would be reachable from other computers (--host {a.host}) behind a token alone. "
                              f"Make an authenticator key with `{prog()} admin --new-mfa` and give it to the node with "
                              "--admin-mfa KEY (or $VIBEHASH_ADMIN_MFA), or bind 127.0.0.1")
+        nodeadmin.parse_allow(os.environ.get(nodeadmin.ALLOW_ENV))  # a network that isn't one, before anything starts
     except ValueError as e:
         sys.exit(f"error: {e}")
     try:
