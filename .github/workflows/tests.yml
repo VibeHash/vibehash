@@ -51,8 +51,9 @@ jobs:
           python -m pip install -e .
           python -m unittest ${{ needs.scope.outputs.modules }}
       - if: needs.scope.outputs.scope == 'full'
-        run: python -m pip install -e .[finetune]
-      # CPU PyTorch for tests.test_deepseek, which also fetches DeepSeek's reference code from the Hub (~100 KB), and
+        run: python -m pip install -e ".[finetune,evo,app]"
+      # Every extra (finetune, evo, app) so discovery can import the Evo and window tests, then CPU PyTorch for
+      # tests.test_deepseek, which also fetches DeepSeek's reference code from the Hub (~100 KB), and
       # tests.test_finetune, whose models are tiny and made up (real ones are opt-in: VIBEHASH_REAL_MODELS=1).
       - if: needs.scope.outputs.scope == 'full'
         run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu

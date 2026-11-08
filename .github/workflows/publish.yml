@@ -25,11 +25,11 @@ jobs:
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME doesn't match version $version in pyproject.toml"; exit 1
           fi
-      # A release runs everything the fast tests job does (CPU PyTorch for the DeepSeek and fine-tune tests), found by
+      # A release runs the whole suite: every extra (finetune, evo, app) and CPU PyTorch, so the DeepSeek, Evo and window tests import, found by
       # discovery so no module is ever left out of the list.
       - name: Install Vibe Hash and CPU PyTorch
         run: |
-          python -m pip install -e .[finetune]
+          python -m pip install -e ".[finetune,evo,app]"
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run the tests
         run: python -m unittest discover -s tests -p "test_*.py"
