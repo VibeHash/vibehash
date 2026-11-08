@@ -162,8 +162,22 @@ faster rounds; miners only, no rule change.** The owner asked where training's t
   checks 26.7 -> 20.1. The 18 layers' update 11.6 -> 5.8 ms a step. Tests: `tests/test_es_hybrid.py` OnePassTests
   (CUDA only), and test_es_hybrid, test_task_tokens, test_loop_stop, test_evo_selftest all pass on the 4070.
 - Not checked: another kind of GPU (onepass_for decides there: at worst it keeps the two passes).
-- Next: the bmm read (3.2 ms) can't join the pass without changing a reduction's order (a rule change); the 17% of
-  small ops would fuse with Triton, which Windows lacks; per-phase timings in the worker log would find the live gap.
+- Also on the owner's mining stack (system Python 3.14, torch 2.15.0+cu132): the kernel builds, matches, answering
+  27.3 -> 20.7 s. The Evo dashboard costs 0.6 ms a frame and slows decoding not at all; engine builds and graph
+  captures are under 1 s a round, shared prompt readings ~0.7 s, the host ~0.9 ms a step, apply_round 1.8 s, a line's
+  save 1.2 s every 8 rounds, a node request ~0.2 s. After the one-pass a step is 18.6 ms: matrix products ~5.6, small
+  elementwise 4.3, the update 4.3, the state read 3.3, attention 1.4.
+- **Checks in bigger groups (client.ES_CHECK_BATCH 4 -> 16).** A check runs as long as its longest answer and replay
+  target however few rows it has: 4 claims 17.5 s, 8 and 12 claims 18.9 s, each member's gaps and log-probabilities
+  the same bits in any group. A checker given 5 to 8 claims paid for two groups; now one.
+- **Each part of an Evo round timed (es_client._Laps).** The answering line now ends with its parts, like "answered 4
+  Evo units (64 members) in 41 s: catching up 1.8 s, noise 1.3 s, loading weights 0.3 s, answering 20.7 s, replay
+  17.0 s, uploads 0.4 s" (an illustration from the offline timings; parts under 0.05 s go unsaid), a new line per check group says the same of checks (fetching answers, teacher forcing,
+  replay...), and rounds.jsonl has them as evo_s and evo_check_s. The live rounds' ~20 s a round over the offline
+  profile wasn't the dashboard, the torch version, the network or engine builds: the next live run's lines will say.
+  Tests: test_es2 LapsTests and NetworkTests2.test_a_rounds_evo_work_is_timed_part_by_part.
+- Next: the bmm read (3.2 ms) can't join the pass without changing a reduction's order (a rule change); the 23% of
+  small ops would fuse with Triton, which Windows lacks; a replay_tokens cap (a rule change, a quality run first).
 
 **Merged (PR #68, branch `evo-speed`, 2026-11-07): faster Evo rounds, and a job setting that caps the long tasks' answers
 (`task_tokens`).** The owner asked why training is slow and to cut the math and work on the engine. A worker's round

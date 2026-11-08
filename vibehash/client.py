@@ -36,10 +36,12 @@ log = logging.getLogger("vibehash.worker")
 RETRIES = 4
 BUSY_RETRIES = 6  # for 429 (rate limited) and 503 (busy): the node turned the request away unprocessed
 PARALLEL_REQUESTS = 4  # in flight at once for a round's reveals or a unit's uploads: plenty, and gentle on a small node
-# A round's Evo claims checked together (EsWork.check_many): 4 claims of 2 sampled members x 16 problems are 128 rows,
-# two full passes of Qwen3.5-0.8B's 64, where one member alone filled a quarter of one. Their verdicts go out after
-# each group, so a short verify phase still gets some.
-ES_CHECK_BATCH = 4
+# A round's Evo claims checked together (EsWork.check_many). A check runs as long as its longest answer and its longest
+# replay target, however few rows share the passes, so more claims cost little more: on vibe-08b-2's line (RTX 4070
+# SUPER, 2026-11-08) 4 claims took 17.5 s, 8 and 12 took 18.9 s, every member's gaps and log-probabilities the same
+# bits in any group (4 until then: a checker given 5 to 8 paid for two groups). Their verdicts go out after each
+# group, so a round with more claims than this still sends some before a short verify phase ends.
+ES_CHECK_BATCH = 16
 # A dispute's state tensors in flight at once (tasks.MOVE_PARALLEL times moves by it): a state is a blob a tensor, 336
 # for Qwen3-0.6B's adapters, and one at a time to a distant node took a defender past its move (round 7280).
 TRACE_REQUESTS = 8

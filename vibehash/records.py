@@ -238,7 +238,9 @@ class RoundLog:
     ([reasons] others were slashed for, on this worker's word), checks (verdicts sent), checks_given, check_kinds,
     found_bad (results this worker rejected), dispute_moves, earned_vibe, paid ({work, verify, propose} in VIBE),
     lost_vibe, bounty_vibe, balance_vibe, stake_vibe, reputation (after the round), train_s, upload_s, check_s, prep
-    ([a DeepSeek prep unit's own stats: seconds, tokens a second, peak GPU memory, transfers]), note, outcome (in
+    ([a DeepSeek prep unit's own stats: seconds, tokens a second, peak GPU memory, transfers]), evo_s and evo_check_s
+    ({part: seconds} of an Evo round's answering and checks: catch_up, prompts, noise, gpu_wait, load, answer, replay,
+    texts, upload; fetch, validate, gaps; es_client._Laps), note, outcome (in
     words), sealed, block_time, mining (the one job it was set to mine, when it wasn't mining every job)."""
 
     def __init__(self, path, address: str, node: str, device: str, host: str | None = None):
