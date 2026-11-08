@@ -22,12 +22,15 @@ MLP's gate/up/down; member (j, s) adds s * sigma / sqrt(rank) * (x B_j) A_j^T to
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
 import torch.nn.functional as F
 
 from . import es
+
+log = logging.getLogger("vibehash.worker")
 
 # Every projection but linear attention's in_proj_a and in_proj_b (hidden -> one number a value head: each head's
 # memory decay and write strength, through softplus/exp and a sigmoid). Those are 0.1% of the projections' weights,
@@ -68,6 +71,129 @@ def _rope(x, cos, sin):
 
 def _l2norm(x, eps: float = 1e-6):
     return x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+
+
+# Gated DeltaNet's state update S' = d S + k delta^T (the decay, then the token's write) as one pass over the float32
+# state instead of two (S.mul_(d), then S.baddbmm_(k^T, delta), cuBLAS's K=1 product): each number is
+# fma(k_i, delta_j, S_ij * d), rounded as those two passes round it. Measured on the RTX 4070 SUPER (2026-11-08,
+# vibe-08b-2's shapes): of 335M numbers none came out different (a multiply then an add differs in 4% of them), and the
+# 18 layers' updates take 6.2 ms a step instead of 12.2, in a 25 ms step whose passes over the state were 13.7 ms. A
+# device uses it only once it has given the two passes' bits at the engine's shape (onepass_for), so a machine's numbers
+# are what they were whatever its cuBLAS does: a speed change only, for workers and checkers alike.
+ONEPASS = True  # False: the two passes always (what tests compare it with)
+_ONEPASS: dict = {}  # (device index, B, Dk, Dv) -> the kernel, or None where the two passes stay
+_THREADS = 256
+_ONEPASS_SRC = r"""
+extern "C" __global__ void decay_write(float* S, const float* d, const float* k, const float* dl, int dkdv, int dv) {
+    const int b = blockIdx.y;
+    const int r = (blockIdx.x * blockDim.x + threadIdx.x) * 4;  // four numbers of one row of S (dv % 4 == 0)
+    if (r >= dkdv) return;
+    const int i = r / dv, j = r - i * dv;
+    float4* p = reinterpret_cast<float4*>(S + (size_t)b * dkdv + r);
+    float4 s = *p;
+    const float db = d[b], ki = k[(size_t)b * (dkdv / dv) + i];
+    const float4 e = *reinterpret_cast<const float4*>(dl + (size_t)b * dv + j);
+    s.x = __fmaf_rn(ki, e.x, __fmul_rn(s.x, db));
+    s.y = __fmaf_rn(ki, e.y, __fmul_rn(s.y, db));
+    s.z = __fmaf_rn(ki, e.z, __fmul_rn(s.z, db));
+    s.w = __fmaf_rn(ki, e.w, __fmul_rn(s.w, db));
+    *p = s;
+}
+"""
+
+
+def _build_onepass(index: int):
+    """decay_write compiled for CUDA device `index` by the NVRTC that PyTorch's CUDA builds ship, and loaded. (Not
+    torch.cuda._compile_kernel: it adds a CUDA toolkit's include folders, and stops without CUDA_HOME, which a miner's
+    computer has no reason to have; this kernel includes nothing.)"""
+    import ctypes
+    from torch.cuda import _utils as cu
+
+    if torch.version.hip:
+        raise RuntimeError("written for NVIDIA's compiler")
+    nvrtc = cu._get_gpu_rtc_library()
+    nvrtc.nvrtcGetErrorString.restype = ctypes.c_char_p  # const char* nvrtcGetErrorString(nvrtcResult)
+
+    def ok(r):
+        if r != 0:
+            raise RuntimeError(f"NVRTC: {(nvrtc.nvrtcGetErrorString(r) or b'error').decode()}")
+    p = torch.cuda.get_device_properties(index)
+    opts = [f"--gpu-architecture=sm_{p.major}{p.minor}".encode(), b"-ftz=false"]
+    prog = ctypes.c_void_p()
+    ok(nvrtc.nvrtcCreateProgram(ctypes.byref(prog), _ONEPASS_SRC.encode(), b"decay_write.cu", 0, None, None))
+    try:
+        if nvrtc.nvrtcCompileProgram(prog, len(opts), (ctypes.c_char_p * len(opts))(*opts)) != 0:
+            n = ctypes.c_size_t()
+            nvrtc.nvrtcGetProgramLogSize(prog, ctypes.byref(n))
+            text = ctypes.create_string_buffer(n.value)
+            nvrtc.nvrtcGetProgramLog(prog, text)
+            raise RuntimeError(f"NVRTC: {text.value.decode(errors='replace').strip()}")
+        n = ctypes.c_size_t()
+        ok(nvrtc.nvrtcGetCUBINSize(prog, ctypes.byref(n)))
+        cubin = ctypes.create_string_buffer(n.value)
+        ok(nvrtc.nvrtcGetCUBIN(prog, cubin))
+    finally:
+        nvrtc.nvrtcDestroyProgram(ctypes.byref(prog))
+    with torch.cuda.device(index):
+        return cu._cuda_load_module(cubin.raw, ["decay_write"])["decay_write"]
+
+
+def _launch(kern, S, d, k, delta) -> None:
+    B, Dk, Dv = S.shape
+    with torch.cuda.device(S.device):  # the kernel's launch goes to the current device's current stream (a graph's)
+        kern(grid=(-(-(Dk * Dv // 4) // _THREADS), B, 1), block=(_THREADS, 1, 1), args=[S, d, k, delta, Dk * Dv, Dv])
+
+
+def decay_write(S, d, k, delta, kern=None) -> None:
+    """S = d S + k^T delta, in place (S [B, Dk, Dv], d [B, 1, 1], k [B, 1, Dk], delta [B, 1, Dv], all float32): one
+    pass with `kern` (onepass_for), else the two."""
+    if (kern is not None and d.is_contiguous() and k.is_contiguous() and delta.is_contiguous() and S.is_contiguous()
+            and S.data_ptr() % 16 == 0 and delta.data_ptr() % 16 == 0):
+        _launch(kern, S, d, k, delta)
+        return
+    S.mul_(d)
+    S.baddbmm_(k.transpose(1, 2), delta)
+
+
+def onepass_for(dev, B: int, Dk: int, Dv: int):
+    """The one-pass update's kernel for float32 states [B, Dk, Dv] on CUDA device `dev`, if it builds there (PyTorch's
+    own NVRTC, _build_onepass) and gives the two passes' bits on test states of that shape, a quarter
+    of them faded down to float32's subnormals as a long-decayed memory is; None otherwise, and the engine keeps the
+    two passes. Worked out once a process for each shape."""
+    if not ONEPASS:
+        return None
+    dev = torch.device(dev)
+    key = (dev.index if dev.index is not None else torch.cuda.current_device(), B, Dk, Dv)
+    if key in _ONEPASS:
+        return _ONEPASS[key]
+    kern = None
+    if Dv % 4 == 0 and 0 < B <= 65535:
+        try:
+            _pin_precision()  # (TF32 would round baddbmm_'s inputs: the engine has it off, and so does this check)
+            kern = _build_onepass(key[0])
+            with torch.cuda.device(key[0]):
+                g =torch.Generator(device=dev).manual_seed(7919 * B + 31 * Dk + Dv)
+                S = torch.randn(B, Dk, Dv, generator=g, device=dev) * 0.3
+                S[: B // 4] *= 1e-38
+                d = torch.rand(B, 1, 1, generator=g, device=dev) * 0.999 + 0.001
+                k = F.normalize(torch.randn(B, 1, Dk, generator=g, device=dev), dim=-1)
+                delta = torch.randn(B, 1, Dv, generator=g, device=dev) * 0.1
+                want, got = S.clone(), S.clone()
+                want.mul_(d)
+                want.baddbmm_(k.transpose(1, 2), delta)
+                _launch(kern, got, d, k, delta)
+                off = int((want.view(torch.int32) != got.view(torch.int32)).sum())
+                if off:
+                    log.info("the one-pass state update rounds %d of %d numbers differently from the two passes on "
+                             "%s: the engine keeps the two", off, want.numel(), torch.cuda.get_device_name(key[0]))
+                    kern = None
+                del S, want, got
+        except Exception as e:  # noqa: BLE001 - an older PyTorch, no NVRTC, a GPU it doesn't build for: two passes
+            log.info("the one-pass state update isn't available on cuda:%d (%s): the engine keeps the two passes",
+                     key[0], e)
+            kern = None
+    _ONEPASS[key] = kern
+    return kern
 
 
 def _shared(rt, rows):
@@ -147,9 +273,12 @@ class _Hybrid:
         self.lp = z(R + 1, T, d=torch.float32)
         self.eos = torch.tensor(rt.eos, device=dev)
         self.graphs = {}
+        self.onepass = None  # the state's decay and write in one pass (onepass_for), where it's this machine's numbers
         if dev.type == "cuda":
             self.pool = torch.cuda.graph_pool_handle()
             self.stream = torch.cuda.Stream()
+            if any(k == "linear_attention" for k in self.kinds):
+                self.onepass = onepass_for(dev, n * self.Hv, self.Dk, self.Dv)
 
     def load(self, fac):
         by_name = {nm: i for i, nm in self.names.items()}
@@ -188,13 +317,13 @@ class _Hybrid:
         beta = b.sigmoid().float().reshape(B, 1, 1)
         d = (-la.A_log.float().exp() * F.softplus(a.float() + la.dt_bias)).exp().reshape(B, 1, 1)  # the decay
         # S' = d S + k delta^T, delta = (v - d k^T S) beta, out = q^T S' = d q^T S + (q.k) delta: the state is read
-        # once for both products, then decayed and updated in place (5 passes over it a step instead of 6).
+        # once for both products, then decayed and updated in place: 3 passes over it a step with the one-pass
+        # update (decay_write), 5 without (6 before either).
         Sv = self.rec[l].view(B, Dk, Dv)
         kq = torch.bmm(torch.cat([k, q], 1), Sv) * d  # [B, 2, Dv]: d k^T S, d q^T S
         delta = (v.float().reshape(B, 1, Dv) - kq[:, :1]) * beta
         o = (kq[:, 1:] + torch.bmm(q, k.transpose(1, 2)) * delta).reshape(B, Dv).to(x.dtype)
-        Sv.mul_(d)
-        Sv.baddbmm_(k.transpose(1, 2), delta)
+        decay_write(Sv, d, k, delta, self.onepass)
         o = la.norm(o, zg.reshape(n * Hv, Dv)).reshape(n, Hv * Dv)
         return self._lin(la.out_proj, o)
 
