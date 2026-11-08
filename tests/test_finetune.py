@@ -599,6 +599,85 @@ class HuggingFaceTests(unittest.TestCase):
         torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
 
 
+@unittest.skipUnless(torch is not None and importlib.util.find_spec("transformers"), "needs transformers")
+class MergedModelTests(unittest.TestCase):
+    """`job download --merged`: the base with the adapters folded in, a plain model folder (no PEFT)."""
+
+    def setUp(self):
+        self.d = tmpdir(self)
+        self.tiny = TinyModel(self.d).use(self)
+        self.spec, self.data = self.tiny.spec(targets=("q", "v", "up")), self.tiny.dataset()
+        self.theta = ft.train_segment(self.spec, self.data, self.spec.init_params(), 3, 0, 8, 1e-2, 8)
+
+    def merge(self, name: str, **kw) -> dict:
+        return ft.export_merged(self.spec, self.theta, self.tiny.manifest, self.d / name, {"job_id": "test"},
+                                read_file=lambda p: (self.tiny.folder / p).read_bytes(), **kw)
+
+    def test_in_float32_it_loads_in_transformers_and_gives_the_adapters_outputs(self):
+        from transformers import AutoModelForCausalLM
+
+        info = self.merge("merged32", float32=True)
+        self.assertEqual((info["dtype"], info["projections changed"], info["trained"]), ("float32", 6, True))
+        self.assertLess(info["rounding"], 1e-5)
+        self.assertEqual(json.loads((self.d / "merged32" / "config.json").read_text())["torch_dtype"], "float32")
+        rt = ft.runtime(self.spec, self.data, "cpu")
+        b = torch.from_numpy(self.theta[self.spec.parts[0]].astype(np.float32))
+        ad = {n: (a, b[s].view(shape)) for n, a, s, shape in rt.lora[self.spec]}
+        ids = torch.from_numpy(self.data.batch(np.arange(4))[0])
+        model = AutoModelForCausalLM.from_pretrained(self.d / "merged32", attn_implementation="eager").eval()
+        self.assertEqual(next(model.parameters()).dtype, torch.float32)
+        with torch.no_grad():
+            want, base, got = rt.model.logits(ids, ad, self.spec.scaling), rt.model.logits(ids), model(ids).logits
+        self.assertGreater(float((want - base).abs().max()), 1e-3)  # the adapter does something
+        torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
+
+    def test_in_the_bases_bf16_it_is_base_plus_change_rounded_and_the_rest_byte_for_byte(self):
+        from tests.finetune_fixtures import bf16
+        from vibehash import hub
+
+        info = self.merge("merged")
+        self.assertEqual(info["dtype"], "bfloat16")
+        self.assertTrue(0 < info["rounding"] <= 1, info["rounding"])  # W itself is a candidate: never off by more
+        raw = (self.d / "merged" / "model.safetensors").read_bytes()
+        header = hub.parse_header(raw[8:8 + int.from_bytes(raw[:8], "little")], len(raw))
+        self.assertEqual(set(header.tensors), set(self.tiny.tensors))
+        changes, i = {}, 0
+        for (name, rows, _), a in zip(self.spec.modules(), self.spec.lora_a()):
+            bm = self.theta[self.spec.parts[0]][i:i + rows * self.spec.rank].reshape(rows, self.spec.rank)
+            changes[f"{name}.weight"] = self.spec.scaling * (bm @ a.astype(np.float64))
+            i += rows * self.spec.rank
+        for name, (dtype, shape, base) in self.tiny.tensors.items():
+            got_dtype, got_shape, begin, end = header.tensors[name]
+            ours = raw[header.data_start + begin:header.data_start + end]
+            self.assertEqual((got_dtype, list(got_shape)), (dtype, list(shape)))
+            want = base if name not in changes else bf16((_array(dtype, shape, base) + changes[name]).astype(np.float32))
+            self.assertEqual(ours, want, name)
+        self.assertEqual((self.d / "merged" / "config.json").read_bytes(), self.tiny.config_bytes)
+        readme = (self.d / "merged" / "README.md").read_text()
+        self.assertIn(self.spec.commit, readme)
+        self.assertIn(f"{info['rounding']:.1%} of the change", readme)
+
+    def test_it_refuses_another_manifest_and_a_folder_of_other_files(self):
+        other = TinyModel(self.d / "other", seed=1)
+        with self.assertRaisesRegex(ValueError, "isn't the base model the job pins"):
+            ft.export_merged(self.spec, self.theta, other.manifest, self.d / "x")
+        (self.d / "taken").mkdir()
+        (self.d / "taken" / "notes.txt").write_text("mine")
+        with self.assertRaises(FileExistsError):
+            self.merge("taken")
+        self.merge("again")
+        self.merge("again")  # an earlier merge's folder is replaced
+
+    def test_a_deepseek_job_is_told_to_take_its_adapter(self):
+        from types import SimpleNamespace
+
+        from vibehash import cli
+
+        job = SimpleNamespace(spec=SimpleNamespace(kind="deepseek"), job_id="ds-1")
+        with self.assertRaisesRegex(SystemExit, "hundreds of GB"):
+            cli._download_merged(SimpleNamespace(out=None, float32=False), None, job, None, {}, None, "")
+
+
 @needs_torch
 class TrainingTests(unittest.TestCase):
     def setUp(self):
@@ -1772,6 +1851,17 @@ class LiveNetworkTests(unittest.TestCase):
         self.assertEqual(len(header.tensors), 2 * len(spec.modules()))
         self.assertIn("base_model.model.model.layers.1.self_attn.o_proj.lora_B.weight", header.tensors)
         self.assertEqual(json.loads((out / "adapter_config.json").read_text())["revision"], spec.commit)
+
+        # --merged, as someone who didn't post the job would: the base's manifest comes from the job's dataset
+        ft.manifest_path(spec.repo, spec.commit).unlink(missing_ok=True)
+        merged = d / "merged"
+        said = run("job", "download", "chats-1", "--node", node.url, "--out", str(merged), "--merged")
+        self.assertIn("Fetching job chats-1's dataset", said)
+        self.assertIn("tiny/qwen3 with the adapter merged in, bfloat16", said)
+        for f in ("config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors", "README.md",
+                  "finetune.json"):
+            self.assertTrue((merged / f).is_file(), f)
+        self.assertTrue(ft.manifest_path(spec.repo, spec.commit).exists())  # kept for next time
 
 
 @unittest.skipUnless(REAL and torch is not None, "set VIBEHASH_REAL_MODELS=1 to fetch and check Qwen3-0.6B")

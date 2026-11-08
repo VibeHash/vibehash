@@ -1478,14 +1478,14 @@ def cmd_job_download(a):
 
     job_id = _job_of(a)
     node = _job_node(a, job_id)
-    if _evo_job(node, job_id):  # an Evo job keeps no weights: its model is worked out from the chain
-        return _evo_export(node, job_id, a.out)
+    if _evo_job(node, job_id):  # an Evo job keeps no weights: its model is worked out from the chain (a whole model)
+        return _evo_export(node, job_id, a.out, dtype="float32" if a.float32 else "bfloat16")
     info, raw = node.download_model(job_id)
     job = TrainingJob.from_spec_json(json.dumps(info["spec"]), info["owner"], 0)
     weights = np.frombuffer(raw, dtype=job.wire_dtype).astype(np.float64)
     receipt_path = _job_home(job_id) / "job.json"
     if job.finetune:
-        out = _download_adapter(a, job, info, weights, receipt_path)
+        out = _download_adapter(a, node, job, info, weights, receipt_path)
         return _training_record(node, job_id, info, out, receipt_path)
     n_in, n_out = job.spec.n_in, job.spec.n_out
     if receipt_path.exists():
@@ -1510,31 +1510,96 @@ def cmd_job_download(a):
     _training_record(node, job_id, info, out, receipt_path)
 
 
-def _download_adapter(a, job, info: dict, weights, receipt_path: Path) -> Path:
-    """A fine-tune's result: its LoRA adapter as a PEFT folder (finetune.export_peft)."""
+def _download_adapter(a, node: NodeClient, job, info: dict, weights, receipt_path: Path) -> Path:
+    """A fine-tune's result: its LoRA adapter as a PEFT folder (finetune.export_peft), or with --merged the base
+    model with the adapter folded in (finetune.export_merged)."""
     from . import finetune
 
     spec, rounds = job.spec, info["rounds"]
     source = json.loads(receipt_path.read_text()).get("source") if receipt_path.exists() else None
-    out = Path(a.out or (f"{Path(source).stem}-lora" if source else f"{job.job_id}-lora"))
     loss = rounds[-1]["val_loss"] if rounds else None
-    finetune.export_peft(spec, weights, out, {
-        "job_id": job.job_id, "rounds trained": sum(1 for r in rounds if r.get("accepted_units")),
+    done = sum(1 for r in rounds if r.get("accepted_units"))
+    about = {
+        "job_id": job.job_id, "rounds trained": done,
         "held-back loss": f"{rounds[0]['val_loss']:.4f} for the model the first round started from, {loss:.4f} for "
                           "the one the last scored round started from (a fine-tune's workers score each round's start)"
                           if rounds else None,
-        "data": f"sha256 {job.data_source['sha256']}", "model height": (info.get("model") or {}).get("height")})
-    settings.save(last_model=str(out.resolve()))
-    done = sum(1 for r in rounds if r.get("accepted_units"))
+        "data": f"sha256 {job.data_source['sha256']}", "model height": (info.get("model") or {}).get("height")}
     trained = (f"trained in {done} round{'s' * (done != 1)}; held-back loss {loss:.4f} as the last scored round began "
                "(workers score each round's model in the job's next round)") if done else \
         "not trained yet: B is still zero, so it changes nothing"
+    if a.merged:
+        return _download_merged(a, node, job, weights, about, source, trained)
+    if a.float32:
+        print("note: --float32 is for --merged: an adapter is float32 already", file=sys.stderr)
+    out = Path(a.out or (f"{Path(source).stem}-lora" if source else f"{job.job_id}-lora"))
+    finetune.export_peft(spec, weights, out, about)
+    settings.save(last_model=str(out.resolve()))
     print(f"saved {out}/: a LoRA adapter for {spec.repo} at {spec.commit[:12]}, {trained}\n"
           "Use it with transformers and PEFT:\n\n"
           f"  base = AutoModelForCausalLM.from_pretrained(\"{spec.repo}\", revision=\"{spec.commit}\")\n"
           f"  model = PeftModel.from_pretrained(base, \"{out.as_posix()}\")\n\n"
-          f"or vLLM: vllm serve {spec.repo} --revision {spec.commit} --enable-lora --lora-modules mine={out.as_posix()}")
+          f"or vLLM: vllm serve {spec.repo} --revision {spec.commit} --enable-lora --lora-modules mine={out.as_posix()}\n"
+          f"(or the whole model with the adapter merged in: {prog()} job download {job.job_id} --merged)")
     return out
+
+
+def _download_merged(a, node: NodeClient, job, weights, about: dict, source, trained: str) -> Path:
+    """A fine-tune's base model with its adapter folded in, as a model folder (finetune.export_merged)."""
+    from . import finetune, hub
+
+    spec = job.spec
+    if spec.kind != "lora":
+        sys.exit("error: a DeepSeek job's merged model would be the whole of DeepSeek-V4.1-Flash, hundreds of GB, "
+                 "rewritten with its top layers changed: download its adapter (without --merged), which loads on the "
+                 "base with PEFT or vLLM")
+    out = Path(a.out or (f"{Path(source).stem}-merged" if source else f"{job.job_id}-merged"))
+    try:
+        manifest = _base_manifest(node, job)
+        print(f"Merging the adapter into {spec.repo} ({hub._gb(manifest.total_bytes)} of weights, downloaded once and "
+              "kept in the tensor cache, as a worker's are)", flush=True)
+        made = finetune.export_merged(spec, weights, manifest, out, about, float32=a.float32, progress=_progress())
+    except (NodeError, hub.HubError, hub.IntegrityError, ValueError, FileExistsError, KeyError) as e:
+        sys.exit(f"error: {e}")
+    settings.save(last_model=str(out.resolve()))
+    kept = "" if not made["trained"] or made["dtype"] == "float32" else \
+        (f"\nRounded to {made['dtype']}, the weights are off from base + change by {made['rounding']:.1%} of the change "
+         "(--float32 keeps it whole, at twice the size)")
+    print(f"saved {out}/: {spec.repo} with the adapter merged in, {made['dtype']}, {trained}{kept}\n"
+          "Use it as you would the base model:\n\n"
+          f"  model = AutoModelForCausalLM.from_pretrained(\"{out.as_posix()}\")\n\n"
+          f"or vLLM: vllm serve {out.as_posix()}")
+    return out
+
+
+def _base_manifest(node: NodeClient, job):
+    """The base model's hub.Manifest that the fine-tune pins: this computer's (`train` keeps it), or else the one in
+    the job's dataset, fetched from the node (and kept, for next time)."""
+    import tempfile
+
+    from . import finetune, hub
+    from .blobs import BlobStore
+    from .tasks import load_dataset
+
+    spec = job.spec
+    path = finetune.manifest_path(spec.repo, spec.commit)
+    try:
+        return hub.Manifest.from_bytes(path.read_bytes(), spec.manifest)
+    except (OSError, hub.IntegrityError):
+        pass
+    sha = job.data_source.get("sha256")
+    if not sha:
+        raise ValueError(f"job {job.job_id} names no dataset, so there's no manifest of its base model to merge into")
+    print(f"Fetching job {job.job_id}'s dataset from {node.url}: it holds the base model's manifest (its tensors' "
+          "hashes)", flush=True)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+        data = load_dataset(node.download("dataset", sha, BlobStore(d)))
+        if not isinstance(data, finetune.TokenDataset):
+            raise ValueError(f"job {job.job_id}'s dataset isn't a fine-tune's")
+        manifest = hub.Manifest.from_bytes(data.manifest, spec.manifest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(manifest.to_bytes())
+    return manifest
 
 
 def _evo_job(node: NodeClient, job_id: str) -> bool:
@@ -2611,9 +2676,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("job_id", nargs="?", help="default: the last job you trained"); p.add_argument("--node", help=NODE)
     p.add_argument("--plain", action="store_true", help="print a line per event instead of the live dashboard")
     p.set_defaults(fn=cmd_job_watch)
-    p = j.add_parser("download", help="save a job's trained model to use with `predict`, or a fine-tune's LoRA adapter")
+    p = j.add_parser("download", help="save a job's trained model to use with `predict`, a fine-tune's LoRA adapter, or "
+                     "with --merged the whole fine-tuned model")
     p.add_argument("job_id", nargs="?", help="default: the last job you trained")
-    p.add_argument("--out", help="file to save (default JOB.npz), or a fine-tune's folder (default DATA-lora)")
+    p.add_argument("--out", help="file to save (default JOB.npz), or a fine-tune's folder (default DATA-lora, or "
+                   "DATA-merged)")
+    p.add_argument("--merged", action="store_true", help="a fine-tune: the base model with the adapter folded into its "
+                   "weights, a model folder that loads as the base does, no PEFT (downloads the base's weights once)")
+    p.add_argument("--float32", action="store_true", help="with --merged (or an Evo job): save float32 weights, which "
+                   "keep the change whole, not the base's bf16 (twice the size)")
     p.add_argument("--node", help=NODE); p.set_defaults(fn=cmd_job_download)
     p = j.add_parser("history", help="a job's rounds one by one (loss, accuracy, units, VIBE paid, budget left), from the "
                      "node, for any job; saved in ~/.vibehash/jobs/JOB")
