@@ -67,7 +67,10 @@ class TrainingJob:
     max_update_ratio: float = 0.5  # |final - start| / |start| must stay below this (a fine-tune's: LoraSpec.sane)
     compute_s: float = 0.0  # a compute phase the job asks for, in seconds; 0: sized from the job (phase_lengths)
     shards: int = 1  # blocks of layers a unit is split into, one worker each (shards.py, SHARDING.md); 1: whole units
-    public: bool | None = None  # True: nodes serve its model to anyone, even set to owner-only (node.job_model); None: unsaid
+    # True: nodes serve its model to anyone, even set to owner-only (node.job_model); None: unsaid. MLP specs only:
+    # accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28; until then a
+    # `public` key there would split validators.
+    public: bool | None = None
     _data: Dataset | TokenDataset | None = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -175,7 +178,6 @@ class TrainingJob:
             steps_per_unit=int(d["steps_per_unit"]), checkpoint_every=int(d["checkpoint_every"]),
             units_per_round=int(d["units_per_round"]), memory_mb=int(d["memory_mb"]), tolerance=float(d["tolerance"]),
             max_update_ratio=float(d["max_update_ratio"]), compute_s=float(d.get("compute_s", 0)),
-            public=d.get("public"),
         )
 
     @classmethod
@@ -190,7 +192,7 @@ class TrainingJob:
                    data_source={"kind": "es"}, init_seed=int(d["init_seed"]), lr=spec.alpha, batch_size=1,
                    steps_per_unit=1, checkpoint_every=1, units_per_round=int(d["units_per_round"]),
                    memory_mb=int(d["memory_mb"]), tolerance=1e-4, max_update_ratio=10.0,
-                   compute_s=float(d.get("compute_s", 0)), public=d.get("public"))
+                   compute_s=float(d.get("compute_s", 0)))
 
     def validate(self) -> None:
         def need(cond, msg):
@@ -199,6 +201,8 @@ class TrainingJob:
 
         need(isinstance(self.job_id, str) and _JOB_ID.match(self.job_id), "job id must be 1-64 chars of a-z 0-9 . _ -")
         need(self.public is None or isinstance(self.public, bool), "public is true or false")
+        need(self.public is None or not (self.es or self.finetune or self.deepseek),
+             "a fine-tune's or ES job's spec has no field 'public'")
         if self.es:
             problems = self.spec.problems_list()
             need(not problems, "; ".join(problems))
@@ -402,9 +406,11 @@ def is_finetune_spec(d) -> bool:
 
 
 # Every field a fine-tune's spec may have (TrainingJob.to_spec): anything else is refused rather than ignored.
+# `public` is accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28;
+# until then a `public` key there would split validators.
 FINETUNE_KEYS = {"id", "fee_per_round", "base", "manifest", "model", "lora", "seq_len", "optimizer", "precision", "data",
                  "init_seed", "lr", "batch_size", "steps_per_unit", "checkpoint_every", "units_per_round", "memory_mb",
-                 "tolerance", "max_update_ratio", "compute_s", "public"}
+                 "tolerance", "max_update_ratio", "compute_s"}
 
 
 def load_dataset(path, max_bytes: int | None = None) -> Dataset | TokenDataset | TokenFile:

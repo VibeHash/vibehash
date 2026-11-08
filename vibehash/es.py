@@ -645,8 +645,10 @@ def is_es_spec(d) -> bool:
         and "n_in" not in d["model"] and "lora" not in d
 
 
+# (`public` is accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28;
+# until then a `public` key there would split validators.)
 ES_KEYS = {"id", "fee_per_round", "base", "manifest", "model", "es", "init_seed", "units_per_round", "memory_mb",
-           "compute_s", "public"}
+           "compute_s"}
 
 
 # --- the state and the update rule ----------------------------------------------------------------------------------

@@ -80,6 +80,18 @@ class ModelGateTests(unittest.TestCase):
         with self.assertRaisesRegex(WireError, "too far"):
             n.job_model("mine", 0, signed(OWNER, "mine", ts=int(time.time()) - 121))
 
+    def test_under_public_a_stale_or_bad_signature_is_served_as_unsigned(self):
+        stale = signed(OWNER, "mine", ts=int(time.time()) - 121)
+        n = self.node()
+        with self.assertLogs("vibehash.node", "INFO") as seen:
+            self.assertEqual(n.job_model("mine", 0, stale), WEIGHTS)
+            self.assertEqual(n.job_model("mine", 0, {**signed(OWNER, "open"), "X-VibeHash-Ts": "1"}), WEIGHTS)
+            self.assertEqual(n.job_model("mine", 0, stale), WEIGHTS)
+        self.assertEqual(len([m for m in seen.output if "refuse a request" in m]), 1, seen.output)
+        self.assertEqual(raw(n.url, "GET", "/job/mine/model?offset=0", headers=stale)[0], 200)
+        with self.assertRaisesRegex(WireError, "too far"):
+            self.node(model_access="owner").job_model("mine", 0, stale)
+
     def test_a_bad_signature_or_one_for_another_job_is_an_error(self):
         n = self.node(model_access="owner")
         with self.assertRaisesRegex(WireError, "bad"):
@@ -167,6 +179,16 @@ class SpecPublicTests(unittest.TestCase):
             back = TrainingJob.from_spec_json(job.spec_json(), OWNER.address, 0)
             self.assertEqual(back.public, kw.get("public"))
             self.assertEqual(back.spec_json(), job.spec_json())
+
+    def test_fine_tune_and_es_specs_refuse_public_for_now(self):
+        from vibehash.tasks import InvalidJob
+        from vibehash.es import ES_KEYS
+        from vibehash.tasks import FINETUNE_KEYS
+        self.assertNotIn("public", ES_KEYS | FINETUNE_KEYS)
+        for d in ({"id": "j", "lora": {}, "model": {"x": 1}, "public": True},
+                  {"id": "j", "es": {}, "model": {"x": 1}, "public": True}):
+            with self.assertRaisesRegex(InvalidJob, "public"):
+                TrainingJob.from_spec_json(json.dumps(d), OWNER.address, 0)
 
     def test_a_public_that_is_not_a_bool_is_refused(self):
         d = TrainingJob("j", OWNER.address, 0, 0, spec=ModelSpec(4, (4,), 2)).to_spec()

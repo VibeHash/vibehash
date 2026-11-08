@@ -1125,7 +1125,15 @@ class Node:
     def job_model(self, job_id: str, offset: int, headers) -> bytes:
         if job_id not in self.chain.state.jobs:
             raise KeyError(job_id)
-        reader = self._model_reader(job_id, headers)
+        try:
+            reader = self._model_reader(job_id, headers)
+        except WireError as e:
+            if self.model_access == "owner":
+                raise
+            reader = None  # served as ever under "public": a peer whose clock is off must not lose the model for signing it
+            if (job_id, "bad signature") not in self._would_refuse and len(self._would_refuse) < 10_000:
+                self._would_refuse.add((job_id, "bad signature"))
+                log.info("model_access=owner would refuse a request for job %s: %s", job_id, e)
         if not self._model_allowed(job_id, reader):
             if self.model_access == "owner":
                 raise ModelPrivate("this job's model is private to its owner")
@@ -1335,18 +1343,18 @@ class Node:
             pub, sig = bytes.fromhex(headers.get("X-VibeHash-Pubkey", "")), bytes.fromhex(headers.get("X-VibeHash-Sig", ""))
             ts = int(headers.get("X-VibeHash-Ts", "0"))
         except ValueError as e:
-            raise WireError("missing or malformed upload signature") from e
+            raise WireError("missing or malformed request signature") from e
         if abs(time.time() - ts) > MAX_CLOCK_SKEW_S:
-            raise WireError("upload timestamp too far from node clock")
+            raise WireError("request timestamp too far from node clock")
         if not verify(pub, canonical([self.chain.chain_id, kind, *parts, ts]), sig):
-            raise WireError("bad upload signature")
+            raise WireError("bad request signature")
         return address_of(pub)
 
     def _uploader(self, kind: str, blob_id: str, total: int, headers) -> str:
         """Who is uploading: the signer of the chunk, which an upload must have."""
         addr = self._signed_by(kind, blob_id, total, headers=headers)
         if addr is None:
-            raise WireError("missing or malformed upload signature")
+            raise WireError("missing or malformed request signature")
         return addr
 
     def _model_reader(self, job_id: str, headers) -> str | None:
