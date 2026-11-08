@@ -646,7 +646,7 @@ def is_es_spec(d) -> bool:
 
 
 ES_KEYS = {"id", "fee_per_round", "base", "manifest", "model", "es", "init_seed", "units_per_round", "memory_mb",
-           "compute_s"}
+           "compute_s", "public"}
 
 
 # --- the state and the update rule ----------------------------------------------------------------------------------

@@ -67,6 +67,7 @@ class TrainingJob:
     max_update_ratio: float = 0.5  # |final - start| / |start| must stay below this (a fine-tune's: LoraSpec.sane)
     compute_s: float = 0.0  # a compute phase the job asks for, in seconds; 0: sized from the job (phase_lengths)
     shards: int = 1  # blocks of layers a unit is split into, one worker each (shards.py, SHARDING.md); 1: whole units
+    public: bool | None = None  # True: nodes serve its model to anyone, even set to owner-only (node.job_model); None: unsaid
     _data: Dataset | TokenDataset | None = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -97,7 +98,7 @@ class TrainingJob:
                     "init_seed": self.init_seed, "units_per_round": self.units_per_round, "memory_mb": self.memory_mb}
             if self.compute_s:
                 spec["compute_s"] = self.compute_s
-            return spec
+            return self._with_public(spec)
         if self.finetune:  # a shape of its own, so MLP specs stay exactly as they were
             spec = {"id": self.job_id, "fee_per_round": self.fee_per_round, **self.spec.to_json(),
                     "data": self.data_source, "init_seed": self.init_seed, "lr": self.lr, "batch_size": self.batch_size,
@@ -106,7 +107,7 @@ class TrainingJob:
                     "max_update_ratio": self.max_update_ratio}
             if self.compute_s:
                 spec["compute_s"] = self.compute_s
-            return spec
+            return self._with_public(spec)
         spec = {
             "id": self.job_id, "fee_per_round": self.fee_per_round,
             "model": {"n_in": self.spec.n_in, "n_out": self.spec.n_out,
@@ -121,6 +122,11 @@ class TrainingJob:
             spec["compute_s"] = self.compute_s
         if self.shards > 1:  # likewise
             spec["shards"] = self.shards
+        return self._with_public(spec)
+
+    def _with_public(self, spec: dict) -> dict:
+        if self.public is not None:  # left out when unsaid, so specs posted before it existed hash as they did
+            spec["public"] = self.public
         return spec
 
     def spec_json(self) -> str:
@@ -149,7 +155,7 @@ class TrainingJob:
                 checkpoint_every=int(d["checkpoint_every"]), units_per_round=int(d["units_per_round"]),
                 memory_mb=int(d["memory_mb"]), tolerance=float(d["tolerance"]),
                 max_update_ratio=float(d["max_update_ratio"]), compute_s=float(d.get("compute_s", 0)),
-                shards=int(d.get("shards", 1)),
+                shards=int(d.get("shards", 1)), public=d.get("public"),
             )
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError, json.JSONDecodeError) as e:
             # (OverflowError: int() of 1e999, JSON's Infinity; RecursionError: JSON nested too deep. Either escaped
@@ -169,6 +175,7 @@ class TrainingJob:
             steps_per_unit=int(d["steps_per_unit"]), checkpoint_every=int(d["checkpoint_every"]),
             units_per_round=int(d["units_per_round"]), memory_mb=int(d["memory_mb"]), tolerance=float(d["tolerance"]),
             max_update_ratio=float(d["max_update_ratio"]), compute_s=float(d.get("compute_s", 0)),
+            public=d.get("public"),
         )
 
     @classmethod
@@ -183,7 +190,7 @@ class TrainingJob:
                    data_source={"kind": "es"}, init_seed=int(d["init_seed"]), lr=spec.alpha, batch_size=1,
                    steps_per_unit=1, checkpoint_every=1, units_per_round=int(d["units_per_round"]),
                    memory_mb=int(d["memory_mb"]), tolerance=1e-4, max_update_ratio=10.0,
-                   compute_s=float(d.get("compute_s", 0)))
+                   compute_s=float(d.get("compute_s", 0)), public=d.get("public"))
 
     def validate(self) -> None:
         def need(cond, msg):
@@ -191,6 +198,7 @@ class TrainingJob:
                 raise InvalidJob(msg)
 
         need(isinstance(self.job_id, str) and _JOB_ID.match(self.job_id), "job id must be 1-64 chars of a-z 0-9 . _ -")
+        need(self.public is None or isinstance(self.public, bool), "public is true or false")
         if self.es:
             problems = self.spec.problems_list()
             need(not problems, "; ".join(problems))
@@ -396,7 +404,7 @@ def is_finetune_spec(d) -> bool:
 # Every field a fine-tune's spec may have (TrainingJob.to_spec): anything else is refused rather than ignored.
 FINETUNE_KEYS = {"id", "fee_per_round", "base", "manifest", "model", "lora", "seq_len", "optimizer", "precision", "data",
                  "init_seed", "lr", "batch_size", "steps_per_unit", "checkpoint_every", "units_per_round", "memory_mb",
-                 "tolerance", "max_update_ratio", "compute_s"}
+                 "tolerance", "max_update_ratio", "compute_s", "public"}
 
 
 def load_dataset(path, max_bytes: int | None = None) -> Dataset | TokenDataset | TokenFile:
