@@ -281,7 +281,17 @@ round it completes work instead of almost never, as in lottery mining.
     newcomer's bond grows with what it has earned, and a fraud slash or a
     forfeited round costs it that. While earning in, a worker is held to the
     newcomer limit (4 units). It only gets units staked workers didn't need,
-    so newcomers can't crowd them out. It never checks others' work, so a
+    so newcomers can't crowd them out. The exception is Evo: staked workers
+    could take every unit of an Evo round, and an Evo-only chain has no
+    other job to earn a stake on, so each Evo round's first 2 units go to
+    workers earning in, one at a time (`NEWCOMER_RESERVE`). Units are
+    handed out only once registration closes, so a round with nobody
+    earning in holds nothing back, and a unit no newcomer has room for
+    goes to a staked worker. A newcomer that missed its last turn, or was
+    slashed in it, gets only what's left, so a no-show can't keep units
+    from being worked. The round records the rule, and validators refuse a
+    new Evo round on an earn-in chain that leaves it out. A worker earning
+    in never checks others' work, so a
     swarm of free identities can't wave each other's fakes through: their
     work is checked by staked workers, or by the coordinator's own replay.
     At most `max_newcomers` (64) register per round. On the mainnet
