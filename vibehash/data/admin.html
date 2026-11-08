@@ -317,7 +317,7 @@
     var badge = $("n-jobs"); badge.hidden = !held && d.review !== true ? true : false; badge.className = held ? "gold" : ""; text(badge, held ? held + " held" : "review on");
     $("n-devices").hidden = !online; text($("n-devices"), online);
     renderCode(d); renderJobs(d); renderDevices(d); renderNodes(d); renderMempool(d); renderSettings(d);
-    text($("foot"), "Vibe Hash " + (ADMIN.version || "") + " · admin app on this computer only · " + (d.geo && d.geo.enabled ? (d.geo.waiting ? d.geo.waiting + " places being looked up" : "places from ip-api.com, cached a month") : "place lookups off"));
+    text($("foot"), "Vibe Hash " + (ADMIN.version || "") + " · admin app on this computer only · " + (d.geo && d.geo.enabled ? (d.geo.waiting ? d.geo.waiting + " places being looked up" : "places looked up over https, cached a month") : "place lookups off"));
     globeData(d);
   }
 

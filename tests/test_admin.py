@@ -353,6 +353,7 @@ class GeoTests(unittest.TestCase):
         off = admin.Geo(Path(tmp.name) / "other.json", lookup=lookup, enabled=False)
         self.assertIsNone(off.place("1.1.1.1"))
         self.assertEqual(off.waiting(), 0)  # nothing queued: nothing leaves
+        self.assertEqual(asked, [["8.8.8.8"]])  # and the fetcher was never called for it
 
     def test_a_failed_lookup_is_tried_again_next_time(self):
         tmp = tempfile.TemporaryDirectory()
@@ -372,16 +373,11 @@ class GeoTests(unittest.TestCase):
         g.thread.join(5)
         self.assertEqual(g.place("8.8.8.8")["country"], "X")
 
-    def test_ip_api_answers_are_read_carefully(self):
-        answers = [{"status": "success", "query": "8.8.8.8", "lat": 1, "lon": 2, "city": "A", "country": "B"},
-                   {"status": "fail", "query": "1.1.1.1"}, {"status": "success", "query": "9.9.9.9", "lat": "bad"}, "junk"]
-
+    @staticmethod
+    def _resp(data):
         class Resp:
-            def __init__(self, data):
-                self.data = data
-
             def read(self, n=-1):
-                return self.data
+                return json.dumps(data).encode()
 
             def __enter__(self):
                 return self
@@ -389,9 +385,79 @@ class GeoTests(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        with mock.patch.object(admin.urllib.request, "urlopen", return_value=Resp(json.dumps(answers).encode())):
-            out = admin.lookup_ip_api(["8.8.8.8", "1.1.1.1", "9.9.9.9"])
+        return Resp()
+
+    def test_ip_api_answers_are_read_carefully(self):
+        answers = [{"status": "success", "query": "8.8.8.8", "lat": 1, "lon": 2, "city": "A", "country": "B"},
+                   {"status": "fail", "query": "1.1.1.1"}, {"status": "success", "query": "9.9.9.9", "lat": "bad"}, "junk"]
+        with mock.patch.object(admin.urllib.request, "urlopen", return_value=self._resp(answers)):
+            out = admin.lookup_batch("https://pro.ip-api.com/batch", ["8.8.8.8", "1.1.1.1", "9.9.9.9"])
         self.assertEqual(out, {"8.8.8.8": {"lat": 1.0, "lon": 2.0, "city": "A", "country": "B"}, "1.1.1.1": None, "9.9.9.9": None})
+
+    def test_ipinfo_answers_are_read_carefully(self):
+        answers = {"8.8.8.8": {"city": "Mountain View", "country": "US", "loc": "37.4,-122.1"},
+                   "1.1.1.1": {"city": "X", "country": "AU"}, "9.9.9.9": "unknown", "5.5.5.5": {"loc": "bad"}}
+        with mock.patch.object(admin.urllib.request, "urlopen", return_value=self._resp(answers)):
+            out = admin.lookup_batch("https://ipinfo.io/batch", ["8.8.8.8", "1.1.1.1", "9.9.9.9", "5.5.5.5"])
+        self.assertEqual(out, {"8.8.8.8": {"lat": 37.4, "lon": -122.1, "city": "Mountain View", "country": "US"},
+                               "1.1.1.1": None, "9.9.9.9": None, "5.5.5.5": None})
+
+    def test_the_token_is_sent_in_the_request_url(self):
+        seen = []
+
+        def urlopen(req, timeout=None):
+            seen.append(req.full_url)
+            return self._resp({})
+
+        with mock.patch.object(admin.urllib.request, "urlopen", urlopen):
+            admin.lookup_batch("https://ipinfo.io/batch", ["8.8.8.8"], token="SEKRET")
+            admin.lookup_batch("https://ipinfo.io/batch", ["8.8.8.8"])
+            admin.lookup_batch("https://pro.ip-api.com/batch?fields=query", ["8.8.8.8"], token="K")
+        self.assertEqual(seen, ["https://ipinfo.io/batch?token=SEKRET", "https://ipinfo.io/batch",
+                                "https://pro.ip-api.com/batch?fields=query&token=K"])
+
+    def test_a_plain_http_service_is_refused(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "geo.json"
+        with self.assertRaises(ValueError):
+            admin.Geo(path, enabled=True, url="http://ip-api.com/batch")
+        with self.assertRaises(ValueError):
+            admin.lookup_batch("http://ip-api.com/batch", ["8.8.8.8"])
+        admin.Geo(path, enabled=False, url="http://ip-api.com/batch")  # off: nothing is ever sent, so nothing to refuse
+        admin.Geo(path, enabled=True, url="https://ipinfo.io/batch")
+
+    def test_the_url_and_token_come_from_the_environment(self):
+        with mock.patch.dict(admin.os.environ, {"VIBEHASH_GEO_URL": "https://pro.ip-api.com/batch", "VIBEHASH_GEO_TOKEN": "T"}):
+            self.assertEqual(admin.geo_url(), "https://pro.ip-api.com/batch")
+            self.assertEqual(admin.geo_token(), "T")
+        with mock.patch.dict(admin.os.environ, {}, clear=True):
+            self.assertEqual(admin.geo_url(), admin.GEO_URL)
+            self.assertTrue(admin.GEO_URL.startswith("https://"))
+            self.assertIsNone(admin.geo_token())
+
+    def test_geo_is_off_by_default_and_under_a_proxy(self):
+        class Args:
+            pass
+
+        self.assertFalse(admin.geo_wanted({}, Args(), {}))  # off unless turned on
+        self.assertTrue(admin.geo_wanted({"geo": True}, Args(), {}))
+        self.assertFalse(admin.geo_wanted({"geo": True}, Args(), {"proxy": "socks5://127.0.0.1:9050"}))
+        tor = Args()
+        tor.tor = True
+        self.assertFalse(admin.geo_wanted({"geo": True}, tor, {}))
+        proxied = Args()
+        proxied.proxy = "socks5://x:1"
+        self.assertFalse(admin.geo_wanted({"geo": True}, proxied, {}))
+
+    def test_a_refused_service_turns_geo_off_instead_of_crashing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with self.assertLogs("vibehash.admin", "WARNING") as logs:
+            g = admin.make_geo(Path(tmp.name) / "geo.json", True, url="http://ip-api.com/batch")
+        self.assertFalse(g.enabled)
+        self.assertEqual(len(logs.records), 1)
+        self.assertTrue(admin.make_geo(Path(tmp.name) / "geo.json", True, url="https://ipinfo.io/batch").enabled)
 
 
 class FakeNode:

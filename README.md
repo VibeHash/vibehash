@@ -242,8 +242,7 @@ confirm, deny, cancel or post, the ledger as blocks land, the devices online
 and the nodes. It talks to nodes started with `--admin-token` (or
 `$VIBEHASH_ADMIN_TOKEN`), which adds a few routes behind that token: a hold
 on a job (the node leads no round for it until released) and the devices'
-addresses, looked up in batches at ip-api.com and cached a month, never for
-private ones; Settings turns the lookups off. Cancel and post sign with your
+addresses, which are looked up only if you turn that on in Settings (see below). Cancel and post sign with your
 wallet, unlocked in the page. Nodes, tokens and the wallet are saved under
 `"admin"` in config.json. To keep it as an app, `--install-shortcut` puts
 "Vibe Hash Admin", with its own violet icon, in the Start menu (the apps menu
@@ -279,7 +278,13 @@ What a node learns about a miner: the address its worker connects from, and
 what the worker reports of its machine (speed, memory and hardware class).
 The node keeps these in memory only and never serves them on a public route.
 It shows them to its operators in the admin app, which looks up each
-address's rough place (city and country) at ip-api.com to draw the globe.
+address's rough place (city and country) to draw the globe, but only if the
+operator turns that on in its Settings: geo lookups are off by default. When
+on, the addresses of connecting miners (and nothing else) are sent in batches
+to an HTTPS geo service, ipinfo.io by default with the operator's token in
+`$VIBEHASH_GEO_TOKEN`; `$VIBEHASH_GEO_URL` names another `https://` service
+(plain `http://` is refused). Places are cached a month, never looked up for
+private addresses, and the lookups are forced off whenever a proxy is in use.
 Your wallet address and what it earns are public on the chain, as on any
 blockchain.
 

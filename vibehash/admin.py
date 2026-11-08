@@ -24,9 +24,12 @@ asked; each sign-in lasts 12 hours, kept in this process's memory only. A token 
 plainly to this computer or a private network's address: never in the clear across the internet.
 
 Places on the globe come from the devices' connection addresses, which only an admin's node gives out. They are looked
-up in batches at GEO_URL (ip-api.com's free service unless $VIBEHASH_GEO_URL names another; nothing but the addresses
-is sent), cached for a month in ~/.vibehash/admin/geo.json, and never for private or loopback addresses; "geo": false
-in the admin settings sends nothing out, and the globe shows only the nodes' own places from their URLs.
+up in batches at GEO_URL (ipinfo.io's batch service, with the token in $VIBEHASH_GEO_TOKEN, unless $VIBEHASH_GEO_URL
+names another https:// service; nothing but the addresses is sent), cached for a month in ~/.vibehash/admin/geo.json,
+and never for private or loopback addresses. It is off until the operator turns it on ("geo": true in the admin
+settings, or the page's Settings): until then nothing is sent out and the globe shows only the nodes' own places from
+their URLs. A service that is not https:// is refused, and geo is forced off under a proxy (a "proxy" setting, or
+--tor / --proxy) so that no address is looked up outside it.
 
 The shortcut (`--install-shortcut`) is how an operator keeps it as an app: "Vibe Hash Admin" with its own violet icon
 (data/admin.ico) in the Start menu on Windows, the applications menu on Linux, ~/Applications on a Mac. It runs this
@@ -52,6 +55,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -74,7 +78,7 @@ SHORTCUT = "Vibe Hash Admin"
 DEFAULT_PORT = 7546  # beside the worker's feed (7545)
 TITLE = "Vibe Hash admin"
 SIZE, MIN_SIZE = (1280, 820), (900, 600)
-GEO_URL = "http://ip-api.com/batch?fields=status,country,city,lat,lon,query"
+GEO_URL = "https://ipinfo.io/batch"
 GEO_TTL_S = 30 * 86400
 GEO_BATCH = 100
 NODE_TIMEOUT = 15.0
@@ -115,14 +119,46 @@ def is_public_ip(text: str) -> bool:
                 or addr.is_unspecified)
 
 
-def lookup_ip_api(ips: list[str], url: str = GEO_URL) -> dict[str, dict | None]:
-    """ip-api.com's batch lookup: {ip: {"lat", "lon", "city", "country"} or None}."""
-    body = json.dumps([{"query": ip} for ip in ips]).encode()
-    req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json",
-                                                                          "User-Agent": "vibehash-admin"})
-    with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 (the admin's own chosen service)
+def geo_url() -> str:
+    return os.environ.get("VIBEHASH_GEO_URL") or GEO_URL
+
+
+def geo_token() -> str | None:
+    return os.environ.get("VIBEHASH_GEO_TOKEN") or None
+
+
+def _need_https(url: str) -> None:
+    if urlsplit(url).scheme != "https":
+        raise ValueError(f"the geo service must be https:// (addresses are never sent in the clear): {url!r}")
+
+
+def _ipinfo_place(entry) -> dict | None:
+    """One ipinfo entry ({"city", "country", "loc": "lat,lon"}); a string or an entry without a usable loc is no answer."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        lat, lon = str(entry["loc"]).split(",")
+        return {"lat": float(lat), "lon": float(lon), "city": str(entry.get("city") or ""),
+                "country": str(entry.get("country") or "")}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def lookup_batch(url: str, ips: list[str], token: str | None = None) -> dict[str, dict | None]:
+    """A batch lookup of addresses at an https:// service: {ip: {"lat", "lon", "city", "country"} or None}. Reads
+    ipinfo.io's reply (a JSON object keyed by address) and ip-api.com's (a list), told apart by shape. The token goes
+    in the URL as `token=`, as ipinfo's batch API takes it."""
+    _need_https(url)
+    if token:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode({"token": token})
+    req = urllib.request.Request(url, data=json.dumps(list(ips)).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": "vibehash-admin"})
+    with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 (https only, the admin's own chosen service)
         answers = json.loads(resp.read(2**20))
     out: dict[str, dict | None] = dict.fromkeys(ips)
+    if isinstance(answers, dict):
+        for ip in out:
+            out[ip] = _ipinfo_place(answers.get(ip))
     for a in answers if isinstance(answers, list) else []:
         if isinstance(a, dict) and a.get("status") == "success" and a.get("query") in out:
             try:
@@ -135,10 +171,17 @@ def lookup_ip_api(ips: list[str], url: str = GEO_URL) -> dict[str, dict | None]:
 
 class Geo:
     """Places for addresses and host names, cached on disk, looked up in the background so no view waits on the
-    network: `place` answers what is known now and queues the rest."""
+    network: `place` answers what is known now and queues the rest. With `enabled` the service `url` must be https://
+    (ValueError otherwise); `locked` (a proxy is in use) keeps it off whatever `enabled` says."""
 
-    def __init__(self, path: Path, lookup=None, now=time.time, enabled: bool = True):
-        self.path, self.lookup, self.now, self.enabled = path, lookup or lookup_ip_api, now, enabled
+    def __init__(self, path: Path, lookup=None, now=time.time, enabled: bool = True, url: str | None = None,
+                 token: str | None = None):
+        url = url or geo_url()
+        if enabled:
+            _need_https(url)
+        token = token or geo_token()
+        self.path, self.now, self.enabled, self.locked = path, now, enabled, False
+        self.lookup = lookup or (lambda ips: lookup_batch(url, ips, token))
         self.lock = threading.Lock()
         self.cache: dict[str, dict] = {}
         self.names: dict[str, str | None] = {}  # host name -> ip, this run
@@ -173,7 +216,7 @@ class Geo:
             hit = self.cache.get(ip)
             if hit is not None:
                 return hit if "lat" in hit else None
-            if self.enabled:
+            if self.enabled and not self.locked:
                 self.pending.add(ip)
                 if self.thread is None or not self.thread.is_alive():
                     self.thread = threading.Thread(target=self._run, daemon=True, name="geo")
@@ -851,11 +894,37 @@ def save_flags(a, save=settings.save, load=settings.load) -> bool:
     return True
 
 
+def _proxied(a, config: dict) -> bool:
+    # --proxy / --tor and the "proxy" setting come with a later change: read defensively until they exist
+    return bool(config.get("proxy") or getattr(a, "proxy", None) or getattr(a, "tor", False))
+
+
+def geo_wanted(cfg: dict, a, config: dict) -> bool:
+    """Whether place lookups are on: only when the admin settings say "geo": true, and never under a proxy (a "proxy"
+    setting, or --proxy / --tor): the addresses would go out around it."""
+    if _proxied(a, config):
+        if cfg.get("geo"):
+            log.info("place lookups are off: a proxy is in use, and the addresses would be sent around it")
+        return False
+    return bool(cfg.get("geo", False))
+
+
+def make_geo(path: Path, enabled: bool, url: str | None = None) -> Geo:
+    """A Geo; a service that is not https:// turns it off, with one warning, rather than stopping the app."""
+    try:
+        return Geo(path, enabled=enabled, url=url)
+    except ValueError as e:
+        log.warning("place lookups are off: %s", e)
+        return Geo(path, enabled=False, url=url)
+
+
 def build(a) -> AdminApp:
     cfg = settings.load().get("admin") or {}
     links = links_from(cfg, list(getattr(a, "node", None) or []), getattr(a, "token", None))
     wallet = settings.wallet_path(getattr(a, "wallet", None)) or (Path(cfg["wallet"]) if cfg.get("wallet") else None)
-    geo = Geo(settings.home() / "admin" / "geo.json", enabled=bool(cfg.get("geo", True)))
+    config = settings.load()
+    geo = make_geo(settings.home() / "admin" / "geo.json", geo_wanted(cfg, a, config))
+    geo.locked = _proxied(a, config)  # the page's Settings can't switch it on around a proxy
     return AdminApp(links, wallet, geo)
 
 
