@@ -310,7 +310,9 @@ Most harmful first. "Fixed" means fixed on branch `gpu-compat`, with tests; "pro
       Hopper and Blackwell pick a different attention kernel.
 12. **A Mac on macOS 14 quietly mines on the CPU** with PyTorch 2.15 (fixed). `install-gpu` reads the macOS version
     (`gpusetup.macos_version`) and installs `torch<2.15` on macOS 14, and before 14 says to update macOS.
-13. **The GPU self-test only covers the classic path** (proposed). `compute.self_test` (`compute.py:199`) trains a
+13. **The GPU self-test only covers the classic path** (fixed: `evo_selftest.check`, in `vibehash selftest` and
+    before a worker takes an Evo job; graph replay is covered by the device answering through its graphs and
+    checking itself, which comes out exactly 0 on an RTX 4060 with a twin swap caught at 0.22). `compute.self_test` (`compute.py:199`) trains a
     float32 MLP. A card can pass it and still fail Evo's bf16 matmuls (the P100 report), graph capture (ROCm), or
     the RX 6700/6600's missing kernels. The fix is a second test on a tiny Qwen3.5, as
     `tests/test_es_hybrid.tiny_hybrid` builds, checking two things:

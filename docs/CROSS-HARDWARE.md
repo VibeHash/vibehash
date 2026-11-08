@@ -32,7 +32,7 @@ honest worker loses the round and nothing tells that apart from a checker turnin
 | D | **Margin by pair**: `margin` for the same setup (tight: their gaps are 0), `cross_margin` across setups | yes | **built** |
 | E | **A matching machine referees**: a cross-setup rejection on gaps alone, up to twice `cross_margin`, is overruled when a same-setup checker approved | yes | **built** |
 | F3 | Evo without bf16 split-K rounding (GPUS.md risk 2), as a spec field, after a two-card measurement | yes | after |
-| F4 | An Evo self-test: a card that can't reproduce its own answers exactly (gap 0) doesn't take Evo work (GPUS.md risk 13) | no | after |
+| F4 | An Evo self-test: a card that can't reproduce its own answers exactly (gap 0) doesn't take Evo work (GPUS.md risk 13) | no | **built** |
 | H | An integer rule: int8 weights and activations, int32 sums, fixed-point nonlinearities. Bit-identical on every GPU, CPU, Mac and NPU, so the margin is 0 | yes | research |
 
 C, D and E come together, behind one spec field (`cross_margin`), so jobs posted before it run exactly as they did,

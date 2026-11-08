@@ -63,6 +63,19 @@ class GpuDetectionTests(unittest.TestCase):
         self.assertEqual(tags(Gpu("intel", "Intel(R) Data Center GPU Max 1550")), ["xpu"])  # PyTorch's, on Linux
         self.assertEqual(tags(Gpu("intel", "Intel Corporation Ponte Vecchio XT (1 Tile)")), ["xpu"])  # as lspci may say
         self.assertEqual(tags(Gpu("intel", "Intel(R) Data Center GPU Flex 170")), [])  # IPEX's, never stock PyTorch's
+        # Windows: PyTorch 2.15's Intel build crashes as it loads on a driver before 32.0.101.9033 (a Core Ultra 7
+        # 155H's 32.0.101.5768), so the driver is named first
+        arc = lambda driver: builds_for(Gpu("intel", "Intel(R) Arc(TM) Pro Graphics", driver=driver), "win32")  # noqa: E731
+        builds, why = arc((32, 0, 101, 5768))
+        self.assertEqual(builds, [])
+        self.assertIn("32.0.101.5768) is older than the 32.0.101.9033", why)
+        self.assertEqual([b.tag for b in arc((32, 0, 101, 9033))[0]], ["xpu"])
+        self.assertEqual([b.tag for b in arc(None)[0]], ["xpu"])  # a driver Windows didn't name: let PyTorch try
+        self.assertIn("only supports Intel Arc", builds_for(Gpu("intel", "Intel(R) UHD Graphics 770",
+                                                                driver=(32, 0, 101, 5768)), "win32")[1])
+        from vibehash.gpusetup import _driver_version
+        self.assertEqual(_driver_version("32.0.101.5768"), (32, 0, 101, 5768))
+        self.assertIsNone(_driver_version("unknown"))
         self.assertEqual(tags(Gpu("apple", "Apple silicon GPU")), [None])  # the plain PyPI build
         apple = Gpu("apple", "Apple silicon GPU")
         self.assertEqual(builds_for(apple, "darwin", (15, 1))[0][0].pin, "")
@@ -322,3 +335,31 @@ class ConcurrentUploadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrashTests(unittest.TestCase):
+    def test_a_test_process_that_dies_silently_says_so(self):
+        """`import torch` crashing the test process (0xC0000005, an outdated driver) is a problem to show, not
+        "no GPU"."""
+        from unittest import mock
+
+        from vibehash import gpusetup
+        died = mock.Mock(returncode=-1073741819, stdout="", stderr="")
+        with mock.patch.object(gpusetup.subprocess, "run", return_value=died), \
+                mock.patch.object(gpusetup.sys, "platform", "win32"):
+            [d] = gpusetup.devices()
+        self.assertFalse(d["ready"])
+        self.assertIn("crashed as it started (exit code 0xc0000005)", d["problem"])
+
+    def test_other_silent_failures_are_still_no_gpu(self):
+        """Only a Windows exception code reads as a crash: a usage error (2), or a kill on Linux, finds nothing as
+        before."""
+        from unittest import mock
+
+        from vibehash import gpusetup
+        for platform, code in (("win32", 2), ("linux", -9), ("linux", -1073741819)):
+            with self.subTest(platform=platform, code=code):
+                died = mock.Mock(returncode=code, stdout="", stderr="")
+                with mock.patch.object(gpusetup.subprocess, "run", return_value=died), \
+                        mock.patch.object(gpusetup.sys, "platform", platform):
+                    self.assertEqual(gpusetup.devices(), [])

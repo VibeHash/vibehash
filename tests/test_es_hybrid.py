@@ -13,43 +13,9 @@ from tests.test_es import HAVE_TORCH, TEMPLATE
 
 
 def tiny_hybrid(folder: Path, seed: int = 0) -> Path:
-    """A random four-layer Qwen3.5 text model (three Gated DeltaNet layers, one gated full attention; twice as many
-    value heads as key heads, as the 4B has) with test_es's byte-level tokenizer and chat template."""
-    import json
-
-    import torch
-    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
-    from transformers import PreTrainedTokenizerFast
-    from transformers.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5TextConfig
-
-    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
-    vocab = {ch: i for i, ch in enumerate(alphabet)}
-    specials = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
-    tk = Tokenizer(models.BPE(vocab=vocab, merges=[]))
-    tk.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tk.decoder = decoders.ByteLevel()
-    tk.add_special_tokens(specials)
-    tok = PreTrainedTokenizerFast(tokenizer_object=tk, eos_token="<|im_end|>", pad_token="<|endoftext|>")
-    tok.chat_template = TEMPLATE
-    folder.mkdir(parents=True, exist_ok=True)
-    tok.save_pretrained(folder)
-    ids = {s: tok.convert_tokens_to_ids(s) for s in specials}
-    torch.manual_seed(seed)
-    config = Qwen3_5TextConfig(
-        vocab_size=len(vocab) + len(specials), hidden_size=64, intermediate_size=96, num_hidden_layers=4,
-        layer_types=["linear_attention"] * 3 + ["full_attention"], num_attention_heads=4, num_key_value_heads=2,
-        head_dim=16, linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=16,
-        linear_value_head_dim=16, linear_conv_kernel_dim=4, max_position_embeddings=2048, tie_word_embeddings=True,
-        eos_token_id=ids["<|im_end|>"], pad_token_id=ids["<|endoftext|>"])
-    model = Qwen3_5ForCausalLM(config)
-    with torch.no_grad():  # norms away from their start, so the model isn't flat
-        for name, p in model.named_parameters():
-            if "norm" in name:
-                p.add_(torch.randn_like(p) * 0.3)
-    model.save_pretrained(folder)
-    (folder / "generation_config.json").write_text(json.dumps(
-        {"eos_token_id": [ids["<|im_end|>"]], "pad_token_id": ids["<|endoftext|>"]}))
-    return folder
+    """A random four-layer Qwen3.5 text model (evo_selftest.tiny_qwen35, which the Evo self-check runs on)."""
+    from vibehash.evo_selftest import tiny_qwen35
+    return tiny_qwen35(folder, seed)
 
 
 @unittest.skipUnless(HAVE_TORCH, "needs PyTorch and transformers")
