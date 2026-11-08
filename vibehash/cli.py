@@ -398,7 +398,7 @@ def cmd_node(a):
                     announce=normalise_url(a.announce) if a.announce else None, max_job_bytes=int(a.max_job_mb * 2**20),
                     bucket=bucket_from_env(),  # DeepSeek jobs' hand-offs, if $VIBEHASH_BUCKET_* are set
                     min_client=a.min_client, admin_token=a.admin_token, admin_mfa=a.admin_mfa,
-                    onion=a.onion).start()
+                    onion=a.onion, model_access=a.model_access).start()
     except FolderInUse as e:
         sys.exit(f"error: {e}")
     if context:
@@ -1487,7 +1487,14 @@ def cmd_job_download(a):
     node = _job_node(a, job_id)
     if _evo_job(node, job_id):  # an Evo job keeps no weights: its model is worked out from the chain
         return _evo_export(node, job_id, a.out)
-    info, raw = node.download_model(job_id)
+    try:
+        info, raw = node.download_model(job_id)
+    except NodeError as e:
+        if e.status != 403:
+            raise
+        # A node set to serve a job's model to its owner alone: sign as the wallet (asked for only now, since a node
+        # that serves anyone never needs it).
+        info, raw = node.download_model(job_id, keys=load_wallet(wallet_of(a)))
     job = TrainingJob.from_spec_json(json.dumps(info["spec"]), info["owner"], 0)
     weights = np.frombuffer(raw, dtype=job.wire_dtype).astype(np.float64)
     receipt_path = _job_home(job_id) / "job.json"
@@ -2362,6 +2369,10 @@ def parser() -> argparse.ArgumentParser:
                    help="another node to sync from and gossip to (validators find each other from the chain anyway)")
     p.add_argument("--announce", metavar="URL", help="the address other nodes reach this one at, if not --host:--port")
     p.add_argument("--onion", metavar="ADDR.onion", help="this node's Tor hidden-service address, shown in /status")
+    p.add_argument("--model-access", choices=("public", "owner"), default="public",
+                   help="who may download a job's weights from this node: public (anyone; the default), or owner (the "
+                        "job's owner and the validators, by a signed request; starter jobs and jobs whose spec says "
+                        "\"public\": true stay open). While public, the log says which requests owner would refuse")
     p.add_argument("--dataset", action="append", help="add an .npz dataset to this node's store")
     p.add_argument("--device", default="cpu", help="where the node checks work its checkers didn't and scores each round: "
                    "cpu (default), auto, cuda, xpu or mps. Fine-tunes want a GPU here (and PyTorch)")

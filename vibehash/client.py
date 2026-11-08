@@ -290,11 +290,14 @@ class NodeClient:
                 time.sleep(1 + attempt)
         raise NodeError("download failed")
 
-    def download_model(self, job_id: str, job: TrainingJob | None = None, untrained: bool = True) -> tuple[dict, bytes]:
+    def download_model(self, job_id: str, job: TrainingJob | None = None, untrained: bool = True,
+                       keys: KeyPair | None = None) -> tuple[dict, bytes]:
         """A job's latest trained weights, checked against the hash the node reports. Returns (job info, raw bytes).
         Their size is the job's: `job`'s, if the caller has it, else that of the spec the node reports. Nodes don't
         serve an untrained job's weights, since they follow from its spec: they're built here instead (or, with
-        `untrained=False`, NodeError). Nodes from before 0.5.2 serve them, and they download as usual."""
+        `untrained=False`, NodeError). Nodes from before 0.5.2 serve them, and they download as usual.
+        `keys`: sign each chunk's request as these (the job's owner, or a validator), for a node set to serve a job's
+        model to its owner alone (node --model-access owner); anyone else gets a 403 there."""
         for _ in range(RETRIES):
             info = self.get(f"/job/{job_id}")
             try:
@@ -310,7 +313,10 @@ class NodeClient:
                 raise NodeError(f"the node's description of job {job_id} is malformed: {e}") from None
             data = bytearray()
             while len(data) < size:
-                chunk = self._req("GET", f"/job/{job_id}/model?offset={len(data)}", limit=min(CHUNK, size - len(data)))
+                # (signed afresh for each chunk, as an upload's are: the node checks the timestamp against its clock;
+                # Content-Type and X-Total are an upload's alone)
+                auth = {k: v for k, v in self._auth(keys, "model", job_id, 0).items() if k.startswith("X-VibeHash-")} if keys else None
+                chunk = self._req("GET", f"/job/{job_id}/model?offset={len(data)}", headers=auth, limit=min(CHUNK, size - len(data)))
                 if not chunk:
                     raise NodeError("the model download ended early")
                 data += chunk
