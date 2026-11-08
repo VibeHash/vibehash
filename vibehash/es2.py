@@ -93,9 +93,21 @@ class Spec2(es.EsSpec):
     # referee_floor() (Coordinator._es_tasks and _settle_es2; docs/CROSS-HARDWARE.md). 0: one margin for every pair
     # and no referee, as before it (left out of the spec).
     cross_margin: float = 0.0
+    # Shorter answers for some tasks, ((task, tokens), ...) by task name, each tokens 1 to max_tokens: an answer to a
+    # problem of that task ends there (the answering engine stops the row; checkers' ends_right and the node's rescore
+    # hold the answer to it). The long tasks are most of a round's work: on vibe-08b-2 (2026-11-07) math was 44% of
+    # all tokens decoded, gsm8k 31%, ifeval 17%, and their right answers become the next round's replay targets, which
+    # every member teacher-forces. Measured on vibe-08b-2's line (2026-11-07, 320 answers a task at 512 tokens, cut
+    # at each length and checked as the job checks): math's right answers have a median of 358 tokens, and 448 keeps
+    # 97% of them and of the pairs whose two members differ; gsm8k at 384 keeps 99%, ifeval at 256 97%; together ~12%
+    # fewer tokens a round (es_tasks.VIBE_TASK_TOKENS). Empty: max_tokens for every task, as before it (left out of
+    # the spec).
+    task_tokens: tuple = ()
 
     def __post_init__(self):
         super().__post_init__()
+        tt = self.task_tokens.items() if isinstance(self.task_tokens, dict) else self.task_tokens
+        object.__setattr__(self, "task_tokens", tuple(sorted(((str(t), n) for t, n in tt), key=lambda x: x[0])))
         object.__setattr__(self, "tasks", tuple(str(t) for t in self.tasks))
         object.__setattr__(self, "loop_stop", tuple(self.loop_stop))
         object.__setattr__(self, "start", tuple((str(s[0]), float(s[1]), str(s[2]) if len(s) > 2 else "")
@@ -146,6 +158,11 @@ class Spec2(es.EsSpec):
         if not (isinstance(self.cross_margin, float)
                 and (self.cross_margin == 0.0 or self.margin <= self.cross_margin <= MAX_CROSS_MARGIN)):
             out.append(f"cross_margin is 0 (off), or from margin to {MAX_CROSS_MARGIN:g}")
+        names = [t for t, _ in self.task_tokens]
+        if len(names) > 64 or len(set(names)) != len(names) or any(
+                t not in (self.tasks or (self.task,)) or type(n) is not int or not 1 <= n <= self.max_tokens
+                for t, n in self.task_tokens):
+            out.append("task_tokens names the job's tasks, each once, with 1 to max_tokens tokens")
         if self.rank != 1 or self.rule != RULE2 or self.precision != "float32":
             out.append("rank is 1, rule 2, precision float32")
         return out
@@ -171,16 +188,19 @@ class Spec2(es.EsSpec):
                        **({"decay": self.decay} if self.decay else {}),
                        **({"lenient": True} if self.lenient else {}), **({"mix": True} if self.mix else {}),
                        **({"loop_stop": list(self.loop_stop)} if self.loop_stop else {}),
-                       **({"cross_margin": self.cross_margin} if self.cross_margin else {})}}
+                       **({"cross_margin": self.cross_margin} if self.cross_margin else {}),
+                       **({"task_tokens": dict(self.task_tokens)} if self.task_tokens else {})}}
 
     @classmethod
     def from_json(cls, d: dict) -> "Spec2":
         e = d["es"]
         known = {"rule", "tensors", "n", "tensors_sha", "task", "pairs", "pairs_per_unit", "problems", "max_tokens",
                  "sigma", "lr", "lr_floor", "rounds", "replay", "start", "check", "margin", "lp_tol", "rank", "tasks",
-                 "decay", "lenient", "mix", "loop_stop", "cross_margin"}
+                 "decay", "lenient", "mix", "loop_stop", "cross_margin", "task_tokens"}
         if set(e) - known:
             raise ValueError(f"a rule-2 ES spec has no field {sorted(set(e) - known)[0]!r}")
+        if not isinstance(e.get("task_tokens", {}), dict):
+            raise TypeError("task_tokens is an object: {task: tokens}")
         if not isinstance(e["tensors"], list) or not all(isinstance(e.get(k, []), list)
                                                          for k in ("start", "tasks", "loop_stop")):
             raise TypeError("tensors, start, tasks and loop_stop are lists")
@@ -193,7 +213,12 @@ class Spec2(es.EsSpec):
                    check=int(e["check"]), margin=float(e["margin"]), lp_tol=float(e["lp_tol"]),
                    rank=int(e.get("rank", 1)), rule=int(e["rule"]), tasks=tuple(str(t) for t in e.get("tasks", [])),
                    decay=float(e.get("decay", 0.0)), lenient=e.get("lenient", False), mix=e.get("mix", False),
-                   loop_stop=tuple(e.get("loop_stop", [])), cross_margin=float(e.get("cross_margin", 0.0)))
+                   loop_stop=tuple(e.get("loop_stop", [])), cross_margin=float(e.get("cross_margin", 0.0)),
+                   task_tokens=dict(e.get("task_tokens", {})))
+
+    def tokens_for(self, task: str) -> int:
+        """The most tokens an answer to a problem of `task` has: its task_tokens entry, else max_tokens."""
+        return dict(self.task_tokens).get(task, self.max_tokens)
 
     def margin_for(self, same_setup: bool) -> float:
         """The margin a checker holds a worker's tokens to: `margin` when they share a number setup or the job has no
@@ -241,16 +266,18 @@ def cut_loop(ids: list, loop_stop) -> list:
     return ids if t is None else ids[:t + 1]
 
 
-def ends_right(ids: list, spec, eos) -> bool:
-    """Whether an answer ends as answering ends one: at an end-of-turn token, at max_tokens, or (a job with
-    loop_stop) at its first looping token; never past max_tokens, and never running on past where it loops."""
-    if not ids or len(ids) > spec.max_tokens:
+def ends_right(ids: list, spec, eos, cap: int | None = None) -> bool:
+    """Whether an answer ends as answering ends one: at an end-of-turn token, at its problem's most tokens (`cap`:
+    Spec2.tokens_for its task; max_tokens when None), or (a job with loop_stop) at its first looping token; never
+    past that cap, and never running on past where it loops."""
+    top = spec.max_tokens if cap is None else cap
+    if not ids or len(ids) > top:
         return False
     loop = getattr(spec, "loop_stop", ())
     t = loop_end(ids, *loop) if loop else None
     if t is not None:
         return t == len(ids) - 1
-    return len(ids) == spec.max_tokens or ids[-1] in eos
+    return len(ids) == top or ids[-1] in eos
 
 
 def is_v2(d) -> bool:

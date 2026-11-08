@@ -50,6 +50,9 @@ class EsWork:
         # task id -> the worst gap a rule-2 check found, when nothing but the gaps could decide it (Es2Work.check_many):
         # sent with the verdict, and taken from here as it is (Client._answer)
         self.gaps: dict[str, float] = {}
+        # task -> this worker's running mean answer length on it (Es2Work.compute): which prompts answering takes into
+        # the pass first (es_hybrid.answer_order). Only speed: the answers are the same in any order.
+        self.task_len: dict[str, float] = {}
         self.v2 = Es2Work(self)  # rule-2 jobs' (es2.py)
 
     def why_not(self, job: TrainingJob) -> str | None:
@@ -442,6 +445,26 @@ def apply_round(rt: es.Runtime, spec, ch: es2.Change, ent: dict) -> None:
              ent["scale"])
 
 
+def expected_lengths(seen: dict, tasks: list, caps: list) -> list[float] | None:
+    """Each problem's expected answer length for es_hybrid.answer_order, from a worker's running means by task (a task
+    not seen yet: its cap, taken to be long); None (member by member, as before) until a mixed round's tasks have been
+    seen, or when every problem is of one task."""
+    if len(set(tasks)) < 2 or not any(t in seen for t in tasks):
+        return None
+    return [seen.get(t, float(c)) for t, c in zip(tasks, caps)]
+
+
+def learn_lengths(seen: dict, tasks: list, answers: list, keep: float = 0.75) -> None:
+    """Fold a round's answers (answers[member][problem]) into the running mean length of each problem's task."""
+    by: dict = {}
+    for member in answers:
+        for t, a in zip(tasks, member):
+            by.setdefault(t, []).append(len(a))
+    for t, xs in by.items():
+        m = sum(xs) / len(xs)
+        seen[t] = m if t not in seen else keep * seen[t] + (1 - keep) * m
+
+
 def prompt_rows(rt: es.Runtime, items) -> list[list[int]]:
     """Each item's chat prompt as token ids. Thinking off: Qwen3.5-4B's template opens a <think> block by default,
     which a 64-token answer never gets out of; the templates that don't know the switch (Qwen2.5's, and
@@ -665,10 +688,17 @@ class Es2Work:
         work.claims[rnd] = []
         st.activity = (f"answering {len(units)} Evo unit{'s' * (len(units) > 1)} ({len(members)} twisted models x "
                        f"{spec.problems} {es2.task_at(spec, step)} problems)")
+        tasks = es2_rounds.task_names(spec, step)
+        caps = es2_rounds.caps(spec, step) if spec.task_tokens else None
+        # Long prompts first only under task_tokens: on 5 rounds of vibe-08b-2's line (2026-11-07) it took the pass
+        # from 1,128 steps to 1,012 with the caps, and made no difference without them (math's 512 and gsm8k's 450
+        # still end up in one slot one after the other), 1,334 against member by member's 1,332.
+        expect = expected_lengths(work.task_len, tasks, caps) if caps else None
         with rt.busy, torch.no_grad():
             self.load(rt, ln)
             got = es_fast.answer_members(rt, rt.linears, fac, members, rows, spec.max_tokens, spec.sigma, spec.rank,
-                                         max(work.max_rows, len(rows)), loop=spec.loop_stop)
+                                         max(work.max_rows, len(rows)), loop=spec.loop_stop, caps=caps, expect=expect)
+            learn_lengths(work.task_len, tasks, got)
             lp = None
             if replay:
                 st.activity = f"scoring {len(members)} twisted models on {len(replay)} earlier right answers"
@@ -757,7 +787,9 @@ class Es2Work:
             unit0 = claims[parsed[0][0]][1]
             rt, ln = self.at(job, unit0.start_hash)
             seed = unit0.seed
-            rows = prompt_rows(rt, es2_rounds.items(spec, seed, int(es2.ctrl_of(ln.state)[2])))
+            step = int(es2.ctrl_of(ln.state)[2])
+            rows = prompt_rows(rt, es2_rounds.items(spec, seed, step))
+            caps = es2_rounds.caps(spec, step)
             replay = self.replay_items(rt, ln) if any(p[4] is not None for p in parsed) else []
             fac = round_factors(rt, spec, seed)
             why: dict = {}  # (claim, member) -> what's wrong before any teacher forcing
@@ -774,8 +806,9 @@ class Es2Work:
                         why[(c, k)] = "an answer has token ids the model doesn't have"
                     elif any(t != es.text_of(rt, a) for a, t in zip(got[k], texts[k])):
                         why[(c, k)] = "an answer's text isn't its tokens' decoding"
-                    elif not all(es2.ends_right(a, spec, rt.eos) for a in got[k]):
-                        why[(c, k)] = ("an answer stops before an end-of-turn token or max_tokens"
+                    elif not all(es2.ends_right(a, spec, rt.eos, cap) for a, cap in zip(got[k], caps)):
+                        why[(c, k)] = ("an answer stops before an end-of-turn token or its problem's most tokens (or "
+                                       "runs past them)"
                                        + (", or runs on past where it loops" if spec.loop_stop else ""))
                     else:
                         j, _, sign = members[k]
