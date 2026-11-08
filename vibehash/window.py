@@ -36,7 +36,7 @@ import webbrowser
 from pathlib import Path
 
 from . import app as app_module
-from . import presence, settings
+from . import credstore, presence, settings
 from .settings import WATCH_PORT as DEFAULT_PORT
 
 TITLE = "Vibe Hash"
@@ -143,6 +143,13 @@ class Api:
                 info["words_file"] = None
         info["words"] = words
         return info
+
+    def mfa_status(self) -> dict:
+        """Whether the app's wallet asks for an authenticator code before it sends (`vibehash wallet mfa on`), for a
+        send from the page to call the same gate; {"on": False} with no wallet or no credential store. The page has
+        no send today."""
+        address = str(((app_module.read_state() or {}).get("wallet") or {}).get("address") or "").lower()
+        return {"on": bool(address and credstore.get(credstore.WALLET_TOTP, address))}
 
     # -- settings --
 

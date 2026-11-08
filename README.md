@@ -149,6 +149,18 @@ Each wallet gets its own cache (`~/.vibehash/cache/ADDRESS`: checkpoints,
 datasets, receipts). Model weights are shared: when two workers need the same
 model, one downloads it while the other waits for it.
 
+**A code before sends (optional).** `vibehash wallet mfa on` makes an
+authenticator key for the wallet, keeps it in this computer's credential store
+(Windows Credential Manager, the macOS Keychain or the Secret Service; it needs
+`pip install keyring`, in the `app` extra), and shows the link to add it to an
+authenticator app. From then on `send`, `stake` and `unstake` ask for the app's
+6-digit code (`--code`, else `$VIBEHASH_CODE`, else asked for, each code good
+once) before anything is signed. `wallet mfa off` (asks for a code) and `wallet
+mfa status`. This stops casual use of an unlocked machine and mistaken or
+scripted sends; it does not stop malware that already reads your credential
+store. The worker never needs a code, and a headless server keeps using
+`VIBEHASH_PASSWORD`.
+
 **What the network knows about your machine.** Each round, a worker registers
 what kind of machine it is: the card's vendor and family, its memory and its
 usual name (`RTX 4060, 8 GB (nvidia sm_89)`; a CPU-only worker says how many
@@ -265,6 +277,13 @@ up, and the app sends a token only over HTTPS, or to this computer or a
 private network. Behind a reverse proxy, the proxy must set
 `X-Forwarded-For`, or every client looks like the proxy and anyone's wrong
 guesses lock everyone out.
+
+A node with an admin token that listens beyond this computer (`--host`
+anything but 127.0.0.1 or `::1`) refuses to start without `--admin-mfa`; a
+test rig can say `--admin-allow-no-mfa` (unsafe). With the key, holding or
+releasing a job and switching review also ask for a fresh code (a new one,
+not the one the sign-in used; the admin app asks for it), since each changes
+what the network does.
 
 ```bash
 python -m vibehash admin --new-token
@@ -602,7 +621,10 @@ include both in backups.
 To open the admin routes on it, add `VIBEHASH_ADMIN_TOKEN=...` and
 `VIBEHASH_ADMIN_MFA=...` lines to `/etc/vibehash/env` (made with `vibehash
 admin --new-token` and `--new-mfa`), then run `systemctl restart
-vibehash-node`. Running the script again keeps them.
+vibehash-node`. Running the script again keeps them. A node that listens
+publicly won't start with a token and no key, so if you add only the token and
+run the script again, it makes the key, appends `VIBEHASH_ADMIN_MFA` to the
+same file and prints the link (and a QR code, with `qrencode`) once at the end.
 
 ### Lock down the server
 

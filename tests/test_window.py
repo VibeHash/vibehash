@@ -157,6 +157,38 @@ class ApiTests(Home):
         self.assertEqual(s["setup"]["step"], "mining")
         self.assertNotIn("pid", s)
 
+    def test_mfa_status_reflects_the_credential_store_for_the_apps_wallet(self):
+        try:
+            import keyring
+            import keyring.backend
+        except ImportError:
+            self.skipTest("keyring is not installed")
+
+        class Memory(keyring.backend.KeyringBackend):
+            priority = 1
+            data: dict = {}
+
+            def set_password(self, service, username, password):
+                self.data[(service, username)] = password
+
+            def get_password(self, service, username):
+                return self.data.get((service, username))
+
+            def delete_password(self, service, username):
+                self.data.pop((service, username), None)
+
+        old = keyring.get_keyring()
+        Memory.data = {}
+        keyring.set_keyring(Memory())
+        self.addCleanup(keyring.set_keyring, old)
+        self.assertEqual(self.api.mfa_status(), {"on": False})  # no app, no wallet
+        self.alive(wallet={"address": "vibe1" + "ab" * 18})
+        self.assertEqual(self.api.mfa_status(), {"on": False})
+        keyring.set_password("vibehash-totp", "vibe1" + "ab" * 18, "KEY")
+        self.assertEqual(self.api.mfa_status(), {"on": True})
+        with mock.patch("vibehash.credstore.get", return_value=None):
+            self.assertEqual(self.api.mfa_status(), {"on": False})
+
     def test_orders_go_to_the_running_app_only(self):
         self.assertEqual(self.api.order("pause")["ok"], False)  # not running
         self.alive()

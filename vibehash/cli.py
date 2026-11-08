@@ -38,7 +38,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import advice, crypto, filelock, hardware, mnemonic, modelstore, settings, tls, unattended
+from . import advice, credstore, crypto, filelock, hardware, mnemonic, modelstore, nodeadmin, settings, tls, unattended
 from . import economics as econ
 from . import fees
 from . import wallet as wallets
@@ -894,16 +894,126 @@ def cmd_balance(a):
     print(f"tx fee:     {fmt(node.min_fee())} per transaction on this node, paid from the balance")
 
 
+MFA_SCOPE = ("With `wallet mfa on`, a send, stake or unstake from this wallet first asks for the code an authenticator app "
+             "shows (--code, else $VIBEHASH_CODE, else asked for). That stops casual use of an unlocked machine and "
+             "mistaken or scripted sends; it does not stop malware that already reads this user's credential store. "
+             "The worker never needs a code.")
+_used_codes: set[int] = set()  # the steps whose codes this process has taken: each is good once
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _take_wallet_code(key_text: str, code: str) -> bool:
+    """Whether `code` is the authenticator app's code of now (one step either side), not taken before in this process;
+    if so it is used up."""
+    code = re.sub(r"\s", "", str(code or ""))
+    if not (len(code) == nodeadmin.CODE_DIGITS and code.isdigit()):
+        return False
+    key, step = nodeadmin.mfa_key(key_text), int(_now() // nodeadmin.CODE_STEP)
+    for c in (step - 1, step, step + 1):
+        if c not in _used_codes and nodeadmin.totp(key, c) == code:
+            _used_codes.add(c)
+            return True
+    return False
+
+
+def _ask_wallet_code(a, what: str) -> str:
+    """The code from --code, else $VIBEHASH_CODE, else a prompt that doesn't echo; exits when there is none to be had."""
+    code = getattr(a, "code", None) or os.environ.get("VIBEHASH_CODE")
+    if not code and unattended.interactive():
+        code = getpass.getpass(f"Authenticator code to {what}: ")
+    if not code or not code.strip():
+        sys.exit(f"error: this wallet needs an authenticator code to {what}: give --code, set VIBEHASH_CODE, or run this in a "
+                 f"terminal (`{prog()} wallet mfa off` turns the check off)")
+    return code
+
+
+def _wallet_mfa(address: str) -> str | None:
+    return credstore.get(credstore.WALLET_TOTP, address)
+
+
+def _gate(a, keys: KeyPair, what: str) -> None:
+    """The opt-in code check (`wallet mfa on`) before anything is signed: nothing to do without a stored key."""
+    key = _wallet_mfa(keys.address)
+    if key is None:
+        return
+    if not _take_wallet_code(key, _ask_wallet_code(a, what)):
+        sys.exit("error: that authenticator code is wrong, or was used already (each is good once: wait for the next); "
+                 "nothing was sent")
+
+
 def _send(a, kind, recipient, amount, memo=""):
     keys = load_wallet(wallet_of(a))
+    _gate(a, keys, kind)  # before the node is even asked for a fee: nothing is built without it
     node = NodeClient(node_of(a))
     fee = node.min_fee() if a.fee is None else a.fee
     txid = node.send_tx(keys, kind, recipient, amount, memo, fee)
     print(f"submitted {kind} {txid} with a {fmt(fee)} fee; it lands in the next block")
 
 
+def _code_flag(p) -> None:
+    p.add_argument("--code", metavar="CODE", help="the authenticator code, when `wallet mfa on` is set (default "
+                   "$VIBEHASH_CODE, else asked for); each code is good once")
+
+
 def _fee_flag(p) -> None:
     p.add_argument("--fee", type=to_syn, help="transaction fee in VIBE, paid to the block's proposer (default: the node's minimum)")
+
+
+def _qr(text: str) -> str:
+    """A terminal QR code for `text` from qrencode, if installed (fed on stdin, not argv), else ''."""
+    exe = shutil.which("qrencode")
+    if not exe:
+        return ""
+    import subprocess
+    try:
+        return subprocess.run([exe, "-t", "ANSIUTF8"], input=text, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def cmd_wallet_mfa(a):
+    """wallet mfa on|off|status: the opt-in authenticator-code check on this wallet's sends (MFA_SCOPE)."""
+    path = wallet_of(a)
+    try:
+        address = json.loads(Path(path).read_text())["address"]
+    except (OSError, ValueError, KeyError) as e:
+        sys.exit(f"error: can't read the wallet {path}: {e}")
+    shown = checksummed(address)
+    key = _wallet_mfa(address)
+    if a.action == "status":
+        print(f"authenticator code on sends for {shown}: " + ("on" if key else "off"))
+        return
+    if a.action == "off":
+        if key is None:
+            print(f"already off for {shown}")
+            return
+        if not _take_wallet_code(key, _ask_wallet_code(a, "turn this off")):
+            sys.exit("error: that authenticator code is wrong, or was used already; it stays on")
+        credstore.delete(credstore.WALLET_TOTP, address)
+        print(f"off: sends from {shown} no longer ask for a code")
+        return
+    if key is not None:
+        sys.exit(f"error: already on for {shown}; `{prog()} wallet mfa off` first (it asks for a code) to make a new key")
+    if not credstore.available():
+        sys.exit("error: no credential store to keep the key in on this computer (it needs the `keyring` package and a "
+                 "keychain: `pip install keyring`). A headless machine that sends unattended uses VIBEHASH_PASSWORD for "
+                 "its wallet's file and doesn't need this")
+    new = nodeadmin.new_mfa_key()
+    try:
+        credstore.put(credstore.WALLET_TOTP, address, new)
+    except RuntimeError as e:
+        sys.exit(f"error: {e}")
+    uri = nodeadmin.otpauth_uri(new, shown)
+    print(f"on: sends, stakes and unstakes from {shown} now ask for a 6-digit code.\n\n"
+          "Add it to an authenticator app (Google or Microsoft Authenticator, 1Password, ...): scan this or open the link\n"
+          f"    {uri}\n")
+    qr = _qr(uri)
+    if qr:
+        print(qr)
+    print(MFA_SCOPE)
 
 
 def cmd_send(a):
@@ -2340,6 +2450,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--passphrase", action="store_true", help="the words had a BIP39 passphrase (asked for)")
     p.add_argument("--path", default=mnemonic.PATH, help=f"derivation path (default {mnemonic.PATH})")
     p.set_defaults(fn=cmd_wallet_restore)
+    p = w.add_parser("mfa", help="ask for an authenticator code before this wallet sends, stakes or unstakes (opt-in)",
+                     description=MFA_SCOPE + " The key is kept in this computer's credential store, not in a file.")
+    p.add_argument("action", choices=("on", "off", "status"), help="on: make a key and show how to add it to an "
+                   "authenticator app; off: forget it (asks for a current code); status: whether it is on")
+    p.add_argument("--wallet", help=WALLET); _code_flag(p); p.set_defaults(fn=cmd_wallet_mfa)
     p = w.add_parser("show", help="a wallet's address, whether the file is encrypted, and whether it has recovery words")
     p.add_argument("--wallet", help=WALLET); p.set_defaults(fn=cmd_wallet_show)
 
@@ -2557,20 +2672,21 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("balance", help="an address's balance, stake, coins unbonding and reputation")
     p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
     p.add_argument("address", nargs="?", help="the address to look up (default: your wallet's)"); p.set_defaults(fn=cmd_balance)
-    p = sub.add_parser("send", help="send VIBE to an address")
+    p = sub.add_parser("send", help="send VIBE to an address", description="Send VIBE to an address. " + MFA_SCOPE)
     p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
     p.add_argument("--to", required=True, metavar="ADDRESS", help="where to send it: an address copied from the wallet "
                    "that owns it (vibe1...). Its capital letters are a checksum, so a mistyped one is refused")
     p.add_argument("--amount", type=to_syn, required=True, metavar="VIBE", help="how much to send, e.g. 2.5")
     p.set_defaults(fn=cmd_send)
-    _fee_flag(p)
+    _fee_flag(p); _code_flag(p)
     for name, fn, what in (("stake", cmd_stake, "lock VIBE as stake: what a worker's checks and a validator's votes are "
                             "backed by, and what a cheat loses"),
                            ("unstake", cmd_unstake, f"release staked VIBE; it is spendable after {UNBONDING_ROUNDS} "
                             "rounds, and can still be slashed until then")):
-        p = sub.add_parser(name, help=what); p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
+        p = sub.add_parser(name, help=what, description=f"{what[0].upper()}{what[1:]}. {MFA_SCOPE}")
+        p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
         p.add_argument("--amount", type=to_syn, required=True, metavar="VIBE", help="how much, e.g. 10"); p.set_defaults(fn=fn)
-        _fee_flag(p)
+        _fee_flag(p); _code_flag(p)
     p = sub.add_parser("post-job", help="post a training job from a job file, paying its budget in (`train` writes the "
                        "file for you)", description="Post a job the network trains round by round until its budget is "
                        "spent. The budget leaves your balance now and is paid out only for work that passes its checks; "

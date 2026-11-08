@@ -3,11 +3,15 @@ and the opt-in authenticator-code gate on send, stake and unstake."""
 import contextlib
 import io
 import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from vibehash import cli, credstore, nodeadmin
+from vibehash import wallet as wallets
 from vibehash.crypto import KeyPair, checksummed
 
 try:
@@ -80,17 +84,19 @@ class WalletMfaTests(Store):
     def setUp(self):
         super().setUp()
         self.keys = KeyPair.generate(b"mfa-test")
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.wallet = str(Path(tmp.name) / "wallet.json")
+        wallets.save(self.keys, self.wallet, None)
         self.now = [self.NOW]
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
         for var in ("VIBEHASH_CODE", "VIBEHASH_PASSWORD"):
             os.environ.pop(var, None)
-        for patch in (mock.patch.object(cli, "_now", lambda: self.now[0]),
-                      mock.patch.object(cli, "load_wallet", return_value=self.keys),
-                      mock.patch.object(cli, "wallet_of", return_value="w.json")):
-            patch.start()
-            self.addCleanup(patch.stop)
+        clock = mock.patch.object(cli, "_now", lambda: self.now[0])
+        clock.start()
+        self.addCleanup(clock.stop)
         cli._used_codes.clear()
 
     def code(self, step_offset=0):
@@ -99,13 +105,15 @@ class WalletMfaTests(Store):
 
     def run_cmd(self, fn, **args):
         out, err = io.StringIO(), io.StringIO()
-        ns = SimpleNamespace(**({"wallet": None, "node": None, "fee": 0, "code": None} | args))
+        ns = SimpleNamespace(**({"wallet": self.wallet, "node": None, "fee": 0, "code": None} | args))
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 fn(ns)
                 status = None
-            except SystemExit as e:
-                status = e.code
+            except SystemExit as e:  # (sys.exit("message") is status 1 with the message on stderr)
+                status = 1 if isinstance(e.code, str) else e.code
+                if isinstance(e.code, str):
+                    print(e.code, file=sys.stderr)
         return status, out.getvalue(), err.getvalue()
 
     def turn_on(self):
@@ -128,13 +136,14 @@ class WalletMfaTests(Store):
         self.turn_on()
         first = credstore.get("vibehash-totp", self.keys.address)
         status, _, _ = self.turn_on()
-        self.assertNotEqual(status, None)
+        self.assertEqual(status, 1)
         self.assertEqual(credstore.get("vibehash-totp", self.keys.address), first)
 
     def test_on_is_refused_without_a_credential_store(self):
         with mock.patch.object(credstore, "available", return_value=False):
-            status, _, _ = self.turn_on()
-        self.assertIn("VIBEHASH_PASSWORD", str(status))
+            status, _, err = self.turn_on()
+        self.assertEqual(status, 1)
+        self.assertIn("VIBEHASH_PASSWORD", err)
         self.assertIsNone(credstore.get("vibehash-totp", self.keys.address))
 
     def test_off_needs_a_current_code(self):

@@ -9,6 +9,7 @@ it missing, or with no backend on this machine (a headless server), `available()
 What this is not: a defence against malware that already runs as this user, which can ask the same store."""
 from __future__ import annotations
 
+WALLET_TOTP = "vibehash-totp"  # the service a wallet's authenticator key is kept under, by its address (`wallet mfa`)
 PROBE_SERVICE = "vibehash-probe"
 PROBE_ACCOUNT = "probe"
 
