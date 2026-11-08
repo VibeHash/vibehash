@@ -18,9 +18,15 @@ and cache are kept there too):
 - on its own (no uninstaller beside it): copies itself there, puts "Vibe Hash" in the Start menu and on the
   desktop, and in Settings > Apps (an entry whose Uninstall runs `--uninstall`), then hands over to the installed
   copy, so the download can be deleted (Windows);
-- uv (astral.sh), one pinned release, its download checked against the SHA-256 the release publishes;
+- uv (astral.sh), one pinned release, its download checked against the SHA-256 pinned in this file (UV_SHA256) and
+  also against the one the release publishes: both must match;
 - a Python of its own, which uv downloads, so the computer's Python (if any) is never touched;
-- Vibe Hash from PyPI, updated (it alone, not every library under it) when a day has passed since the last check;
+- Vibe Hash, installed and then updated (it alone, not every library under it) when a day has passed since the last
+  check, only from a signed release: the launcher fetches release.json and release.sig from the latest GitHub release,
+  checks the Ed25519 signature against RELEASE_PUBKEYS (launcher/ed25519_verify.py), and installs with
+  `uv pip install --require-hashes -r requirements-<version>.txt`, a file the manifest names and hashes, so every
+  package that goes in is pinned by hash. No key configured, a bad signature, a hash that doesn't match, or a version
+  older than the installed one: nothing is installed (VIBEHASH_DEV=1 is the one way round this, for developers);
 - the GPU build of PyTorch, chosen by `vibehash app` itself (gpusetup.py), a one-time download of up to 3 GB.
 
 It is plain Python with nothing but the standard library (tkinter for the progress window, where there is one), so
@@ -39,8 +45,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -52,7 +60,19 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "1.1"  # the launcher's own (Settings > Apps shows it); Vibe Hash's version is the package's
+try:
+    import ed25519_verify
+except ImportError:  # loaded by path (the tests, say), not as the script: its folder isn't on sys.path then
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ed25519_verify
+
+VERSION = "1.2"  # the launcher's own (Settings > Apps shows it); Vibe Hash's version is the package's
+RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # release.json, release.sig, requirements-<v>.txt
+# The Ed25519 public keys (hex) that sign releases (scripts/release_manifest.py signs with the secret half, a GitHub
+# Actions secret). Any one of them will do, so a key is rotated by shipping a launcher with the new one added before the
+# old one is taken out. Empty until the owners paste the real key (scripts/make_release_key.py makes it): with none,
+# the launcher installs nothing (it fails closed), except under VIBEHASH_DEV=1. Keep in step with vibehash/settings.py.
+RELEASE_PUBKEYS: list[str] = []
 UV_VERSION = "0.13.7"
 UV_RELEASES = "https://github.com/astral-sh/uv/releases/download"
 UV_ASSETS = {  # (platform.system(), platform.machine().lower()) -> the release asset
@@ -65,6 +85,15 @@ UV_ASSETS = {  # (platform.system(), platform.machine().lower()) -> the release 
     ("Linux", "amd64"): "uv-x86_64-unknown-linux-gnu.tar.gz",
     ("Linux", "aarch64"): "uv-aarch64-unknown-linux-gnu.tar.gz",
     ("Linux", "arm64"): "uv-aarch64-unknown-linux-gnu.tar.gz",
+}
+UV_SHA256 = {  # asset -> its sha256 for UV_VERSION, so a download is checked against this file, not just its own origin.
+    # Bumping uv means updating UV_VERSION and every hash here (hash each asset of the new release once).
+    "uv-x86_64-pc-windows-msvc.zip": "0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021",
+    "uv-aarch64-pc-windows-msvc.zip": "505d9e65e7692bac3ddf98c66754aa26c5050c409c184af30a881a0a72cc85e3",
+    "uv-aarch64-apple-darwin.tar.gz": "81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731",
+    "uv-x86_64-apple-darwin.tar.gz": "20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7",
+    "uv-x86_64-unknown-linux-gnu.tar.gz": "c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83",
+    "uv-aarch64-unknown-linux-gnu.tar.gz": "71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc",
 }
 PYTHON = "3.12"
 PACKAGE = "vibehash[finetune,app]"  # app: pywebview, for the window (window.py)
@@ -272,6 +301,7 @@ def child_env(folder: Path) -> dict:
             env.pop(name, None)
     if frozen():
         env["VIBEHASH_LAUNCHER"] = sys.executable
+        env["VIBEHASH_LAUNCHER_VERSION"] = VERSION  # the app tells an old installer from this one (window.py)
     return env
 
 
@@ -409,10 +439,14 @@ def fetch(url: str, timeout: float = 60) -> bytes:
         return buf.getvalue()
 
 
-def sha256_ok(data: bytes, published: str) -> bool:
-    """`published` is the text of a release's NAME.sha256 file: "<hex>  NAME" (or just the hex)."""
+def sha256_ok(data: bytes, published: str, pinned: str | None = None) -> bool:
+    """`published` is the text of a release's NAME.sha256 file: "<hex>  NAME" (or just the hex). With `pinned` (the hash
+    this file carries, UV_SHA256), the download must match that too: both, not either."""
     want = published.strip().split()[0].lower() if published.strip() else ""
-    return len(want) == 64 and hashlib.sha256(data).hexdigest() == want
+    got = hashlib.sha256(data).hexdigest()
+    if pinned is not None and got != pinned.strip().lower():
+        return False
+    return len(want) == 64 and got == want
 
 
 def ensure_uv(folder: Path, system: str | None = None, machine: str | None = None, fetch=fetch) -> Path:
@@ -425,7 +459,7 @@ def ensure_uv(folder: Path, system: str | None = None, machine: str | None = Non
     url = f"{UV_RELEASES}/{UV_VERSION}/{asset}"
     say(f"getting uv {UV_VERSION} (the installer's installer, about 15 MB)...")
     data, published = fetch(url), fetch(url + ".sha256").decode("utf-8", "replace")
-    if not sha256_ok(data, published):
+    if not sha256_ok(data, published, pinned=UV_SHA256.get(asset, "")):
         raise SystemExit(f"the download of {asset} doesn't match the checksum its release publishes; not installing it. "
                          "Check your connection (a proxy?) and try again.")
     folder.mkdir(parents=True, exist_ok=True)
@@ -471,10 +505,59 @@ def ensure_env(uv: Path, env: Path, system: str | None = None, run=run, child_en
     return python
 
 
+def canonical(obj) -> bytes:
+    """The bytes a release manifest is signed over: the dict as JSON with sorted keys, no spaces, ASCII only (the same
+    as vibehash.crypto.canonical, which scripts/release_manifest.py signs with)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def parse_version(text) -> tuple[int, ...] | None:
+    """"0.5.27" -> (0, 5, 27); anything else (a pre-release, a path) -> None."""
+    if isinstance(text, str) and re.fullmatch(r"\d+(\.\d+)*", text):
+        return tuple(int(part) for part in text.split("."))
+    return None
+
+
+def verify_manifest(manifest_bytes: bytes, sig_text: str, keys=None) -> tuple[dict | None, str]:
+    """(the manifest, "") when `sig_text` (hex) is a signature of it by one of `keys` (RELEASE_PUBKEYS); else (None, why)."""
+    keys = RELEASE_PUBKEYS if keys is None else keys
+    if not keys:
+        return None, "no release key: update skipped"
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        sig = bytes.fromhex(sig_text.strip())
+    except ValueError:
+        return None, "the release manifest isn't readable: update skipped"
+    if not isinstance(manifest, dict):
+        return None, "the release manifest isn't readable: update skipped"
+    message = canonical(manifest)
+    for key in keys:
+        try:
+            if ed25519_verify.verify(bytes.fromhex(key), message, sig):
+                return manifest, ""
+        except ValueError:
+            continue  # (a key in the list that isn't hex: the others are still tried)
+    return None, "the release's signature doesn't match any release key: update skipped"
+
+
+def installed_version(python: Path) -> str | None:
+    """The Vibe Hash version installed in `python`'s environment, or None (not installed yet)."""
+    try:
+        done = subprocess.run([str(python), "-c", "import vibehash; print(vibehash.__version__)"], capture_output=True,
+                              text=True, timeout=60, cwd=str(python.parent.parent), creationflags=NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (done.stdout or "").strip().splitlines()
+    return out[-1] if done.returncode == 0 and out else None
+
+
 def ensure_vibehash(uv: Path, python: Path, env: Path, force: bool = False, now: float | None = None, run=run,
-                    child_env: dict | None = None) -> bool:
-    """Vibe Hash installed, and brought up to date once a day (or now, with --update): the package itself, not every
-    library under it, so a PyTorch build `install-gpu` put in stays matched. -> whether it ran pip."""
+                    child_env: dict | None = None, fetch=fetch, installed_version=installed_version) -> bool:
+    """Vibe Hash installed, and brought up to date once a day (or now, with --update), from the signed release only: the
+    manifest's signature is checked against RELEASE_PUBKEYS, then the requirements file it names against its hash, then
+    uv installs exactly that file with --require-hashes. Anything that doesn't check out installs nothing and says one
+    line why (a first install, which has nothing to carry on with, stops with it). The requirements leave PyTorch out
+    (compiled with torch excluded), so the GPU build `install-gpu` put in stays as it is. -> whether it ran uv."""
     now = time.time() if now is None else now
     stamp = env / ".vibehash-checked"
     try:
@@ -483,13 +566,58 @@ def ensure_vibehash(uv: Path, python: Path, env: Path, force: bool = False, now:
         last = 0.0
     if last and not force and now - last < UPDATE_EVERY_S:  # (no stamp: never installed, whatever the clock says)
         return False
-    say("installing Vibe Hash from PyPI..." if not last else "checking for a newer Vibe Hash...")
-    if run([str(uv), "pip", "install", "--python", str(python), "--upgrade-package", "vibehash", "--quiet", PACKAGE],
-           env=child_env):
-        if last:  # it is installed already: a failed check (offline?) is no reason not to mine
-            say("couldn't check for updates (offline?); carrying on with what is installed")
+    say("installing Vibe Hash..." if not last else "checking for a newer Vibe Hash...")
+
+    def refuse(why: str) -> bool:
+        if last:  # it is installed already: not being able to update is no reason not to mine
+            say(why)
             return False
-        raise SystemExit("couldn't install Vibe Hash; pip's message (launcher.log) says why. Check you're online and try again.")
+        raise SystemExit(f"couldn't install Vibe Hash: {why}")
+
+    offline = "couldn't check for updates (offline?); carrying on with what is installed"
+    if os.environ.get("VIBEHASH_DEV") == "1":  # the one way round verification, for developers
+        say("VIBEHASH_DEV=1: installing the latest vibehash from PyPI, NOT verified (no signature, no hashes)")
+        if run([str(uv), "pip", "install", "--python", str(python), "--upgrade-package", "vibehash", "--quiet", PACKAGE],
+               env=child_env):
+            return refuse(offline if last else "uv's message (launcher.log) says why. Check you're online and try again.")
+        stamp.write_text(f"{now:.0f}\n")
+        return True
+    if not RELEASE_PUBKEYS:
+        return refuse("no release key: update skipped")
+    try:
+        body, sig = fetch(f"{RELEASES}/release.json"), fetch(f"{RELEASES}/release.sig").decode("utf-8", "replace")
+    except OSError:
+        return refuse(offline)
+    manifest, why = verify_manifest(body, sig)
+    if manifest is None:
+        return refuse(why)
+    version, name = manifest.get("version"), manifest.get("requirements")
+    if parse_version(version) is None or not isinstance(name, str) or not re.fullmatch(r"requirements-[0-9][0-9.]*\.txt", name):
+        return refuse("the release manifest names a version or file it shouldn't: update skipped")
+    needs = parse_version(manifest.get("min_launcher"))
+    if needs is not None and needs > parse_version(VERSION):
+        return refuse(f"Vibe Hash {version} needs a newer installer than this one ({VERSION}); download it from vibehash.org")
+    have = installed_version(python) if last else None
+    if parse_version(have) is not None and parse_version(version) <= parse_version(have):
+        if parse_version(version) == parse_version(have):  # verified current: nothing more to check today
+            stamp.write_text(f"{now:.0f}\n")
+        return refuse(f"the latest signed release is {version}, not newer than the installed {have}; nothing installed")
+    try:
+        reqs = fetch(f"{RELEASES}/{name}")
+    except OSError:
+        return refuse(offline)
+    want = manifest.get("requirements_sha256")
+    if not isinstance(want, str) or hashlib.sha256(reqs).hexdigest() != want.lower():
+        return refuse("the requirements file doesn't match the signed manifest's hash: update skipped")
+    path = env / f"requirements-{version}.txt"
+    path.write_bytes(reqs)
+    say(f"installing Vibe Hash {version} (signature and hashes checked)...")
+    # --require-hashes: uv refuses any file the requirements don't list by hash. PyTorch isn't in them (excluded when
+    # they were compiled), so the GPU build `install-gpu` chose is left as it is.
+    if run([str(uv), "pip", "install", "--python", str(python), "--require-hashes", "-r", str(path), "--quiet"],
+           env=child_env):
+        return refuse("couldn't update Vibe Hash; uv's message is in launcher.log" if last
+                      else "uv's message (launcher.log) says why. Check you're online and try again.")
     stamp.write_text(f"{now:.0f}\n")
     return True
 
