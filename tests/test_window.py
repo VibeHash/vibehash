@@ -218,9 +218,15 @@ class ApiTests(Home):
     def test_new_words_come_from_the_apps_listener_and_words_seen_clears_them(self):
         words = " ".join(f"w{i}" for i in range(1, 25))
         seen = []
-        port = app.serve_words(words, on_seen=lambda: seen.append(1))
+        port = app.serve_words(words, "secret-token", on_seen=lambda: seen.append(1))
         self.addCleanup(app.stop_words)
-        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port})
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port,
+                           "words_token": "wrong"})
+        self.assertEqual(self.api.wallet()["words"], [])  # the token in the state is what the app checks
+        self.assertFalse(self.api.words_seen()["ok"])
+        self.assertEqual(seen, [])
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port,
+                           "words_token": "secret-token"})
         w = self.api.wallet()
         self.assertEqual(w["words"], words.split())
         self.assertEqual(self.api.wallet()["words"], words.split())  # a restarted window still gets them

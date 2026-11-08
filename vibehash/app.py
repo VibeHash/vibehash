@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import secrets
 import shlex
 import signal
 import subprocess
@@ -116,10 +117,13 @@ def prepare(a, report=None, on_words_seen=None) -> tuple[str, Path]:
 
     report("wallet", 0.15)
     path = settings.wallet_path(getattr(a, "wallet", None)) or settings.default_wallet()
-    address, pw, words = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)))
+    shown = not getattr(a, "no_window", False)  # a window will show a new wallet's words; with none they go to the file
+    address, pw, words = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)),
+                                           caller_shows_words=shown)
     facts = {"address": address, "path": str(path), "words_pending": False}
     if words:  # a new wallet whose key is in the credential store: the words exist nowhere but here, until written down
-        facts |= {"words_pending": True, "words_port": serve_words(words, on_seen=on_words_seen)}
+        token = secrets.token_urlsafe(32)
+        facts |= {"words_pending": True, "words_token": token, "words_port": serve_words(words, token, on_seen=on_words_seen)}
     else:
         words_file = unattended.words_file(address)  # a headless setup's file, or an old one
         facts["words_file"] = str(words_file) if words_file.exists() else None
@@ -158,7 +162,7 @@ _words_server = None
 _words_lock = threading.Lock()
 
 
-def serve_words(words: str, on_seen=None) -> int:
+def serve_words(words: str, token: str, on_seen=None) -> int:
     """Hold a new wallet's recovery words in memory and serve them to the window on a loopback port of their own:
     `GET /wallet/words` -> {"words": [...]} and `POST /wallet/words/seen` (the user ticked "I wrote them down"), which
     clears them and calls `on_seen()`; anything else is 404, the words' route too once they are cleared (the listener
@@ -166,8 +170,12 @@ def serve_words(words: str, on_seen=None) -> int:
     app's exit, not until the first GET, so a window that restarts before the tick can show them again. Exposure is
     the worker feed's own (watch.py): 127.0.0.1 only, a Host that isn't this computer's is refused (DNS rebinding)
     and so is an Origin that isn't (another website's page). The window runs in another process, so it asks here,
-    through state.json's `words_port`; the state holds that port and `words_pending`, never the words. -> the port."""
+    through state.json's `words_port` and `words_token`; the state holds the port, the token and `words_pending`,
+    never the words. Another user of this computer can reach the port too, so both routes also need the token (header
+    X-Words-Token, compared in constant time): state.json is in this user's own folder, which they can't read. -> the
+    port."""
     global _words_once, _words_server
+    import hmac
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     from .watch import local_host, local_origin
@@ -183,6 +191,9 @@ def serve_words(words: str, on_seen=None) -> int:
             origin = self.headers.get("Origin")
             if origin is not None and not local_origin(origin):
                 self.send_error(403, "not from this computer's pages")
+                return False
+            if not hmac.compare_digest(self.headers.get("X-Words-Token", "").encode(), token.encode()):
+                self.send_error(403, "this needs the token the app left in its state")
                 return False
             return True
 
@@ -380,7 +391,7 @@ class Supervisor:
     def words_seen(self) -> None:
         """The user ticked "I wrote them down": the state no longer says the words are waiting, or where."""
         if self.wallet:
-            self.wallet = {k: v for k, v in self.wallet.items() if k != "words_port"} | {"words_pending": False}
+            self.wallet = {k: v for k, v in self.wallet.items() if k not in ("words_port", "words_token")} | {"words_pending": False}
         self.write_state(time.time())
 
     def beat_while_preparing(self) -> None:
@@ -505,7 +516,10 @@ class Supervisor:
                      "held": self.held}
             try:
                 tmp = state_path().with_suffix(".tmp")
-                tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
+                tmp.unlink(missing_ok=True)  # (a leftover's permissions would be kept)
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # this user only, where the OS honours it
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(state, indent=1))
                 os.replace(tmp, state_path())
             except OSError:
                 pass

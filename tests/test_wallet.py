@@ -39,6 +39,18 @@ def memory_backend():
     return Memory()
 
 
+def use_memory_keyring(case: unittest.TestCase):
+    """Swap the OS credential store for an in-memory one for this test (never the real Credential Manager); skips
+    the test when keyring isn't installed. -> the backend, whose `.data` holds what was kept."""
+    if keyring is None:
+        case.skipTest("keyring is not installed")
+    old = keyring.get_keyring()
+    backend = memory_backend()
+    keyring.set_keyring(backend)
+    case.addCleanup(keyring.set_keyring, old)
+    return backend
+
+
 @unittest.skipIf(keyring is None, "keyring is not installed")
 class StoreCase(unittest.TestCase):
     def setUp(self):
@@ -109,6 +121,39 @@ class StoreWalletTests(StoreCase):
             wallets.save(self.keys, self.path, None, store=True)
         self.assertEqual(self.entries(), {})
         self.assertFalse(self.path.exists())
+
+    def test_two_files_for_one_address_share_the_entry_and_both_load(self):
+        wallets.save(self.keys, self.path, None, store=True)
+        second = self.dir / "second.json"
+        wallets.save(self.keys, second, None, store=True)  # a restore of the same words
+        self.assertEqual(len(self.entries()), 1)
+        self.assertEqual(wallets.load(self.path, None).secret, self.keys.secret)
+        self.assertEqual(wallets.load(second, None).secret, self.keys.secret)
+        self.assertNotEqual(json.loads(self.path.read_text())["crypto"]["nonce"], json.loads(second.read_text())["crypto"]["nonce"])
+
+    def test_a_failed_second_write_leaves_the_first_file_loadable(self):
+        wallets.save(self.keys, self.path, None, store=True)
+        second = self.dir / "second.json"
+        real = os.open
+
+        def refuse(p, *a, **kw):
+            if Path(p) == second:
+                raise OSError("disk full")
+            return real(p, *a, **kw)
+        with mock.patch("vibehash.wallet.os.open", side_effect=refuse), self.assertRaises(OSError):
+            wallets.save(self.keys, second, None, store=True)
+        self.assertEqual(len(self.entries()), 1)  # the first file's entry stays
+        self.assertEqual(wallets.load(self.path, None).secret, self.keys.secret)
+
+    def test_a_leftover_bak_does_not_keep_its_old_permissions(self):
+        wallets.save(self.keys, self.path, None)
+        bak = Path(str(self.path) + ".bak")
+        bak.write_text("old")
+        os.chmod(bak, 0o666)
+        self.assertTrue(wallets.migrate_plaintext(self.path))
+        self.assertIn(self.keys.secret.hex(), bak.read_text())  # replaced, not appended to or truncated in place
+        if os.name != "nt":
+            self.assertEqual(bak.stat().st_mode & 0o777, 0o600)
 
     def test_an_existing_file_is_refused_before_any_store_write(self):
         self.path.write_text("{}")

@@ -1261,6 +1261,8 @@ class AddressCommandLineTests(Cli, unittest.TestCase):
         self.assertEqual(code, "error: that isn't a Vibe Hash address: those start with vibe1 (in 'alice=100')")
 
     def test_wallets_show_the_checksummed_form_and_keep_the_canonical_one(self):
+        from tests.test_wallet import use_memory_keyring
+        use_memory_keyring(self)  # --no-password keeps the key in the credential store: an in-memory one, never the real one
         out = self.run_cli("wallet", "create", "--out", self.home / "a.json", "--no-password")
         address = json.loads((self.home / "a.json").read_text())["address"]
         self.assertTrue(crypto.is_canonical_address(address))

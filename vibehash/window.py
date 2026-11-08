@@ -138,7 +138,7 @@ class Api:
         port = _words_port(info)
         if info.get("words_pending") and port:
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/wallet/words", timeout=3) as r:
+                with urllib.request.urlopen(_words_request(info, "/wallet/words"), timeout=3) as r:
                     words = [str(w) for w in json.loads(r.read())["words"]]
             except (OSError, ValueError, KeyError, TypeError):  # the app is gone, or the words were seen
                 words = []
@@ -155,12 +155,11 @@ class Api:
 
     def words_seen(self) -> dict:
         """The user wrote the recovery words down: tell the app, which forgets them and clears `words_pending`."""
-        port = _words_port((app_module.read_state() or {}).get("wallet") or {})
-        if not port:
+        info = (app_module.read_state() or {}).get("wallet") or {}
+        if not _words_port(info):
             return {"ok": False, "why": "no recovery words are waiting"}
         try:
-            req = urllib.request.Request(f"http://127.0.0.1:{port}/wallet/words/seen", data=b"", method="POST")
-            with urllib.request.urlopen(req, timeout=3):
+            with urllib.request.urlopen(_words_request(info, "/wallet/words/seen", post=True), timeout=3):
                 pass
         except OSError as e:
             return {"ok": False, "why": str(e)}
@@ -410,6 +409,13 @@ def python(executable: str | None = None, package: Path | None = None, frozen: b
                 if candidate.is_file():
                     return candidate
     return Path(executable)
+
+
+def _words_request(wallet: dict, path: str, post: bool = False) -> urllib.request.Request:
+    """A request to the app's recovery-words listener, with the token the app left in its state."""
+    return urllib.request.Request(f"http://127.0.0.1:{_words_port(wallet)}{path}", data=b"" if post else None,
+                                  method="POST" if post else "GET",
+                                  headers={"X-Words-Token": str(wallet.get("words_token") or "")})
 
 
 def _words_port(wallet: dict) -> int | None:

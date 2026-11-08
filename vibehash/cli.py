@@ -176,7 +176,8 @@ def show_words(words: str, indent: str = "") -> None:
     print()
 
 
-def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tuple[str, str | None, str | None]:
+def ensure_wallet(path: Path, indent: str = "", no_password: bool = False,
+                  caller_shows_words: bool = True) -> tuple[str, str | None, str | None]:
     """The wallet at `path`, made if there is none: its password asked for (or $VIBEHASH_PASSWORD; with neither, the
     error says so), its recovery words shown once or saved to a file when nobody is watching. -> (address, the
     password a new wallet was made with, else None, the recovery words when the caller must show them, else None).
@@ -184,7 +185,10 @@ def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tu
     question: the key goes into this account's credential store and the file holds only ciphertext, and the words
     come back in the tuple, never printed and never written, for the caller to show once. Where no store works the
     key is in the file in the clear, the words go to a file as before, and a loud line says so. A plaintext wallet
-    that already exists is moved into the store when there is one (wallets.migrate_plaintext)."""
+    that already exists is moved into the store when there is one (wallets.migrate_plaintext). `caller_shows_words`:
+    whether whoever called will show the returned words once (the app's window); when nobody will (`app
+    --no-window`, a start at login), the words go to the private file and its note as in a headless setup, since
+    otherwise they would be lost for good."""
     if path.exists():
         address = json.loads(path.read_text())["address"]
         print(f"{indent}using {path}\n{indent}address {checksummed(address)}")
@@ -195,13 +199,22 @@ def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tu
     if no_password and "VIBEHASH_PASSWORD" not in os.environ:
         words = mnemonic.generate()
         keys = mnemonic.keypair(words)
+        refused = ""
         if credstore.available():
-            wallets.save(keys, path, None, mnemonic.PATH, store=True)
-            print(f"{indent}created {path} (key in this account's credential store)\n{indent}address {checksummed(keys.address)}")
-            return keys.address, None, words
+            try:
+                wallets.save(keys, path, None, mnemonic.PATH, store=True)
+            except wallets.WalletError as e:  # the probe passed but the real entry was refused (a locked keychain, say)
+                refused = str(e)
+            else:
+                print(f"{indent}created {path} (key in this account's credential store)\n{indent}address {checksummed(keys.address)}")
+                if caller_shows_words:
+                    return keys.address, None, words
+                print(unattended.words_note(unattended.save_words(words, keys.address, path), indent))
+                return keys.address, None, None
         wallets.save(keys, path, None, mnemonic.PATH)
         print(f"{indent}created {path}\n{indent}address {checksummed(keys.address)}")
-        print(f"{indent}no credential store on this system: the key is stored in the clear; set VIBEHASH_PASSWORD to encrypt it")
+        print(f"{indent}no credential store on this system: the key is stored in the clear; set VIBEHASH_PASSWORD to encrypt it"
+              + (f" ({refused})" if refused else ""))
         # To the file, whether or not this is a terminal: with no store there is nowhere else the words survive, and
         # someone who started it once and forgot it must still find them later.
         print(unattended.words_note(unattended.save_words(words, keys.address, path), indent))

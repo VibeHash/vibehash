@@ -58,22 +58,31 @@ def _head(keys: KeyPair, hd_path: str | None) -> dict:
     return doc
 
 
-def _store_doc(keys: KeyPair, hd_path: str | None) -> dict:
-    """A version 2 document for `keys`, after putting its random key in the credential store (the caller removes
-    that entry again if the file then can't be written). WalletError when there is no store."""
+def _store_doc(keys: KeyPair, hd_path: str | None) -> tuple[dict, bool]:
+    """A version 2 document for `keys`, with its random key in the credential store -> (document, whether this call
+    put the entry there; if so, the caller removes it again should the file then not be written). The entry is kept
+    by address, so a second file for an address that already has one (a restore of the same words) reuses that key
+    under a fresh nonce: replacing it would lock the first file out. WalletError when there is no store."""
     if not credstore.available():
         raise WalletError("no credential store works on this system, so the key can't be kept out of the file; set "
                           "a password, or pass --insecure-plaintext for a throwaway key")
-    key, nonce = os.urandom(32), os.urandom(12)
+    nonce, created = os.urandom(12), False
     try:
-        credstore.put(STORE_SERVICE, keys.address, key.hex())
+        held = credstore.get(STORE_SERVICE, keys.address)
+        if held is None:
+            key, created = os.urandom(32), True
+            credstore.put(STORE_SERVICE, keys.address, key.hex())
+        else:
+            key = bytes.fromhex(held)
     except credstore.Unavailable as e:
         raise WalletError(f"the credential store refused the wallet's key: {e}") from e
+    except ValueError as e:
+        raise WalletError(f"the credential store holds something that isn't a key under {keys.address}") from e
     doc = _head(keys, hd_path)
     doc["version"] = 2
     doc["crypto"] = {"kdf": "keyring", "service": STORE_SERVICE, "account": keys.address, "cipher": "aes-256-gcm",
                      "nonce": nonce.hex(), "ciphertext": _aesgcm()(key).encrypt(nonce, keys.secret, keys.public).hex()}
-    return doc
+    return doc, created
 
 
 def _forget(address: str) -> None:
@@ -91,20 +100,20 @@ def save(keys: KeyPair, path: str | Path, password: str | None, hd_path: str | N
     path = Path(path)
     if path.exists():
         raise WalletError(f"{path} already exists; refusing to overwrite a wallet")
-    doc = _head(keys, hd_path)
+    doc, created = _head(keys, hd_path), False
     if password:
         salt, nonce = os.urandom(16), os.urandom(12)
         key = _kdf(password, salt, **SCRYPT)
         doc["crypto"] = {"kdf": "scrypt", **SCRYPT, "salt": salt.hex(), "cipher": "aes-256-gcm", "nonce": nonce.hex(),
                          "ciphertext": _aesgcm()(key).encrypt(nonce, keys.secret, keys.public).hex()}
     elif store:
-        doc = _store_doc(keys, hd_path)
+        doc, created = _store_doc(keys, hd_path)
     else:
         doc["secret"] = keys.secret.hex()
     try:
         _write(doc, path)
     except BaseException:
-        if doc["version"] == 2:
+        if created:
             _forget(keys.address)
         raise
 
@@ -173,18 +182,20 @@ def migrate_plaintext(path: str | Path) -> bool:
         return False
     old = path.read_text()
     keys = load(path, None)
-    doc = _store_doc(keys, hd_path(path))
+    doc, created = _store_doc(keys, hd_path(path))
     tmp, bak = path.with_suffix(".tmp"), _backup(path)
     try:
         for target, text in ((tmp, json.dumps(doc, indent=2)), (bak, old)):
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            target.unlink(missing_ok=True)  # (a leftover's permissions would otherwise be kept)
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(text)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         bak.unlink(missing_ok=True)
-        _forget(keys.address)
+        if created:
+            _forget(keys.address)
         raise
     return True
 

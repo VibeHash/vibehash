@@ -418,7 +418,8 @@ class PrepareTests(AppHome):
         self.assertEqual(wallets.kind(path), "store")
         self.assertNotIn("secret", json.loads(path.read_text()))
         self.assertEqual(list(Path(self.tmp.name).glob("recovery-words-*.txt")), [])
-        self.assertNotIn("1.", out.getvalue().split("address")[-1])  # the words aren't printed either
+        self.assertNotIn(" ".join(app._words_once.split()[:3]), out.getvalue())  # the words aren't printed either
+        self.assertNotRegex(out.getvalue(), r"\d+\. [a-z]+ ")
         self.assertNotIn("VIBEHASH_PASSWORD", os.environ)
 
     def test_without_a_store_the_words_still_go_to_a_file_for_the_logs_sake(self):
@@ -560,19 +561,22 @@ class CommandTests(AppHome):
 
 
 WORDS = " ".join(f"word{i}" for i in range(1, 25))
+TOKEN = "t" * 43
 
 
 class WordsOnceTests(AppHome):
     """A new wallet's recovery words reach the window from the app's memory over a loopback listener of its own, and
     never touch state.json, the log or any other file."""
 
-    def get(self, port, path="/wallet/words", method="GET", host=None, origin=None):
+    def get(self, port, path="/wallet/words", method="GET", host=None, origin=None, token=TOKEN):
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         conn.putrequest(method, path, skip_host=True)
         conn.putheader("Host", host or f"127.0.0.1:{port}")
         if origin:
             conn.putheader("Origin", origin)
+        if token is not None:
+            conn.putheader("X-Words-Token", token)
         conn.putheader("Content-Length", "0")
         conn.endheaders()
         resp = conn.getresponse()
@@ -581,7 +585,7 @@ class WordsOnceTests(AppHome):
         return resp.status, body
 
     def serve(self, on_seen=None):
-        port = app.serve_words(WORDS, on_seen=on_seen)
+        port = app.serve_words(WORDS, TOKEN, on_seen=on_seen)
         self.addCleanup(app.stop_words)
         return port
 
@@ -614,6 +618,17 @@ class WordsOnceTests(AppHome):
         self.assertEqual(self.get(port, origin="http://127.0.0.1:5173")[0], 200)  # a page from this computer
         self.assertEqual(self.get(port, "/wallet/words/seen", "POST", host="localhost:%d" % port)[0], 200)
 
+    def test_both_routes_need_the_token(self):
+        """Another user of this computer can reach the loopback port; only this user can read state.json's token."""
+        seen = []
+        port = self.serve(on_seen=lambda: seen.append(1))
+        for token in (None, "", "wrong", TOKEN[:-1], TOKEN + "x"):
+            self.assertEqual(self.get(port, token=token)[0], 403, token)
+            self.assertEqual(self.get(port, "/wallet/words/seen", "POST", token=token)[0], 403, token)
+        self.assertEqual(seen, [])  # nothing was cleared by the refused ones
+        self.assertEqual(self.get(port)[0], 200)
+        self.assertEqual(self.get(port, "/wallet/words/seen", "POST")[0], 200)
+
     def test_prepare_advertises_the_port_and_never_writes_the_words(self):
         """Through a Supervisor, as `app` runs it: state.json says words_pending and where to ask, not the words; and
         `seen` flips it."""
@@ -630,13 +645,18 @@ class WordsOnceTests(AppHome):
         self.assertNotIn(WORDS.split()[0] + " ", raw)
         wallet = json.loads(raw)["wallet"]
         self.assertTrue(wallet["words_pending"])
+        self.assertGreaterEqual(len(wallet["words_token"]), 32)
+        self.assertNotIn(wallet["words_token"], WORDS)
         self.assertIsNone(wallet.get("words_file"))
-        status, body = self.get(wallet["words_port"])
+        token = wallet["words_token"]
+        self.assertEqual(self.get(wallet["words_port"])[0], 403)  # without the state's token
+        status, body = self.get(wallet["words_port"], token=token)
         self.assertEqual(json.loads(body)["words"], WORDS.split())
-        self.assertEqual(self.get(wallet["words_port"], "/wallet/words/seen", "POST")[0], 200)
+        self.assertEqual(self.get(wallet["words_port"], "/wallet/words/seen", "POST", token=token)[0], 200)
         wallet = json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]
         self.assertFalse(wallet["words_pending"])
         self.assertNotIn("words_port", wallet)
+        self.assertNotIn("words_token", wallet)
         for f in Path(self.tmp.name).rglob("*"):  # nothing anywhere under the home holds the words
             if f.is_file():
                 self.assertNotIn("word7", f.read_text(encoding="utf-8", errors="ignore"), f)
@@ -650,6 +670,29 @@ class WordsOnceTests(AppHome):
         self.assertFalse(wallet["words_pending"])
         self.assertNotIn("words_port", wallet)
         self.assertIsNone(app._words_server)
+
+    def test_with_no_window_the_words_go_to_the_file_and_nothing_listens(self):
+        """`app --no-window` (a start at login): nobody would see the words, so they are kept as a headless setup
+        keeps them. With a window: a listener and no file."""
+        from tests.test_wallet import use_memory_keyring
+        use_memory_keyring(self)
+        self.addCleanup(app.stop_words)
+        env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO):
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True, no_window=True), report=lambda *a, **k: None)
+        self.assertEqual(len(list(Path(self.tmp.name).glob("recovery-words-*.txt"))), 1)
+        self.assertIsNone(app._words_server)
+        self.assertIsNone(app._words_once)
+        Path(self.tmp.name, "wallet.json").unlink()
+        for f in Path(self.tmp.name).glob("recovery-words-*.txt"):
+            f.unlink()
+        facts = []
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO):
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True, no_window=False),
+                        report=lambda step, fraction, **f: facts.append(f))
+        self.assertEqual(list(Path(self.tmp.name).glob("recovery-words-*.txt")), [])
+        self.assertIsNotNone(app._words_server)
+        self.assertTrue(any(f.get("wallet", {}).get("words_pending") for f in facts))
 
 
 if __name__ == "__main__":
