@@ -57,3 +57,57 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+
+  # The signed release manifest, made only after PyPI has the wheel, so a manifest never names a wheel PyPI doesn't have.
+  # It runs in the `pypi` environment because that is where the secret RELEASE_SIGNING_KEY (the hex secret from
+  # scripts/make_release_key.py) lives; the build job above never sees it. It hashes the very wheel the publish job
+  # uploaded, compiles the hash-pinned requirements (torch left out, so a GPU build is never replaced), signs
+  # release.json and attaches release.json, release.sig and requirements-<version>.txt to the tag's GitHub release, where
+  # the launcher and `vibehash update` fetch them. With no key set the job says so and attaches nothing: the release is
+  # still on PyPI, and installers skip updating to a release with no manifest.
+  manifest:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write  # to attach the files to the tag's release; only this job has it
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Is there a signing key?
+        id: key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -n "$RELEASE_SIGNING_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::RELEASE_SIGNING_KEY is not set in the pypi environment; this release gets no manifest and installers will skip updating to it"
+          fi
+      - name: Compile the hash-pinned requirements and sign the manifest
+        if: steps.key.outputs.present == 'true'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          python -m pip install uv==0.13.7
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          uv pip compile pyproject.toml --extra finetune --extra app --extra evo --generate-hashes --universal --no-emit-package torch --python-version 3.12 -o "dist/requirements-$version.txt"
+          python scripts/release_manifest.py --dist dist
+      - name: Attach the manifest to the tag's release (made here if launcher.yml hasn't)
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed."
+          gh release upload "$tag" dist/release.json dist/release.sig "dist/requirements-$version.txt" --repo "$GITHUB_REPOSITORY" --clobber

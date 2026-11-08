@@ -17,6 +17,13 @@ from pathlib import Path
 WATCH_PORT = 7545  # the worker's feed (watch.py): a thousand below a node's 8545, so a testnet's validators never land on it
 
 PUBLIC_NODE = "https://node.vibehash.org"  # the public network: where commands go until you choose another node
+# The Ed25519 public keys (hex) whose signature on a release manifest (release.json / release.sig, see update.py and
+# scripts/release_manifest.py) makes a release installable. Any one will do, so a key is rotated by adding the new one in
+# a release before the old one is removed. Empty until the owners paste the real key in (scripts/make_release_key.py makes
+# it): with none, `vibehash update` installs nothing. Keep in step with RELEASE_PUBKEYS in launcher/vibehash_launcher.py.
+RELEASE_PUBKEYS: list[str] = []
+RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # where the manifest and its requirements are
+
 PUBLIC_EVO_NODE = "https://evo.vibehash.org:8443"  # the public Evo Hash network (vibehash-evo-1): the menu's Evo Hash
 
 
