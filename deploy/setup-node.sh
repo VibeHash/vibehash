@@ -93,7 +93,7 @@ fi
 say "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q python3-venv certbot ufw sqlite3 rclone
+apt-get install -y -q python3-venv certbot ufw sqlite3 rclone qrencode
 [ -z "$TOR" ] || apt-get install -y -q tor
 
 say "Installing Vibe Hash"
@@ -117,6 +117,16 @@ add_env() { grep -q "^$1=" "$ETC/env" || printf '# %s\n%s=\n' "$2" "$1" >> "$ETC
 add_env BACKUP_RCLONE_REMOTE "an rclone remote path the daily backup sends the chain and the blobs to, such as spaces:vibehash-backups/public-1 (made with: rclone config --config $ETC/rclone.conf)"
 add_env ALERT_WEBHOOK "a Discord, Slack or ntfy webhook URL that is told when a backup or the health check fails"
 set -a; . "$ETC/env"; set +a
+# The admin routes (VIBEHASH_ADMIN_TOKEN, if you put one in $ETC/env) are on a node that listens beyond this computer, and
+# `vibehash node` then refuses to start without an authenticator key. So a token with no key gets one here, kept in the
+# same file and so handed to the node the way the token is (EnvironmentFile). Only when it's absent: running this again
+# keeps the key every admin already has in their app.
+MFA_NEW=
+if [ -n "${VIBEHASH_ADMIN_TOKEN:-}" ] && [ -z "${VIBEHASH_ADMIN_MFA:-}" ]; then
+  VIBEHASH_ADMIN_MFA=$("$VENV/bin/python" -c "from vibehash import nodeadmin; print(nodeadmin.new_mfa_key())")
+  printf '# the authenticator key for the admin routes (add it to an authenticator app: see the notes at the end)\nVIBEHASH_ADMIN_MFA=%s\n' "$VIBEHASH_ADMIN_MFA" >> "$ETC/env"
+  MFA_NEW=1
+fi
 
 if [ ! -f "$WALLET" ]; then
   say "Creating the node's wallet. Write down its recovery words: they're shown only now"
@@ -269,6 +279,11 @@ if status=$(curl -fsS "$URL/status" 2>/dev/null); then
   printf '    and put BACKUP_RCLONE_REMOTE=remote:bucket/path in %s/env.\n' "$ETC"
   printf '  - Put a Discord, Slack or ntfy webhook URL in ALERT_WEBHOOK= in %s/env to hear when a backup fails or the node stalls.\n' "$ETC"
   printf '  - Try it: systemctl start vibehash-backup%s.service; journalctl -u vibehash-backup%s -n 20\n' "$SUFFIX" "$SUFFIX"
+  if [ -n "$MFA_NEW" ]; then
+    MFA_URI=$("$VENV/bin/python" -c "import sys; from vibehash import nodeadmin; print(nodeadmin.otpauth_uri(sys.argv[1], sys.argv[2]))" "$VIBEHASH_ADMIN_MFA" "$DOMAIN")
+    printf '  - Add the admin routes'"'"' authenticator key to an authenticator app (shown only now; it is also in %s/env):\n      %s\n' "$ETC" "$MFA_URI"
+    ! command -v qrencode >/dev/null 2>&1 || qrencode -t ANSIUTF8 "$MFA_URI"
+  fi
 else
   echo "The node didn't answer. Its log says:"
   journalctl -u "$SERVICE" -n 30 --no-pager

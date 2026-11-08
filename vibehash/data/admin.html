@@ -342,8 +342,8 @@
       tr.appendChild(el("td", null, score(j)));
       var c8 = el("td"), acts = el("div", "actions");
       if (admin) {
-        if (j.policy) { var ok = el("button", "btn green", "Confirm"); ok.onclick = function () { order("/api/jobs/" + encodeURIComponent(j.id) + "/release", {}, "released " + j.id); }; acts.appendChild(ok); }
-        else if (j.status !== "finished") { var no = el("button", "btn danger", "Deny"); no.onclick = function () { var why = prompt("Hold " + j.id + " on every node. Why? (optional; only admins see this)"); if (why === null) return; order("/api/jobs/" + encodeURIComponent(j.id) + "/hold", { why: why }, "held " + j.id); }; acts.appendChild(no); }
+        if (j.policy) { var ok = el("button", "btn green", "Confirm"); ok.onclick = function () { order("/api/jobs/" + encodeURIComponent(j.id) + "/release", {}, "released " + j.id, true); }; acts.appendChild(ok); }
+        else if (j.status !== "finished") { var no = el("button", "btn danger", "Deny"); no.onclick = function () { var why = prompt("Hold " + j.id + " on every node. Why? (optional; only admins see this)"); if (why === null) return; order("/api/jobs/" + encodeURIComponent(j.id) + "/hold", { why: why }, "held " + j.id, true); }; acts.appendChild(no); }
       }
       if (j.mine && j.status !== "finished" && j.escrow > 0) { var cx = el("button", "btn danger", "Cancel"); cx.onclick = function () { if (confirm("Cancel " + j.id + "? Its unspent budget comes back to your wallet.")) order("/api/jobs/" + encodeURIComponent(j.id) + "/cancel", {}, "cancelled " + j.id); }; acts.appendChild(cx); }
       c8.appendChild(acts); tr.appendChild(c8);
@@ -351,16 +351,31 @@
     });
     if (!(d.jobs || []).length) { var tr0 = document.createElement("tr"), td0 = el("td", "muted", "no jobs on this chain yet"); td0.colSpan = 8; tr0.appendChild(td0); tb.appendChild(tr0); }
   }
-  function order(path, body, done) {
+  // Hold, deny/confirm and review change what the network does, so a node with an authenticator key wants a fresh code
+  // for each (X-Admin-Code, which the server sends on): asked for here, used once, never kept. A node that still says
+  // it needs one (the page's view was stale) is asked for once more, for those nodes only.
+  var FRESH = "this needs a fresh authenticator code";  // nodeadmin.NEED_FRESH: the words a node refuses with
+  function codesWanted() { return ((state.data && state.data.nodes) || []).some(function (n) { return n.admin && n.login_until; }); }
+  function askCode(done, again) {
+    var c = prompt((again ? "That node wants a fresh code. " : "") + "To " + done + ": the fresh 6-digit code from your authenticator app (a new one: not the one you signed in with, and each is good once).", "");
+    return c === null ? null : c.replace(/\s/g, "");
+  }
+  function order(path, body, done, fresh, urls, again) {
+    var sent = {}, key;
+    for (key in body) sent[key] = body[key];
+    if (fresh && (again || codesWanted())) { var code = askCode(done, again); if (code === null) return; sent.code = code; }
+    if (urls) sent.urls = urls;
     say($("jobs-msg"), "…", "");
-    api(path, body).then(function (r) {
+    api(path, sent).then(function (r) {
       var failed = (r.nodes || []).filter(function (x) { return !x.ok; });
+      var needCode = failed.filter(function (x) { return String(x.error).indexOf(FRESH) >= 0; });
+      if (fresh && needCode.length && !again) { order(path, body, done, true, needCode.map(function (x) { return x.url; }), true); return; }
       say($("jobs-msg"), done + (failed.length ? "; but " + failed.map(function (x) { return host(x.url) + ": " + x.error; }).join("; ") : "") + (r.txid ? " (tx " + r.txid.slice(0, 12) + "…)" : ""), failed.length ? "bad" : "good");
       refresh();
     }).catch(function (e) { say($("jobs-msg"), e.message, "bad"); });
   }
   function say(where, s, cls) { text(where, s); where.className = "msg " + (cls || ""); }
-  $("review").addEventListener("change", function () { order("/api/review", { on: $("review").checked }, $("review").checked ? "review on: new jobs wait for a confirm" : "review off"); });
+  $("review").addEventListener("change", function () { order("/api/review", { on: $("review").checked }, $("review").checked ? "review on: new jobs wait for a confirm" : "review off", true); });
   $("show-post").onclick = function () { $("post").hidden = false; if (!$("post-spec").value) api("/api/template").then(function (t) { $("post-spec").value = JSON.stringify(t, null, 2); }).catch(function () {}); };
   $("post-hide").onclick = function () { $("post").hidden = true; };
   $("post-go").onclick = function () {

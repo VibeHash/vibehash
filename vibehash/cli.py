@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import ipaddress
 import json
 import logging
 import os
@@ -362,6 +363,17 @@ def _describe_economics(e: econ.Economics) -> str:
             f"(~{span} of {econ.MAINNET_BLOCK_S} s rounds); {fmt(e.total_issuance())} issued in total{cap}")
 
 
+def _loopback(host: str) -> bool:
+    """Whether a --host listens on this computer only: localhost, or a loopback address (not a private network's)."""
+    host = host.strip().strip("[]").lower().split("%")[0]
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def cmd_node(a):
     from .coordinator import CoordinatorConfig
     from .node import FolderInUse, Node, PhaseTimes, bucket_from_env  # only nodes need the server
@@ -390,6 +402,10 @@ def cmd_node(a):
             raise ValueError("--admin-mfa needs --admin-token too")
         if a.admin_mfa:
             nodeadmin.mfa_key(a.admin_mfa)
+        if a.admin_token and not a.admin_mfa and not a.admin_allow_no_mfa and not _loopback(a.host):
+            raise ValueError(f"the admin routes would be reachable from other computers (--host {a.host}) behind a token alone. "
+                             f"Make an authenticator key with `{prog()} admin --new-mfa` and give it to the node with "
+                             "--admin-mfa KEY (or $VIBEHASH_ADMIN_MFA), or bind 127.0.0.1")
     except ValueError as e:
         sys.exit(f"error: {e}")
     try:
@@ -2399,6 +2415,9 @@ def parser() -> argparse.ArgumentParser:
                    help="an authenticator app's key (`vibehash admin --new-mfa` makes one and says how to add it): the "
                         "token then also needs the app's 6-digit code, for a sign-in that lasts 12 hours; default "
                         "$VIBEHASH_ADMIN_MFA")
+    p.add_argument("--admin-allow-no-mfa", action="store_true",
+                   help="UNSAFE: serve the admin routes on a --host other than this computer's with the token alone. "
+                        "Without --admin-mfa such a node refuses to start; this is for test rigs only")
     p.add_argument("--tls-cert", metavar="FILE", help="serve HTTPS with this PEM certificate (see `tls cert`)")
     p.add_argument("--tls-key", metavar="FILE", help="the certificate's private key")
 

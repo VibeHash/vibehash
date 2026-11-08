@@ -1566,9 +1566,12 @@ def _handler(node: Node):
             """Where the request came from (behind a proxy on this computer, the client it forwarded for)."""
             return nodeadmin.client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
 
-        def _admin(self) -> None:
-            """The admin routes' gate (nodeadmin.Admin.check): the token, a sign-in if the node wants a code."""
-            node.admin.check(self.headers.get("Authorization"), self.headers.get(nodeadmin.LOGIN_HEADER), self._ip())
+        def _admin(self, fresh: bool = False) -> None:
+            """The admin routes' gate (nodeadmin.Admin.check): the token, a sign-in if the node wants a code. `fresh`:
+            an order that does something (hold, release, review), which on a node with a key also takes a code of its
+            own (X-Admin-Code); a node with no key has none to ask for, and the token is all it has."""
+            node.admin.check(self.headers.get("Authorization"), self.headers.get(nodeadmin.LOGIN_HEADER), self._ip(),
+                             code=self.headers.get(nodeadmin.CODE_HEADER), fresh=fresh and node.admin.mfa is not None)
 
         def _guard(self, fn, raw: bool = False, content_type: str | None = None):
             try:
@@ -1707,7 +1710,8 @@ def _handler(node: Node):
                 if parts == ["admin", "login"]:  # the authenticator app's code for a sign-in (nodeadmin.py)
                     return node.admin.login(self.headers.get("Authorization"), body.get("code"), self._ip())
                 if parts[:1] == ["admin"]:  # the operators' orders (nodeadmin.py): 404 without a token, 401 with the wrong one
-                    self._admin()
+                    order = parts == ["admin", "review"] or (len(parts) == 4 and parts[1] == "jobs" and parts[3] in ("hold", "release"))
+                    self._admin(fresh=order)  # (an unknown route takes no code)
                     if parts == ["admin", "review"]:
                         return node.admin.set_review(bool(body.get("on")), list(node.chain.state.jobs))
                     if len(parts) == 4 and parts[1] == "jobs" and parts[3] in ("hold", "release"):

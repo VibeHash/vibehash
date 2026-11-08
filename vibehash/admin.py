@@ -46,6 +46,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -309,8 +310,12 @@ class NodeLink:
     def admin_get(self, path: str):
         return json.loads(self.client._req("GET", path, headers=self._headers()))  # noqa: SLF001
 
-    def admin_post(self, path: str, body: dict):
-        return json.loads(self.client._req("POST", path, json.dumps(body).encode(), headers=self._headers()))  # noqa: SLF001
+    def admin_post(self, path: str, body: dict, code: str | None = None):
+        """`code`: a fresh authenticator code, for an order that wants one (nodeadmin's X-Admin-Code)."""
+        headers = self._headers()
+        if code:
+            headers[nodeadmin.CODE_HEADER] = str(code).strip()
+        return json.loads(self.client._req("POST", path, json.dumps(body).encode(), headers=headers))  # noqa: SLF001
 
     def sign_in(self, code: str) -> dict:
         """The authenticator app's code for a sign-in on this node (POST /admin/login)."""
@@ -469,8 +474,8 @@ class AdminApp:
 
     # -- orders --
 
-    def _each_admin(self, fn) -> list[dict]:
-        admins = [l for l in self.links if l.token]
+    def _each_admin(self, fn, urls: list[str] | None = None) -> list[dict]:
+        admins = [l for l in self.links if l.token and (urls is None or l.url in urls)]
         if not admins:
             raise AdminError("no node has an admin token: add one under Settings")
         out = []
@@ -478,14 +483,19 @@ class AdminApp:
             out.append({"url": link.url, **result})
         return out
 
-    def hold(self, job_id: str, why: str = "") -> dict:
-        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/hold", {"why": why}))}
+    def hold(self, job_id: str, why: str = "", code: str | None = None, urls: list[str] | None = None) -> dict:
+        """Hold, release and review take the operator's authenticator code (`code`, typed for this order and kept
+        nowhere), which a node with a key wants on top of the sign-in; `urls`: only those nodes (a retry)."""
+        code = _fresh_code(code)
+        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/hold", {"why": why}, code), urls)}
 
-    def release(self, job_id: str) -> dict:
-        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/release", {}))}
+    def release(self, job_id: str, code: str | None = None, urls: list[str] | None = None) -> dict:
+        code = _fresh_code(code)
+        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/release", {}, code), urls)}
 
-    def review(self, on: bool) -> dict:
-        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post("/admin/review", {"on": bool(on)}))}
+    def review(self, on: bool, code: str | None = None, urls: list[str] | None = None) -> dict:
+        code = _fresh_code(code)
+        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post("/admin/review", {"on": bool(on)}, code), urls)}
 
     def sign_in(self, code: str, url: str | None = None) -> dict:
         """One authenticator code for every node that asked for one (or the one `url` names): admins of several nodes
@@ -658,12 +668,15 @@ class AdminApp:
                     if not isinstance(body, dict):
                         raise ValueError("expected a JSON object")
                     parts = [p for p in url.path.split("/") if p][1:]
+                    code, urls = body.get("code"), body.get("urls")  # (a fresh code for an order; the nodes to retry)
+                    if urls is not None and not (isinstance(urls, list) and all(isinstance(u, str) for u in urls)):
+                        raise ValueError("urls is a list of node addresses")
                     if parts == ["review"]:
-                        out = app.review(bool(body.get("on")))
+                        out = app.review(bool(body.get("on")), code, urls)
                     elif len(parts) == 3 and parts[0] == "jobs" and parts[2] in ("hold", "release", "cancel"):
                         job_id = _job_id(parts[1])
-                        out = (app.hold(job_id, str(body.get("why") or "")) if parts[2] == "hold"
-                               else app.release(job_id) if parts[2] == "release" else app.cancel(job_id))
+                        out = (app.hold(job_id, str(body.get("why") or ""), code, urls) if parts[2] == "hold"
+                               else app.release(job_id, code, urls) if parts[2] == "release" else app.cancel(job_id))
                     elif parts == ["jobs", "post"]:
                         spec = body.get("spec")
                         if isinstance(spec, str):
@@ -715,6 +728,14 @@ def _try(fn) -> dict:
         return {"ok": True, "result": fn()}
     except (NodeError, AdminError, *BROKEN) as e:
         return {"ok": False, "error": str(e)}
+
+
+def _fresh_code(code) -> str | None:
+    """The code the page typed for an order, trimmed, or None when it sent none; AdminError if it can't be a code."""
+    code = re.sub(r"\s", "", str(code or ""))
+    if code and not re.fullmatch(r"\d{6}", code):
+        raise AdminError("type the 6-digit code from your authenticator app")
+    return code or None
 
 
 def _job_id(text: str) -> str:
