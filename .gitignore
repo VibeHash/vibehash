@@ -34,3 +34,7 @@ Thumbs.db
 
 # What agents/architect.py writes by default (chats, eval prompts, answers, grades)
 agent-jobs/
+
+# Claude Code worktrees (isolated checkouts of this repo) and the SDD plan workspace
+.claude/worktrees/
+.superpowers/
