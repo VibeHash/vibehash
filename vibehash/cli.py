@@ -498,6 +498,12 @@ def evo_network(node) -> bool:
         return False
 
 
+def deepseek_wanted(a) -> bool:
+    """Whether the worker takes DeepSeek work: `--deepseek yes`, else the saved choice. Frozen, so off unless chosen
+    (the first-run "ask" default only exists under VIBEHASH_DEEPSEEK_PILOT=1)."""
+    return (getattr(a, "deepseek", None) or settings.deepseek_choice()) == "yes"
+
+
 def _mine(a, keys: KeyPair):
     from . import minerui, selftest
     from .wire import MAX_CLOCK_SKEW_S
@@ -515,7 +521,7 @@ def _mine(a, keys: KeyPair):
         _chosen_job(NodeClient(url), job, url)
     if getattr(a, "deepseek", None):
         settings.save(deepseek=a.deepseek)  # remembered: the next `vibehash worker` does the same
-    deepseek = (getattr(a, "deepseek", None) or settings.load().get("deepseek", "ask")) == "yes"
+    deepseek = deepseek_wanted(a)
     try:
         w = WorkerClient(url, keys, a.memory_mb, a.flops, device=a.device, cache_dir=a.cache_dir, deepseek=deepseek,
                          job=job)
@@ -2414,8 +2420,8 @@ def parser() -> argparse.ArgumentParser:
                         f"{WATCH_PORT}), read-only and for this computer only, so a window or a script can follow the "
                         "worker step by step: its round, what it is doing, its counts, its account, the latest events")
     p.add_argument("--deepseek", choices=["ask", "yes", "no"], default=None,
-                   help="take DeepSeek work (its ~30 GB of model files): ask once (the default), yes without asking "
-                        "(unattended), or no. Remembered")
+                   help="take DeepSeek work (its ~30 GB of model files): yes, or no (the default; DeepSeek is frozen). "
+                        "ask is only for the pilot (VIBEHASH_DEEPSEEK_PILOT=1). Remembered")
     p.add_argument("--job", default="auto", metavar="JOB", help="mine only this job's rounds and sit the other jobs' out "
                    "(default auto: every job this worker can do). The dashboard's job line changes it while it runs: "
                    "Tab or 0-9")

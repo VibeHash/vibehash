@@ -1051,7 +1051,7 @@ def summary(rep: Report, found: list[Device], trained: Device | None, net: Net, 
         nxt = "fix the device problems above, then `vibehash selftest` again"
     elif address is None or not cfg:
         nxt = "vibehash setup" + (f" --node {net.url}" if net.url != settings.PUBLIC_NODE else "")
-    elif deepseek and has_deepseek_job and cfg.get("deepseek") != "yes":
+    elif settings.deepseek_pilot() and deepseek and has_deepseek_job and cfg.get("deepseek") != "yes":
         nxt = "vibehash worker --deepseek yes   (or plain `vibehash worker` to leave DeepSeek out)"
     else:
         nxt = "vibehash worker" + (f" --device {want}" if want != "auto" else "")

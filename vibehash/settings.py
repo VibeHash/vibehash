@@ -61,6 +61,17 @@ def load() -> dict:
     return {}
 
 
+def deepseek_pilot() -> bool:
+    """Whether the DeepSeek pilot is switched on for this process (VIBEHASH_DEEPSEEK_PILOT=1). DeepSeek is frozen: without
+    it nothing asks about DeepSeek or nags to turn it on; the Settings toggle and `worker --deepseek yes` still work."""
+    return os.environ.get("VIBEHASH_DEEPSEEK_PILOT") == "1"
+
+
+def deepseek_choice(cfg: dict | None = None) -> str:
+    """The saved DeepSeek choice, "yes" or "no", or "ask" (not chosen yet, and only in the pilot). The default is "no"."""
+    return (load() if cfg is None else cfg).get("deepseek", "ask" if deepseek_pilot() else "no")
+
+
 def save(**updates) -> None:
     """config.json with `updates`, read, changed and written under a lock between processes, written whole beside it
     and then put in its place (keeping the old file's permissions: it can hold admin tokens, made 0600). Rewritten in

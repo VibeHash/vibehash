@@ -151,7 +151,7 @@ class Api:
         return {"avatar": bool(cfg.get("avatar", True)), "welcomed": bool(cfg.get("welcomed", False)),
                 "startup": app_module.startup_is_on(), "home": str(settings.home()), "version": _version(),
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
-                "deepseek": cfg.get("deepseek", "ask"),
+                "deepseek": settings.deepseek_choice(cfg), "deepseek_pilot": settings.deepseek_pilot(),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
                 "words_file": _words_file_present()}
 

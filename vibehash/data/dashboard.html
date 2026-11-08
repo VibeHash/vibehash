@@ -556,7 +556,7 @@
   }
 
   // The round's job is a DeepSeek job this worker didn't take: {id, kind} or null.
-  function deepseekWait(w) { return w && !w.busy && w.skipped && w.skipped.kind === "deepseek" ? w.skipped : null; }
+  function deepseekWait(w) { return prefs && prefs.deepseek_pilot && w && !w.busy && w.skipped && w.skipped.kind === "deepseek" ? w.skipped : null; }  // the offer is for the pilot (VIBEHASH_DEEPSEEK_PILOT=1); the Settings toggle is always there
   function headline(st, ds) {
     var h = $("headline"), words = ds ? ["A DeepSeek job is ", "waiting for you"]
       : st === "Mining" ? ["Your computer is training ", "real AI models"]

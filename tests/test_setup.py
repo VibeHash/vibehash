@@ -226,6 +226,35 @@ class HeadlessSetupTests(unittest.TestCase):
         self.assertIn("VIBEHASH_PASSWORD", str(e.exception.code))
 
 
+class DeepseekDefaultTests(unittest.TestCase):
+    """DeepSeek is frozen: off unless someone turns it on, and no first-run question unless the pilot flag is set."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        patch = mock.patch.dict(os.environ, {"VIBEHASH_HOME": tmp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("VIBEHASH_DEEPSEEK_PILOT", None)
+
+    def test_deepseek_defaults_off(self):
+        from types import SimpleNamespace
+        from vibehash import cli
+        self.assertEqual(settings.load(), {})  # an empty settings file
+        self.assertFalse(cli.deepseek_wanted(SimpleNamespace(deepseek=None)))  # the worker is built with deepseek=False
+        self.assertEqual(settings.deepseek_choice(), "no")  # and nothing is left "ask"ing: no prompt, no waiting state
+        self.assertFalse(settings.deepseek_pilot())
+        settings.save(deepseek="yes")
+        self.assertTrue(cli.deepseek_wanted(SimpleNamespace(deepseek=None)))
+        settings.save(deepseek="no")
+        self.assertFalse(cli.deepseek_wanted(SimpleNamespace(deepseek=None)))
+
+    def test_the_pilot_flag_brings_the_question_back(self):
+        with mock.patch.dict(os.environ, {"VIBEHASH_DEEPSEEK_PILOT": "1"}):
+            self.assertTrue(settings.deepseek_pilot())
+            self.assertEqual(settings.deepseek_choice(), "ask")
+
+
 class TabularTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)

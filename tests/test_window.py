@@ -180,7 +180,7 @@ class ApiTests(Home):
 
     def test_deepseek_is_remembered_and_a_running_app_restarts_its_worker(self):
         with mock.patch.object(app, "_winreg", return_value=None):
-            self.assertEqual(self.api.settings()["deepseek"], "ask")
+            self.assertEqual(self.api.settings()["deepseek"], "no")
             self.assertEqual(self.api.set_deepseek(True), {"ok": True, "deepseek": "yes"})
             self.assertEqual(settings.load()["deepseek"], "yes")  # what `vibehash worker` reads as it starts
             self.assertIsNone(app.take_order())  # no app running: the setting is enough
