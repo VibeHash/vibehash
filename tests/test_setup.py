@@ -392,3 +392,83 @@ class CrashTests(unittest.TestCase):
                 with mock.patch.object(gpusetup.subprocess, "run", return_value=died), \
                         mock.patch.object(gpusetup.sys, "platform", platform):
                     self.assertEqual(gpusetup.devices(), [])
+
+
+class EnsureWalletTests(unittest.TestCase):
+    """cli.ensure_wallet with `no_password` (what the app asks for): the key goes to the OS credential store and no
+    recovery-words file is written; where there is no store, the old plaintext file and words file, with a loud line."""
+
+    def setUp(self):
+        try:
+            import keyring
+        except ImportError:
+            self.skipTest("keyring is not installed")
+        from tests.test_wallet import memory_backend
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        patch = mock.patch.dict(os.environ, {"VIBEHASH_HOME": tmp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        for var in ("VIBEHASH_NODE", "VIBEHASH_WALLET", "VIBEHASH_PASSWORD"):
+            os.environ.pop(var, None)
+        old = keyring.get_keyring()
+        self.backend = memory_backend()
+        keyring.set_keyring(self.backend)
+        self.addCleanup(keyring.set_keyring, old)
+        self.home = Path(tmp.name)
+        self.path = self.home / "wallet.json"
+
+    def ensure(self, **kw):
+        import contextlib
+        import io
+
+        from vibehash import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = cli.ensure_wallet(self.path, "", **kw)
+        return result, out.getvalue()
+
+    def test_with_a_store_the_key_is_kept_there_and_no_words_file_is_written(self):
+        from vibehash import mnemonic
+        from vibehash import wallet as wallets
+        (address, pw, words), out = self.ensure(no_password=True)
+        self.assertIsNone(pw)
+        self.assertEqual(wallets.kind(self.path), "store")
+        self.assertNotIn("secret", json.loads(self.path.read_text()))
+        self.assertEqual(mnemonic.keypair(words).address, address)  # the words come back to the caller, in memory
+        self.assertEqual(list(self.home.glob("recovery-words-*.txt")), [])
+        self.assertIn("credential store", out)
+        self.assertNotIn(" ".join(words.split()[:2]), out)  # never printed
+
+    def test_without_a_store_it_is_the_old_plaintext_and_words_file_with_a_loud_line(self):
+        from vibehash import wallet as wallets
+        with mock.patch("vibehash.credstore.available", return_value=False):
+            (address, pw, words), out = self.ensure(no_password=True)
+        self.assertEqual(wallets.kind(self.path), "plain")
+        self.assertEqual(len(list(self.home.glob("recovery-words-*.txt"))), 1)
+        self.assertIn("no credential store on this system: the key is stored in the clear; set VIBEHASH_PASSWORD "
+                      "to encrypt it", out)
+        self.assertIsNone(words)  # they are in the file, which is where the window looks
+
+    def test_an_existing_plaintext_wallet_is_moved_into_the_store_once(self):
+        from vibehash import wallet as wallets
+        from vibehash.crypto import KeyPair
+        wallets.save(KeyPair.generate(b"old"), self.path, None)
+        (address, pw, words), out = self.ensure(no_password=True)
+        self.assertEqual((pw, words), (None, None))
+        self.assertEqual(wallets.kind(self.path), "store")
+        self.assertIn("moved", out)
+        (_, _, _), out = self.ensure(no_password=True)
+        self.assertNotIn("moved", out)
+
+    def test_wallet_create_takes_insecure_plaintext_for_the_old_behaviour(self):
+        import contextlib
+        import io
+
+        from vibehash import cli
+        from vibehash import wallet as wallets
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["wallet", "create", "--out", str(self.home / "a.json"), "--no-password"])
+            cli.main(["wallet", "create", "--out", str(self.home / "b.json"), "--insecure-plaintext"])
+        self.assertEqual(wallets.kind(self.home / "a.json"), "store")
+        self.assertEqual(wallets.kind(self.home / "b.json"), "plain")

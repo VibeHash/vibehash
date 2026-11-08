@@ -79,8 +79,9 @@ def password(prompt: str, confirm: bool = False) -> str | None:
 
 
 def load_wallet(path: str) -> KeyPair:
-    pw = password(f"Password for {path}: ") if wallets.is_encrypted(path) else None
-    if pw is None and wallets.is_encrypted(path):
+    asks = wallets.kind(path) == "password"  # a plain wallet has none, and a store wallet's key is in the credential store
+    pw = password(f"Password for {path}: ") if asks else None
+    if pw is None and asks:
         raise unattended.need(f"the password of {path}", "set VIBEHASH_PASSWORD to it (`export VIBEHASH_PASSWORD=...`; "
                               "in PowerShell, `$env:VIBEHASH_PASSWORD = \"...\"`)")
     return wallets.load(path, pw)
@@ -175,25 +176,36 @@ def show_words(words: str, indent: str = "") -> None:
     print()
 
 
-def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tuple[str, str | None]:
+def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tuple[str, str | None, str | None]:
     """The wallet at `path`, made if there is none: its password asked for (or $VIBEHASH_PASSWORD; with neither, the
     error says so), its recovery words shown once or saved to a file when nobody is watching. -> (address, the
-    password a new wallet was made with, else None). `no_password`: make it without one, as `wallet create
-    --no-password` does, for an app that must start with no question: the file is then as safe as the user's
-    account, and the recovery words still restore it."""
+    password a new wallet was made with, else None, the recovery words when the caller must show them, else None).
+    `no_password`: make it without one, as `wallet create --no-password` does, for an app that must start with no
+    question: the key goes into this account's credential store and the file holds only ciphertext, and the words
+    come back in the tuple, never printed and never written, for the caller to show once. Where no store works the
+    key is in the file in the clear, the words go to a file as before, and a loud line says so. A plaintext wallet
+    that already exists is moved into the store when there is one (wallets.migrate_plaintext)."""
     if path.exists():
         address = json.loads(path.read_text())["address"]
         print(f"{indent}using {path}\n{indent}address {checksummed(address)}")
-        return address, None
+        if wallets.kind(path) == "plain" and wallets.migrate_plaintext(path):
+            print(f"{indent}moved this wallet's key into the credential store (a copy of the old file stays beside it "
+                  "as .bak until the next start has opened the new one)")
+        return address, None, None
     if no_password and "VIBEHASH_PASSWORD" not in os.environ:
         words = mnemonic.generate()
         keys = mnemonic.keypair(words)
+        if credstore.available():
+            wallets.save(keys, path, None, mnemonic.PATH, store=True)
+            print(f"{indent}created {path} (key in this account's credential store)\n{indent}address {checksummed(keys.address)}")
+            return keys.address, None, words
         wallets.save(keys, path, None, mnemonic.PATH)
-        print(f"{indent}created {path} (no password: as safe as this user account)\n{indent}address {checksummed(keys.address)}")
-        # Always to the file, whether or not this is a terminal: the app's log scrolls on into the worker's, and
-        # someone who started it once and forgot it must still find the words later.
+        print(f"{indent}created {path}\n{indent}address {checksummed(keys.address)}")
+        print(f"{indent}no credential store on this system: the key is stored in the clear; set VIBEHASH_PASSWORD to encrypt it")
+        # To the file, whether or not this is a terminal: with no store there is nowhere else the words survive, and
+        # someone who started it once and forgot it must still find them later.
         print(unattended.words_note(unattended.save_words(words, keys.address, path), indent))
-        return keys.address, None
+        return keys.address, None, None  # (in the file, which the window reads: not also held for a second showing)
     pw = password(f"{indent}Choose a wallet password: ", confirm=True)
     if pw is None:
         raise unattended.need("a wallet password", "set VIBEHASH_PASSWORD to the one you want; the worker reads it "
@@ -205,7 +217,7 @@ def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tu
     wallets.save(keys, path, pw, mnemonic.PATH)
     print(f"{indent}created {path}\n{indent}address {checksummed(keys.address)}")
     give_words(words, keys.address, path, indent)
-    return keys.address, pw
+    return keys.address, pw, None
 
 
 def give_words(words: str, address: str, wallet: Path, indent: str = "") -> None:
@@ -239,13 +251,28 @@ def _passphrase(a, confirm: bool) -> str:
 
 
 def _new_wallet_password(a) -> str | None:
-    pw = None if a.no_password else password("New wallet password: ", confirm=True)
-    if not a.no_password and pw is None:
+    none = a.no_password or getattr(a, "insecure_plaintext", False)
+    pw = None if none else password("New wallet password: ", confirm=True)
+    if not none and pw is None:
         raise unattended.need("a wallet password", "set VIBEHASH_PASSWORD to the one you want (or pass --no-password "
-                              "for a throwaway test key)")
-    if not a.no_password and not pw:
-        sys.exit("a password is required (or pass --no-password for a throwaway test key)")
+                              "to keep the key in this account's credential store)")
+    if not none and not pw:
+        sys.exit("a password is required (or pass --no-password to keep the key in this account's credential store)")
     return pw
+
+
+def _save_new(keys: KeyPair, out: Path, pw: str | None, a, hd_path: str) -> None:
+    """Write a new wallet file as asked: a password, else (`--no-password`) the key in the credential store, else
+    (`--insecure-plaintext`, or no store on this system, said loudly) the key in the clear."""
+    if pw or getattr(a, "insecure_plaintext", False):
+        wallets.save(keys, out, pw, hd_path)
+    elif credstore.available():
+        wallets.save(keys, out, None, hd_path, store=True)
+        print("the key is in this account's credential store; the file holds only ciphertext")
+    else:
+        wallets.save(keys, out, None, hd_path)
+    if wallets.kind(out) == "plain":
+        print("warning: no password and no credential store: the key is stored in the clear", file=sys.stderr)
 
 
 def cmd_wallet_create(a):
@@ -255,11 +282,9 @@ def cmd_wallet_create(a):
     words = mnemonic.generate()
     keys = mnemonic.keypair(words, _passphrase(a, confirm=True))
     pw = _new_wallet_password(a)
-    wallets.save(keys, out, pw, mnemonic.PATH)
+    _save_new(keys, out, pw, a, mnemonic.PATH)
     print(f"created {out}\naddress: {checksummed(keys.address)}")
     give_words(words, keys.address, out)
-    if not pw:
-        print("warning: stored unencrypted", file=sys.stderr)
 
 
 def cmd_wallet_restore(a):
@@ -269,10 +294,8 @@ def cmd_wallet_restore(a):
         sys.exit(f"{out} already exists; refusing to overwrite a wallet (restore with --out NEW-FILE)")
     keys = mnemonic.keypair(mnemonic.check(_read_words()), _passphrase(a, confirm=False), a.path)
     pw = _new_wallet_password(a)
-    wallets.save(keys, out, pw, a.path)
+    _save_new(keys, out, pw, a, a.path)
     print(f"restored {out}\naddress: {checksummed(keys.address)}")
-    if not pw:
-        print("warning: stored unencrypted", file=sys.stderr)
 
 
 def cmd_wallet_show(a):
@@ -767,7 +790,7 @@ def cmd_setup(a):
 
     print("\n2. Wallet")
     path = settings.wallet_path(a.wallet) or settings.default_wallet()
-    address, pw = ensure_wallet(path, "   ")
+    address, pw, _ = ensure_wallet(path, "   ")
     keys = None if pw is None else wallets.load(path, pw)  # (a wallet made just now: no second password for staking)
     settings.save(wallet=str(path))
     if a.deepseek:
@@ -2448,14 +2471,18 @@ def parser() -> argparse.ArgumentParser:
                        ).add_subparsers(dest="wcmd", required=True)
     p = w.add_parser("create", help="make a wallet and show its 24 recovery words once")
     p.add_argument("--out", help=f"wallet file to write (default {settings.default_wallet()})")
-    p.add_argument("--no-password", action="store_true", help="don't encrypt the file (for unattended machines; anyone "
-                   "who can read it can spend from it)")
+    p.add_argument("--no-password", action="store_true", help="no password: the key is kept in this account's credential "
+                   "store (Windows Credential Manager, macOS Keychain, Secret Service) and the file holds only ciphertext")
+    p.add_argument("--insecure-plaintext", action="store_true", help="write the key into the file in the clear, for tests "
+                   "and throwaway keys only: anyone who can read the file can spend from it")
     p.add_argument("--passphrase", action="store_true", help="add a BIP39 passphrase to the words (asked for; optional)")
     p.set_defaults(fn=cmd_wallet_create)
     p = w.add_parser("restore", help="rebuild a wallet from its recovery words (read from the terminal or $VIBEHASH_MNEMONIC)")
     p.add_argument("--out", help=f"wallet file to write (default {settings.default_wallet()})")
-    p.add_argument("--no-password", action="store_true", help="don't encrypt the file (for unattended machines; anyone "
-                   "who can read it can spend from it)")
+    p.add_argument("--no-password", action="store_true", help="no password: the key is kept in this account's credential "
+                   "store (Windows Credential Manager, macOS Keychain, Secret Service) and the file holds only ciphertext")
+    p.add_argument("--insecure-plaintext", action="store_true", help="write the key into the file in the clear, for tests "
+                   "and throwaway keys only: anyone who can read the file can spend from it")
     p.add_argument("--passphrase", action="store_true", help="the words had a BIP39 passphrase (asked for)")
     p.add_argument("--path", default=mnemonic.PATH, help=f"derivation path (default {mnemonic.PATH})")
     p.set_defaults(fn=cmd_wallet_restore)
@@ -2606,7 +2633,7 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--recheck-gpu", action="store_true", help="test the GPU again, even if an earlier run found it ready")
         p.add_argument("--job", metavar="JOB", help="mine only this job, as `worker --job`")
         p.add_argument("--no-password", action="store_true", help="make a first wallet without a password, so nothing is "
-                       "asked (what the downloadable app does); the file is then as safe as your user account")
+                       "asked (what the downloadable app does); the key is kept in your account's credential store")
         p.add_argument("--avatar", action="store_true", help="also show the floating avatar on the desktop (`avatar`), "
                        "which the downloadable app does; needs a screen")
         p.add_argument("--no-window", action="store_true", help="don't open the window (`window`) as it starts; a click "

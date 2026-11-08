@@ -116,10 +116,10 @@ def prepare(a, report=None) -> tuple[str, Path]:
 
     report("wallet", 0.15)
     path = settings.wallet_path(getattr(a, "wallet", None)) or settings.default_wallet()
-    address, pw = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)))
+    address, pw, _words = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)))
     words = unattended.words_file(address)
     report("gpu", 0.3, wallet={"address": address, "path": str(path), "words_file": str(words) if words.exists() else None})
-    if pw is None and wallets.is_encrypted(path):
+    if pw is None and wallets.kind(path) == "password":
         # The worker is a child process that unlocks the wallet itself: it reads $VIBEHASH_PASSWORD, so the password
         # asked for here (once, at a terminal) is handed to it that way, after a check that it opens the wallet.
         pw = cli.password(f"Password for {path}: ")
