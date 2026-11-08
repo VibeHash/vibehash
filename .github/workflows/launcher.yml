@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # to attach the files to the release
+  contents: read  # the build job only reads the checkout; only the release job below gets write
 
 jobs:
   build:
@@ -32,8 +32,8 @@ jobs:
             name: VibeHash-linux
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Test the launcher
@@ -41,7 +41,7 @@ jobs:
       - name: Build one file (Windows, windowed, with the icon and pywebview)
         if: runner.os == 'Windows'
         run: |
-          python -m pip install --quiet pyinstaller "pywebview>=6.2"
+          python -m pip install --quiet "pyinstaller==6.22.3" "pywebview==6.2.1"
           python -m PyInstaller --onefile --windowed --name VibeHash --icon launcher/VibeHash.ico --add-data "launcher/VibeHash.ico;." --collect-all webview --hidden-import clr --hidden-import clr_loader --hidden-import tkinter --distpath dist launcher/vibehash_launcher.py
       - name: Wrap it in the setup wizard (Inno Setup)
         if: runner.os == 'Windows'
@@ -53,14 +53,14 @@ jobs:
       - name: Build one file (console)
         if: runner.os != 'Windows'
         run: |
-          python -m pip install --quiet pyinstaller
+          python -m pip install --quiet pyinstaller==6.22.3
           python -m PyInstaller --onefile --console --name VibeHash --distpath dist launcher/vibehash_launcher.py
       - name: Name it for the release
         shell: bash
         run: |
           if [ "${{ runner.os }}" != "Windows" ]; then mv dist/VibeHash "dist/${{ matrix.name }}"; fi  # Windows: VibeHash.exe already
           ls -l dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: |
@@ -71,8 +71,10 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # to attach the files to the release
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: dist
           merge-multiple: true
