@@ -198,7 +198,7 @@ class Node:
                  limits: Limits | None = None, tls: ssl.SSLContext | None = None,
                  peers: list[str] = (), announce: str | None = None, timeouts: Timeouts | None = None,
                  max_job_bytes: int = MAX_JOB_BYTES, bucket: dsg.Signer | None = None, min_client: str = MIN_CLIENT,
-                 admin_token: str | None = None, admin_mfa: str | None = None):
+                 admin_token: str | None = None, admin_mfa: str | None = None, onion: str | None = None):
         """`peers`: other nodes to connect to (validators find each other from the chain without them).
         `announce`: the address other nodes reach this one at, if it isn't the one it listens on.
         `max_job_bytes`: the biggest model (one checkpoint) a job may have for this node to relay its post_job.
@@ -207,10 +207,12 @@ class Node:
         reads one from the environment).
         `min_client`: the oldest release whose workers may register (MIN_CLIENT); older ones are told to upgrade.
         `admin_token`: what the admin app sends to reach /admin/* (nodeadmin.py); None: those routes don't exist.
-        `admin_mfa`: an authenticator app's key, so the token also needs that app's code (a sign-in, nodeadmin.py)."""
+        `admin_mfa`: an authenticator app's key, so the token also needs that app's code (a sign-in, nodeadmin.py).
+        `onion`: this node's Tor hidden-service address (ADDR.onion), which /status shows when it is set."""
         if not parse_version(min_client):
             raise ValueError(f"min_client is a release such as {MIN_CLIENT}, not {min_client!r}")
         self.min_client = min_client
+        self.onion = onion
         self.times = times or PhaseTimes()
         self.keep_rounds = keep_rounds  # rounds whose checkpoints stay available to re-check (the challenge window)
         self.max_job_bytes = max_job_bytes
@@ -936,6 +938,8 @@ class Node:
                 "paid_rounds": (self.chain.state.paid_rounds if self.chain.state.economics.count == econ.PAID_ROUNDS
                                 else None),
             }
+        if self.onion:
+            out["onion"] = self.onion  # only when set: clients and tests that don't know it see no change
         if consensus is not None:
             # Workers do the round with its leader, the validator whose turn it is to propose: None means this node.
             leader = consensus["proposer"]

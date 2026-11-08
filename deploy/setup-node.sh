@@ -11,6 +11,13 @@
 #
 # Running it again upgrades Vibe Hash and restarts the node; the wallet, genesis and chain are kept.
 #
+# It needs the other files in this folder beside it (backup.sh, healthcheck.sh, alert.sh and the vibehash-*.service and
+# .timer units), so copy the whole deploy/ folder over (scp -r deploy root@SERVER:) and run deploy/setup-node.sh. They
+# set up a daily backup, a five-minute health check and an alert for either failing (README, "Backups, alerts and Tor");
+# the backup's remote and the alert's webhook are for you to fill in in /etc/vibehash/env afterwards.
+# --enable-tor also gives the node a Tor hidden service (an .onion address), so Tor users can reach it without going
+# through Cloudflare's exit-node blocks.
+#
 # A second network on the same server (an Evo Hash testnet beside the main one, say) is a named node with its own
 # port, folders and service, sharing the server's Vibe Hash install:
 #
@@ -28,7 +35,7 @@
 # only uses it for account notices.
 set -euo pipefail
 
-DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 ES="" STAKES=()
+DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 ES="" TOR="" STAKES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
@@ -39,13 +46,14 @@ while [ $# -gt 0 ]; do
     --name) NAME="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --es) ES=1; shift ;;
+    --enable-tor) TOR=1; shift ;;
     --stake) STAKES+=("$2"); shift 2 ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac
 done
 if [ -z "$DOMAIN" ]; then
   echo "usage: bash setup-node.sh --domain node.example.org [--fund vibe1...=VIBE] [--email you@example.org]"
-  echo "       [--name NAME --port PORT --chain-id ID] [--es] [--stake vibe1...=VIBE]"
+  echo "       [--name NAME --port PORT --chain-id ID] [--es] [--stake vibe1...=VIBE] [--enable-tor]"
   exit 1
 fi
 [[ -z "$NAME" || "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "--name takes lowercase letters, digits and dashes"; exit 1; }
@@ -54,6 +62,12 @@ if [ -n "$NAME" ] && [ "$CHAIN_ID" = "vibehash-public-1" ]; then
   echo "a named node runs its own network: give it its own --chain-id (vibehash-public-1 is the main node's)"; exit 1
 fi
 [ "$(id -u)" = 0 ] || { echo "run it as root"; exit 1; }
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SHARED=(backup.sh healthcheck.sh alert.sh)
+UNITS=(vibehash-backup.service vibehash-backup.timer vibehash-backup.path vibehash-health.service vibehash-health.timer vibehash-alert@.service)
+for f in "${SHARED[@]}" "${UNITS[@]}"; do
+  [ -f "$HERE/$f" ] || { echo "$HERE/$f is missing: copy the whole deploy/ folder to the server (scp -r deploy root@SERVER:)"; exit 1; }
+done
 
 SUFFIX=${NAME:+-$NAME}  # "" for the main node, whose folders and service keep their names
 DATA=/var/lib/vibehash$SUFFIX ETC=/etc/vibehash$SUFFIX VENV=/opt/vibehash SERVICE=vibehash-node$SUFFIX
@@ -79,7 +93,8 @@ fi
 say "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q python3-venv certbot ufw
+apt-get install -y -q python3-venv certbot ufw sqlite3 rclone
+[ -z "$TOR" ] || apt-get install -y -q tor
 
 say "Installing Vibe Hash"
 id vibehash >/dev/null 2>&1 || useradd --system --home-dir /var/lib/vibehash --create-home --shell /usr/sbin/nologin vibehash
@@ -96,6 +111,11 @@ if [ ! -f "$ETC/env" ]; then
   chgrp vibehash "$ETC/env"
   chmod 640 "$ETC/env"
 fi
+# Where the backup sends the chain and the blobs, and where the alerts go: empty until you fill them in. Only keys the
+# file lacks are added, so running this again keeps what you set (append, so the file keeps its mode and owner).
+add_env() { grep -q "^$1=" "$ETC/env" || printf '# %s\n%s=\n' "$2" "$1" >> "$ETC/env"; }
+add_env BACKUP_RCLONE_REMOTE "an rclone remote path the daily backup sends the chain and the blobs to, such as spaces:vibehash-backups/public-1 (made with: rclone config --config $ETC/rclone.conf)"
+add_env ALERT_WEBHOOK "a Discord, Slack or ntfy webhook URL that is told when a backup or the health check fails"
 set -a; . "$ETC/env"; set +a
 
 if [ ! -f "$WALLET" ]; then
@@ -169,6 +189,24 @@ if [ -n "$EMAIL" ]; then contact=(-m "$EMAIL"); else contact=(--register-unsafel
 certbot certonly --standalone --non-interactive --agree-tos "${contact[@]}" -d "$DOMAIN" --keep-until-expiring
 sh "$HOOK"
 
+# A Tor hidden service: Tor sends the .onion address's port 443 as it is (TCP) to the node's own HTTPS port, so TLS still
+# ends at the node. The node has no plain-HTTP port to point Tor at. Its certificate is for $DOMAIN, not the .onion name,
+# so a client on the .onion address trusts it by fingerprint (`vibehash setup --tls-fingerprint`), as the node prints.
+ONION_ARGS=""
+if [ -n "$TOR" ]; then
+  say "Giving the node a Tor hidden service"
+  TORDIR=/var/lib/tor/vibehash$SUFFIX
+  if ! grep -qxF "HiddenServiceDir $TORDIR/" /etc/tor/torrc; then
+    printf '\n# Vibe Hash node %s\nHiddenServiceDir %s/\nHiddenServicePort 443 127.0.0.1:%s\n' "$URL" "$TORDIR" "$PORT" >> /etc/tor/torrc
+    systemctl restart tor
+  fi
+  systemctl enable tor >/dev/null 2>&1 || true
+  for _ in $(seq 1 60); do [ -s "$TORDIR/hostname" ] && break; sleep 1; done
+  [ -s "$TORDIR/hostname" ] || { echo "Tor didn't make $TORDIR/hostname: see journalctl -u tor"; exit 1; }
+  ONION=$(tr -d '[:space:]' < "$TORDIR/hostname")
+  ONION_ARGS="--onion $ONION"
+fi
+
 say "Running the node as a service"
 cat > "/etc/systemd/system/$SERVICE.service" <<EOF
 [Unit]
@@ -181,7 +219,7 @@ User=vibehash
 Group=vibehash
 EnvironmentFile=$ETC/env
 WorkingDirectory=$DATA
-ExecStart=$VH node --genesis $GENESIS --wallet $WALLET --data-dir $DATA/data --host 0.0.0.0 --port $PORT --announce $URL --tls-cert $ETC/tls/cert.pem --tls-key $ETC/tls/key.pem $NODE_ARGS
+ExecStart=$VH node --genesis $GENESIS --wallet $WALLET --data-dir $DATA/data --host 0.0.0.0 --port $PORT --announce $URL --tls-cert $ETC/tls/cert.pem --tls-key $ETC/tls/key.pem $NODE_ARGS $ONION_ARGS
 Restart=always
 RestartSec=5
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -198,6 +236,23 @@ systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null
 systemctl restart "$SERVICE"
 
+say "Setting up backups, a health check and alerts"
+# The scripts are shared by every node on the server; each node has its own units, filled in for its folders and URL
+# (vibehash-backup-NAME.timer and so on for a named node). They run as the node's user (see vibehash-backup.service),
+# which is why the node unit needs no new ReadWritePaths: it already has all of $DATA, the backup stage included.
+install -d -m 755 /usr/local/lib/vibehash
+install -d -m 750 -o vibehash -g vibehash "$DATA/backup"  # (the backup stage; the node writes backup requests here)
+for f in "${SHARED[@]}"; do install -m 755 "$HERE/$f" /usr/local/lib/vibehash/; done
+ALERT=vibehash-alert$SUFFIX@ NAMEARG=${NAME:+--name $NAME}
+for f in "${UNITS[@]}"; do
+  stem=${f%%[@.]*}  # vibehash-backup.timer -> vibehash-backup-evo.timer, vibehash-alert@.service -> vibehash-alert-evo@.service
+  installed=$stem$SUFFIX${f#"$stem"}
+  sed -e "s|@URL@|$URL|g; s|@ETC@|$ETC|g; s|@DATA@|$DATA|g; s|@ALERT@|$ALERT|g; s|@SUFFIX@|$SUFFIX|g; s|@NAMEARG@|$NAMEARG|g" \
+    "$HERE/$f" > "/etc/systemd/system/$installed"
+done
+systemctl daemon-reload
+systemctl enable --now "vibehash-backup$SUFFIX.timer" "vibehash-backup$SUFFIX.path" "vibehash-health$SUFFIX.timer" >/dev/null
+
 say "Checking it answers"
 for _ in $(seq 1 30); do
   curl -fsS "$URL/status" >/dev/null 2>&1 && break
@@ -206,6 +261,14 @@ done
 if status=$(curl -fsS "$URL/status" 2>/dev/null); then
   echo "$status" | python3 -c "import json, sys; s = json.load(sys.stdin); print(f\"network {s['chain_id']}, block {s['height']}\")"
   printf '\nDone. The node address is %s\n  validator %s\n  logs:     journalctl -u %s -f\n' "$URL" "$ADDRESS" "$SERVICE"
+  [ -z "$TOR" ] || printf '  onion:    %s (port 443; trust its certificate by fingerprint)\n' "$ONION"
+  printf '\nStill to do:\n'
+  printf '  - Turn on weekly snapshots for this droplet in the DigitalOcean control panel.\n'
+  printf '  - Without BACKUP_RCLONE_REMOTE the blobs are not backed up at all. Make a remote with\n'
+  printf '      rclone config --config %s/rclone.conf   (then: chgrp vibehash %s/rclone.conf; chmod 640 it)\n' "$ETC" "$ETC"
+  printf '    and put BACKUP_RCLONE_REMOTE=remote:bucket/path in %s/env.\n' "$ETC"
+  printf '  - Put a Discord, Slack or ntfy webhook URL in ALERT_WEBHOOK= in %s/env to hear when a backup fails or the node stalls.\n' "$ETC"
+  printf '  - Try it: systemctl start vibehash-backup%s.service; journalctl -u vibehash-backup%s -n 20\n' "$SUFFIX" "$SUFFIX"
 else
   echo "The node didn't answer. Its log says:"
   journalctl -u "$SERVICE" -n 30 --no-pager

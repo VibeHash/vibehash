@@ -584,11 +584,14 @@ listens on IPv4 only, so give it no AAAA record. Then copy the script over and
 run it:
 
 ```bash
-scp deploy/setup-node.sh root@SERVER-IP:
+scp -r deploy root@SERVER-IP:
 ```
 ```bash
-ssh root@SERVER-IP bash setup-node.sh --domain node.vibehash.org --fund YOUR-WALLET-ADDRESS=10000
+ssh root@SERVER-IP bash deploy/setup-node.sh --domain node.vibehash.org --fund YOUR-WALLET-ADDRESS=10000
 ```
+
+The script needs the other files in `deploy/` beside it (the backup, health
+check and alert scripts and their systemd units), so copy the whole folder.
 
 `--fund` gives one wallet test VIBE to post the first training jobs, since
 with earn-in nobody else starts with any. Running the script again upgrades
@@ -633,10 +636,10 @@ same tailnet. The script leaves SSH rules alone once the firewall is on, so
 upgrading doesn't reopen port 22. Upgrade as your own user:
 
 ```bash
-scp deploy/setup-node.sh YOU@SERVER:
+scp -r deploy YOU@SERVER:
 ```
 ```bash
-ssh -t YOU@SERVER sudo bash setup-node.sh --domain node.vibehash.org
+ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --domain node.vibehash.org
 ```
 
 ### A second network on the same server
@@ -646,7 +649,7 @@ testnet, say. Give it a name, its own domain (an A record to the same
 server), a port other than 443 and its own chain id:
 
 ```bash
-ssh -t YOU@SERVER sudo bash setup-node.sh --name evo --domain evo.vibehash.org --port 8443 --chain-id vibehash-evo-1 --es --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
+ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --name evo --domain evo.vibehash.org --port 8443 --chain-id vibehash-evo-1 --es --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
 ```
 
 - `--name evo` keeps it apart: `/var/lib/vibehash-evo`, `/etc/vibehash-evo`,
@@ -660,6 +663,66 @@ ssh -t YOU@SERVER sudo bash setup-node.sh --name evo --domain evo.vibehash.org -
 
 Both nodes share the server's Vibe Hash install, so after upgrading one,
 restart the other too: `sudo systemctl restart 'vibehash-node*'`.
+
+### Backups, alerts and Tor
+
+Losing the server loses the chain unless it is backed up. The script sets up a
+daily backup, a health check every five minutes, and an alert for either
+failing. A named node gets its own copies (`vibehash-backup-evo.timer`, and so
+on). Also turn on weekly snapshots for the droplet in the DigitalOcean control
+panel.
+
+- **What is backed up.** `backup.sh` (run by `vibehash-backup.timer`) makes a
+  consistent online copy of the chain database with `sqlite3 .backup`, gzips it
+  into `/var/lib/vibehash/backup/` beside the genesis and the node's wallet, and
+  keeps the newest 14. If `BACKUP_RCLONE_REMOTE` is set it then sends the
+  checkpoints (`blobs/`) and that folder to the remote with `rclone`. The
+  checkpoints reach 1 GiB each and go straight from their folder to the remote,
+  never to a copy on the server's own disk.
+- **Set the remote.** Make one with `sudo rclone config --config
+  /etc/vibehash/rclone.conf` (S3-style remotes such as DigitalOcean Spaces work;
+  `sudo chgrp vibehash /etc/vibehash/rclone.conf && sudo chmod 640
+  /etc/vibehash/rclone.conf` lets the backup read it), then put
+  `BACKUP_RCLONE_REMOTE=spaces:vibehash-backups/public-1` in
+  `/etc/vibehash/env`. Until you do, the log warns that the **blobs are not
+  backed up** and the chain copy is on the server only. Try it with `sudo
+  systemctl start vibehash-backup && journalctl -u vibehash-backup -n 20`.
+- **Asking for a backup, and what happened.** The node (an unprivileged user)
+  asks for one by writing `{"requested_at": <unix time>}` to
+  `/var/lib/vibehash/backup/request`, atomically; `vibehash-backup.path` sees
+  it and starts the backup, which deletes the file as it starts. Every run,
+  failed or not, writes `backup/last_backup.json`:
+  `{"timestamp": <unix>, "chain_bytes": <size of the chain archive>,
+  "remote_ok": <true only if a remote is set and both rclone steps worked>,
+  "error": <text or null>}`. With no remote, `remote_ok` is false and `error` is
+  `"no BACKUP_RCLONE_REMOTE: blobs not backed up"`. The health check keeps
+  `/var/lib/vibehash/health.json`:
+  `{"checked_at": <unix>, "height": <int or null>, "tip_time": <unix or null>,
+  "ok": <bool>, "reason": <text or null>}`, where `tip_time` is when the check
+  first saw that height (`/status` has no block time).
+- **The wallet's password is not backed up.** The wallet in the backup is
+  encrypted with `VIBEHASH_PASSWORD` from `/etc/vibehash/env`: keep that
+  somewhere safe too.
+- **Restore.** On a new server run `setup-node.sh` first (same `--name` and
+  `--chain-id`), then follow `/usr/local/lib/vibehash/backup.sh --restore-hint`:
+  stop the node, `rclone copy` the `chain/` folder back, `gunzip` the chosen
+  archive to `data/chain.sqlite3`, `rclone sync` the `blobs/` back, start the
+  node.
+- **Alerts.** `healthcheck.sh` fails (and so does the unit) when the node
+  doesn't answer `/status`, says it halted itself, or has been mid-round or
+  holding transactions for 15 minutes without a new block. A chain with no job
+  makes no blocks, so an idle node is healthy at any height. A failing backup
+  or health check starts `vibehash-alert@.service`, which posts the unit's name
+  and last 20 log lines as JSON (`text` and `content` keys: Discord, Slack and
+  ntfy take it) to `ALERT_WEBHOOK` in `/etc/vibehash/env`. With no webhook it
+  only writes to the journal.
+- **Tor.** Run the script with `--enable-tor` to give the node a hidden
+  service. It installs `tor`, forwards the `.onion` address's port 443 to the
+  node's HTTPS port, starts the node with `--onion ADDR.onion` and prints the
+  address; `/status` then shows it as `onion`. Tor users can reach the node
+  there without Cloudflare blocking Tor exit nodes. The certificate is for the
+  node's domain, so a client trusts it by fingerprint (`vibehash setup --node
+  https://ADDR.onion --tls-fingerprint FINGERPRINT`).
 
 ## Run a network for other people
 

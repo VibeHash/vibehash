@@ -397,7 +397,8 @@ def cmd_node(a):
                     keep_rounds=a.keep_rounds, limits=limits, tls=context, peers=[normalise_url(p) for p in a.peer or []],
                     announce=normalise_url(a.announce) if a.announce else None, max_job_bytes=int(a.max_job_mb * 2**20),
                     bucket=bucket_from_env(),  # DeepSeek jobs' hand-offs, if $VIBEHASH_BUCKET_* are set
-                    min_client=a.min_client, admin_token=a.admin_token, admin_mfa=a.admin_mfa).start()
+                    min_client=a.min_client, admin_token=a.admin_token, admin_mfa=a.admin_mfa,
+                    onion=a.onion).start()
     except FolderInUse as e:
         sys.exit(f"error: {e}")
     if context:
@@ -2354,6 +2355,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--peer", action="append", metavar="URL",
                    help="another node to sync from and gossip to (validators find each other from the chain anyway)")
     p.add_argument("--announce", metavar="URL", help="the address other nodes reach this one at, if not --host:--port")
+    p.add_argument("--onion", metavar="ADDR.onion", help="this node's Tor hidden-service address, shown in /status")
     p.add_argument("--dataset", action="append", help="add an .npz dataset to this node's store")
     p.add_argument("--device", default="cpu", help="where the node checks work its checkers didn't and scores each round: "
                    "cpu (default), auto, cuda, xpu or mps. Fine-tunes want a GPU here (and PyTorch)")

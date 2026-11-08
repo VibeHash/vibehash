@@ -1,0 +1,24 @@
+# Installed by setup-node.sh, which fills in the @...@ names for this node and names the file vibehash-backup-NAME.service
+# for a named node. It runs as the node's own user, not root: that user already owns the chain database, the wallet and
+# the blobs, so the copy can't leave root-owned files in the node's folder, and the unit gets the node's own sandbox.
+# ReadWritePaths is all of the node's folder, as the node unit has it; the stage, $DATA/backup, is inside it.
+[Unit]
+Description=Back up the Vibe Hash node (@URL@)
+After=network-online.target
+Wants=network-online.target
+OnFailure=@ALERT@%n.service
+
+[Service]
+Type=oneshot
+User=vibehash
+Group=vibehash
+Environment=RCLONE_CONFIG=@ETC@/rclone.conf
+ExecStart=/usr/local/lib/vibehash/backup.sh @NAMEARG@
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=@DATA@
