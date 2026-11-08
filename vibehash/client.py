@@ -441,6 +441,7 @@ class WorkerClient:
         self.jobs: dict[str, TrainingJob] = {}
         self.speed: dict[str, float] = {}
         self.cannot: dict[str, str] = {}  # jobs this worker can't run, and why
+        self.recheck: dict[str, float] = {}  # of those, the ones to ask about again, and when (time.monotonic)
         self.done: dict[tuple[int, str], bool] = {}
         self.units: dict[int, list] = {}
         self.start_blob: dict[int, str] = {}
@@ -587,6 +588,10 @@ class WorkerClient:
         return 2e12 if self.backend.name != "cpu" else 2e10
 
     def job(self, job_id: str) -> TrainingJob:
+        if job_id in self.recheck and time.monotonic() >= self.recheck[job_id]:
+            # refused for something that may have passed (an Evo self-check that errored): asked about again
+            for refused in (self.jobs, self.cannot, self.recheck):
+                refused.pop(job_id, None)
         if job_id not in self.jobs:
             info = self.node.get(f"/job/{job_id}")
             job = TrainingJob.from_spec_json(json.dumps(info["spec"]), info["owner"], 0)
@@ -594,7 +599,11 @@ class WorkerClient:
             if why:
                 self.jobs[job_id] = job
                 self.cannot[job_id] = why
-                log.warning("skipping it: %s", why)
+                wait = self.es.retry_in(job) if job.es else None
+                if wait is not None:
+                    self.recheck[job_id] = time.monotonic() + wait
+                log.warning("skipping it: %s%s", why,
+                            f" (asking again in {max(1, round(wait / 60))} min)" if wait is not None else "")
                 return job
             if job.data_source["kind"] in ("npz", "tokens", "deepseek"):
                 sha = job.data_source["sha256"]

@@ -111,6 +111,17 @@ def cached(device: str) -> dict:
         return got
 
 
+def retry_in(device: str) -> float | None:
+    """Seconds until an errored check(device) is tried again (0 once it's due), or None when no error stands: the
+    check passed, failed for good, or hasn't run. A worker that refused an Evo job over the error asks again then
+    (client.Client.job), or the refusal would last until it restarts."""
+    with _lock:
+        got = _done.get(device)
+    if got is None or "error" not in got:
+        return None
+    return max(0.0, got["at"] + RETRY_S - time.monotonic())
+
+
 def problem(device: str) -> str | None:
     """Why `device` shouldn't take Evo work, or None (cached)."""
     got = cached(device)
