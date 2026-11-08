@@ -61,7 +61,6 @@ with open(sys.argv[1] + ".tmp", "w") as f:
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
 ' "$STAGE/last_backup.json" || true
 }
-trap finish EXIT
 
 if [ -n "$HINT" ]; then
   cat <<TEXT
@@ -78,6 +77,7 @@ TEXT
   exit 0
 fi
 
+trap finish EXIT  # (after the --restore-hint branch above, which must leave last_backup.json alone)
 rm -f "$STAGE/request"  # (a request for this run, if the node made one)
 [ -f "$ETC/env" ] || fail "no $ETC/env: is this the right --name?"
 set -a; . "$ETC/env"; set +a
