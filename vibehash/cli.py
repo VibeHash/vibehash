@@ -1073,9 +1073,12 @@ def cmd_wallet_mfa(a):
             sys.exit("error: that authenticator code is wrong, or was used already; it stays on")
         try:
             credstore.delete(credstore.WALLET_TOTP, address)
-            credstore.delete(credstore.WALLET_TOTP, _last_step_account(address))
         except credstore.Unavailable as e:
             sys.exit(f"error: {e}; it stays on")
+        try:
+            credstore.delete(credstore.WALLET_TOTP, _last_step_account(address))
+        except credstore.Unavailable:
+            pass  # (the gate is off: a leftover step only refuses codes older than it, should it be turned on again)
         print(f"off: sends from {shown} no longer ask for a code")
         return
     if key is not None:

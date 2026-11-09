@@ -131,7 +131,8 @@ class Api:
         recovery words. A new wallet whose key is in the credential store has its words there too (app.hold_words), or
         in the app's memory when the store refused them: the state says `words_pending` and the port of the app's
         listener (app.serve_words), and they are fetched from there each time, on every start, until `words_seen()`.
-        An older or headless setup saved them to a file only this user can read, which is parsed here while it is still there; the page shows them once and says to keep them somewhere safe."""
+        An older or headless setup saved them to a file only this user can read, which is parsed here while it is
+        still there; the page shows them once and says to keep them somewhere safe."""
         info = dict((app_module.read_state() or {}).get("wallet") or {})
         words_file = info.get("words_file")
         words: list[str] = []
