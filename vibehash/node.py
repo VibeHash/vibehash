@@ -61,8 +61,8 @@ from . import __version__, advice, filelock, hardware, netstats, nodeadmin, prox
 from .blobs import CHUNK, MAX_DATASET, STALE_PART_S, BlobError, BlobStore, check_id
 from .client import MIN_CLIENT, OLD_CLIENT, NodeError, agent_version, parse_version  # the oldest releases it takes
 from .consensus import Engine, Timeouts, check_certificate, evidence_memo
-from .coordinator import (ES_RECORD_VERSION, FINETUNE_RECORD_VERSION, RECORD_VERSION, SHARDED_RECORD_VERSION, Coordinator,
-                          CoordinatorConfig, Phase, ProtocolError, valid_gap)
+from .coordinator import (ES_RECORD_VERSION, FINETUNE_RECORD_VERSION, NEWCOMER_RESERVE, RECORD_VERSION,
+                          SHARDED_RECORD_VERSION, Coordinator, CoordinatorConfig, Phase, ProtocolError, valid_gap)
 from .crypto import AddressError, KeyPair, address_of, checksummed, parse_address, verify
 from .ledger import EVIDENCE_WINDOW, SYSTEM, VERSION, Block, InvalidBlock, Tx, apply_block, canonical
 from .model import params_hash
@@ -621,6 +621,10 @@ class Node:
                 if want == FINETUNE_RECORD_VERSION and isinstance(rules, dict) and rules.get("finetune_check") != FINETUNE_CHECK:
                     raise InvalidBlock(f"a new fine-tune round compares its replicas by rule {FINETUNE_CHECK}, not "
                                        f"{rules.get('finetune_check', 1)!r}")
+                if (want == ES_RECORD_VERSION and self.chain.state.earn_in and isinstance(rules, dict)
+                        and rules.get("newcomer_reserve", 0) != NEWCOMER_RESERVE):
+                    raise InvalidBlock(f"a new Evo round on this chain holds {NEWCOMER_RESERVE} units for workers "
+                                       f"earning their stake in, not {rules.get('newcomer_reserve', 0)!r}")
             with self.coord.lock:
                 tip = self.chain.tip
                 if block.height != tip.height + 1 or block.prev_hash != tip.hash:

@@ -125,6 +125,10 @@ def games_allowed(rep: float) -> int:
 FINETUNE_QUORUM = 2
 # How close a scorer's (loss, accuracy) must be to the median to be paid: honest scorers agree to about 1e-6.
 SCORE_AGREEMENT = 1e-3
+# Units of each Evo round that go first to workers earning their stake in, when any registered (start_compute). Staked
+# workers would otherwise take every unit, and an Evo-only network has no other job to earn a stake on. A new Evo
+# round on an earn-in chain must record it (Node's check of a proposed block), so no leader can leave newcomers out.
+NEWCOMER_RESERVE = 2
 RAMP = 2  # a worker's capacity can grow this much each round it delivers in full, up to what it says it can do
 LOOKBACK = 50  # blocks searched for a worker's most recent round
 
@@ -161,6 +165,9 @@ class CoordinatorConfig:
     # How a fine-tune's replicas are compared (verification.FINETUNE_CHECK). Only fine-tunes' rounds record it
     # (open_round), so other jobs' rules, and their records' hashes, stay as they were.
     finetune_check: int = FINETUNE_CHECK
+    # Units of an Evo round given first to workers earning their stake in (NEWCOMER_RESERVE). Only Evo rounds on
+    # earn-in chains record it (open_round), so other rounds' rules, and their records' hashes, stay as they were.
+    newcomer_reserve: int = NEWCOMER_RESERVE
 
     def rules(self) -> dict:
         """The settings a round's outcome depends on, recorded with it so a replay uses the same ones."""
@@ -784,6 +791,9 @@ class Coordinator:
             if self.replaying and level != self.replaying.get("es", {}).get("level"):
                 raise ProtocolError("the record's level isn't the one the round's starting state holds")
             self.r.record |= {"version": ES_RECORD_VERSION, "es": {"rule": job.spec.rule, "level": level}}
+        if job.es and self.chain.state.earn_in and self.config.newcomer_reserve:
+            # A replay takes the recorded rules instead (below): a record from before this has none, and holds none back.
+            self.r.record["rules"]["newcomer_reserve"] = self.config.newcomer_reserve
         if prep_units:  # a DeepSeek prep round: which unit of the work graph each of its units is
             self.r.record["prep"] = {"units": dict(prep_units)}
             self.r.record["checks"]["handoff"] = {}  # whether a rejected unit's outputs are its last state
@@ -891,21 +901,33 @@ class Coordinator:
                 return
             self.waiting.pop(r.job_id, None)
 
-        def pick(unit: WorkUnit, exclude: set[str]) -> str | None:
+        def pick(unit: WorkUnit, exclude: set[str], prefer: frozenset[str] = frozenset()) -> str | None:
             # Staked workers first: those earning their stake in only get what's left, so they can't crowd them out.
+            # (Except `prefer`, the newcomers an Evo round's first units are held for, below.)
             # A prep unit goes to the miners its piece stands with (_affinity), so pieces stay where they're held.
             fits = [a for a in order if a not in exclude and r.regs[a].memory_mb >= unit.memory_mb
                     and used[a] + unit.flops <= capacity[a]]
             piece = _piece(r.prep[unit.unit_id]) if unit.unit_id in r.prep else None
-            return min(fits, key=lambda a: (not staked(a), _affinity(piece, a) if piece else b"",
+            return min(fits, key=lambda a: (a not in prefer, not staked(a), _affinity(piece, a) if piece else b"",
                                             (used[a] + unit.flops) / capacity[a])) if fits else None
+
+        # An Evo round's first few units go to workers earning their stake in (NEWCOMER_RESERVE), one at a time. Only
+        # those registered this round count, so with none here nothing is held back and every unit goes to the staked
+        # workers as before; a unit no newcomer has room for goes to them too. Nor does a newcomer count whose last
+        # turn on chain it missed or was slashed in (track_record): a no-show can't keep units unworked round after round.
+        reserve = r.record["rules"].get("newcomer_reserve", 0) if r.es else 0
+        first_dibs = frozenset(a for a in r.regs if not staked(a) and not (self.track_record(a) or (0, False))[1]) \
+            if reserve else frozenset()
+        held = 0
 
         for unit in r.units.values():
             holders = []
-            first = pick(unit, set())
+            prefer = first_dibs if held < reserve else frozenset()
+            first = pick(unit, set(), prefer)
             if first is None:
                 r.unassigned += 1
                 continue
+            held += first in prefer
             holders.append(first)
             # A prep unit has one holder: its objects in the bucket have one name, whoever writes them. An ES unit has
             # one too: its checkers re-check it, and the node re-scores every answer.

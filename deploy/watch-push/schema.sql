@@ -1,5 +1,7 @@
 -- vibehash.org/watch's alerts and counts (worker.js). Apply with:
 --   npx wrangler d1 execute vibehash-watch --remote --file schema.sql
+-- A database made before nicknames needs, once:
+--   npx wrangler d1 execute vibehash-watch --remote --command "ALTER TABLE watches ADD COLUMN name TEXT"
 
 -- A phone that turned alerts on: its push endpoint (from the browser's push service) and whether it wants payments too.
 -- id is the hex SHA-256 of the endpoint: the service worker sends it to collect its messages.
@@ -15,6 +17,7 @@ CREATE TABLE IF NOT EXISTS subs (
 CREATE TABLE IF NOT EXISTS watches (
   sub         TEXT NOT NULL,
   address     TEXT NOT NULL,
+  name        TEXT,               -- the nickname the phone gave it ("Gaming PC"), for its alerts; NULL: the address
   last_active INTEGER,            -- the last block time it trained, checked or was paid (seconds)
   stopped     INTEGER NOT NULL DEFAULT 0,  -- "stopped working" sent, and not yet back
   paid_unsent INTEGER NOT NULL DEFAULT 0,  -- syn paid since the last payment alert

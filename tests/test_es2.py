@@ -323,6 +323,24 @@ class StarterTemplateTests(unittest.TestCase):
         self.assertNotIn("cross_margin", got["off"])
 
 
+class LapsTests(unittest.TestCase):
+    def test_parts_add_up_in_order_and_tiny_ones_go_unsaid(self):
+        from vibehash import es_client
+        clock = iter([0.0, 1.25, 1.27, 4.0, 4.5, 6.0])
+        with mock.patch.object(es_client.time, "perf_counter", lambda: next(clock)):
+            lap = es_client._Laps()
+            lap("catch_up")
+            lap("gpu_wait")
+            lap("answer")
+            lap("upload")
+            lap("answer")
+        self.assertEqual(list(lap.s), ["catch_up", "gpu_wait", "answer", "upload"])
+        self.assertEqual(lap.rounded(), {"catch_up": 1.25, "gpu_wait": 0.02, "answer": 4.23, "upload": 0.5})
+        self.assertEqual(lap.words(), "catching up 1.2 s, answering 4.2 s, uploads 0.5 s")
+        self.assertEqual(lap.said(), ": catching up 1.2 s, answering 4.2 s, uploads 0.5 s")
+        self.assertEqual(es_client._Laps().said(), "")
+
+
 @unittest.skipUnless(HAVE_TORCH, "needs PyTorch and transformers")
 class NetworkTests2(unittest.TestCase):
     def test_answers_nested_too_deep_are_slashed_and_the_round_stays_whole(self):
@@ -377,6 +395,121 @@ class NetworkTests2(unittest.TestCase):
                 self.assertIn(f"{rv['unit_id']}/{rv['worker']}", rec["checks"]["reveal"], b.height)
                 revealed += rv["worker"] == nester
         self.assertTrue(revealed, "the nester never revealed: the test tested nothing")
+
+    def test_a_rounds_evo_work_is_timed_part_by_part(self):
+        """rounds.jsonl's evo_s and evo_check_s, and the worker log's lines, say where each round's answering and
+        checking went (es_client._Laps): so a live round's time can be found, which offline profiles couldn't."""
+        from vibehash import es_client, records
+        from vibehash.client import NodeClient, WorkerClient
+        from vibehash.coordinator import CoordinatorConfig
+        from vibehash.node import Node, PhaseTimes
+        from tests.test_network import run_until
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        spec = tiny_spec2(tiny_model(root / "tiny", seed=1))
+        for p in (mock.patch.object(es, "reward", fake_reward), mock.patch.dict(os.environ, {"VIBEHASH_HOME": str(root / "home")}),
+                  mock.patch("vibehash.es_local.V2_COMPUTE_S", 30)):
+            p.start()
+            self.addCleanup(p.stop)
+        node_keys, req = KeyPair.generate(b"laps node"), KeyPair.generate(b"laps requester")
+        workers = [KeyPair.generate(f"laps worker {i}".encode()) for i in range(3)]
+        genesis = {"chain_id": "vibehash-laps-test", "timestamp": 0, "allocations": {req.address: 500 * VIBE},
+                   "stakes": {k.address: 10 * VIBE for k in [node_keys, *workers]}, "es": True}
+        node = Node(root / "node", genesis, node_keys, port=0,
+                    times=PhaseTimes(register_s=1.0, compute_s=20.0, reveal_s=3.0, verify_s=15.0, idle_s=0.3),
+                    config=CoordinatorConfig(newcomer_units=4)).start()
+        self.addCleanup(node.stop)
+        api = NodeClient(node.url)
+        clients = [WorkerClient(node.url, k, memory_mb=8192, flops_override=1e12, poll_s=0.1, device="cpu",
+                                cache_dir=root / f"cache{i}") for i, k in enumerate(workers)]
+        session = records.Session(clients, root / "logs")
+        job = job_of(spec, "evo2-laps", req.address, 6 * VIBE)
+        api.send_tx(req, "post_job", "system", job.budget, job.spec_json())
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        with self.assertLogs("vibehash.worker", level="INFO") as said:
+            run_until(node, clients, stop, 4, seconds=300)
+        session.close()
+        lines = [json.loads(s) for s in (root / "logs" / "rounds.jsonl").read_text().splitlines()]
+        lines = [d for d in lines if d.get("job") == "evo2-laps"]
+        answered = [d for d in lines if d.get("trained")]
+        checked = [d for d in lines if d.get("checks")]
+        self.assertTrue(answered and checked, "no round was answered and checked: the test tested nothing")
+        for d in answered:
+            parts = d["evo_s"]
+            for k in ("catch_up", "prompts", "noise", "gpu_wait", "load", "answer", "texts", "upload"):
+                self.assertIn(k, parts, d["round"])
+            self.assertTrue(all(v >= 0 for v in parts.values()))
+            self.assertLessEqual(sum(parts.values()), d["train_s"] + 0.05)  # the parts are within the whole
+        for d in checked:
+            for k in ("fetch", "catch_up", "load", "gaps"):
+                self.assertIn(k, d["evo_check_s"], d["round"])
+            self.assertLessEqual(sum(d["evo_check_s"].values()), d["check_s"] + 0.05)
+        text = "\n".join(said.output)  # (the tiny model's parts are mostly under 0.05 s, which a line leaves unsaid)
+        self.assertRegex(text, r"(?m)answered \d+ Evo units? \(\d+ members\) in [\d.]+ s($|:)")
+        self.assertRegex(text, r"(?m)checked \d+ Evo claims? in [\d.]+ s($|:)")
+        self.assertNotRegex(text, r"(?m) s: ?$")
+
+    def test_a_newcomer_earns_its_stake_on_an_evo_only_chain(self):
+        """The chain's one job is Evo, and two staked workers could take all of its units. The rounds hold some for a
+        worker with no stake (coordinator.NEWCOMER_RESERVE), staked workers check them, its first pay becomes its
+        stake, and every round replays from its record."""
+        from vibehash import economics as econ
+        from vibehash.client import NodeClient, WorkerClient
+        from vibehash.coordinator import NEWCOMER_RESERVE, CoordinatorConfig
+        from vibehash.ledger import Block, Chain
+        from vibehash.node import Node, PhaseTimes
+        from vibehash.replay import replay_block
+        from vibehash import es_client
+        from tests.test_network import run_until
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        spec = tiny_spec2(tiny_model(root / "tiny", seed=1))
+        for p in (mock.patch.object(es, "reward", fake_reward), mock.patch.dict(os.environ, {"VIBEHASH_HOME": str(root / "home")}),
+                  mock.patch.object(es_client, "SAVE_EVERY", 1), mock.patch("vibehash.es_local.V2_COMPUTE_S", 30)):
+            p.start()
+            self.addCleanup(p.stop)
+        node_keys, req = KeyPair.generate(b"earn node"), KeyPair.generate(b"earn requester")
+        staked = [KeyPair.generate(f"earn staked {i}".encode()) for i in range(2)]
+        new = KeyPair.generate(b"earn newcomer")
+        genesis = {"chain_id": "vibehash-evo-earn-test", "timestamp": 0, "allocations": {req.address: 500 * VIBE},
+                   "stakes": {k.address: 10 * VIBE for k in [node_keys, *staked]}, "es": True, "earn_in": True,
+                   "economics": econ.NEW_SCHEDULES["testnet"].to_dict()}
+        node = Node(root / "node", genesis, node_keys, port=0,
+                    times=PhaseTimes(register_s=1.0, compute_s=20.0, reveal_s=3.0, verify_s=15.0, idle_s=0.3),
+                    config=CoordinatorConfig(newcomer_units=4)).start()
+        self.addCleanup(node.stop)
+        api = NodeClient(node.url)
+        clients = [WorkerClient(node.url, k, memory_mb=8192, flops_override=1e12, poll_s=0.1, device="cpu",
+                                cache_dir=root / f"cache{i}") for i, k in enumerate([*staked, new])]
+        job = job_of(spec, "evo2-earn", req.address, 6 * VIBE)
+        self.assertLessEqual(job.units_per_round, 2 * 4, "the staked workers could take every unit")
+        api.send_tx(req, "post_job", "system", job.budget, job.spec_json())
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        self.assertEqual(node.chain.state.stake(new.address), 0)
+        run_until(node, clients, stop, 4, seconds=240)
+        self.assertGreaterEqual(node.chain.tip.height, 4, "the network didn't make its rounds in time")
+        st = node.chain.state
+
+        blocks = [Block.from_dict(d) for d in api.get(f"/blocks?from=0&to={node.chain.tip.height}")]
+        records = {b.height: api.get(f"/round/{b.height}/record") for b in blocks if b.summary is not None}
+        mine = [b for b in blocks if b.summary is not None and b.summary.job_id == "evo2-earn"]
+        self.assertTrue(mine)
+        self.assertTrue(all(records[b.height]["rules"]["newcomer_reserve"] == NEWCOMER_RESERVE for b in mine))
+        first = next((b for b in mine if new.address in b.summary.accepted), None)
+        self.assertIsNotNone(first, "the newcomer's work was never accepted")
+        self.assertGreater(st.stake(new.address), 0, "its pay didn't go into its stake")
+        self.assertEqual(st.stake(new.address), min(econ.MIN_STAKE, st.stake(new.address) + st.balance(new.address)))
+        audit = Chain.from_genesis(genesis)
+        for b in blocks[1:]:
+            if b.summary is not None:
+                self.assertEqual(replay_block(audit, b, records[b.height]), [], f"block {b.height}")
+            audit.append(b)
 
     def test_rounds_replay_cheats_a_child_and_a_restart(self):
         from vibehash import economics as econ

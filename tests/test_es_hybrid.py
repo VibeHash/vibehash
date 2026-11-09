@@ -160,6 +160,82 @@ class HybridEngineCheckTests(unittest.TestCase):
         self.assertTrue(all(claimed[q] > 0 for q in differ), [claimed[q] for q in differ])
 
 
+def _cuda() -> bool:
+    if not HAVE_TORCH:
+        return False
+    import torch
+    return torch.cuda.is_available()
+
+
+@unittest.skipUnless(_cuda(), "needs a CUDA GPU")
+class OnePassTests(unittest.TestCase):
+    """The state's decay and write in one pass (es_hybrid.decay_write's kernel) round as the two passes do."""
+
+    def test_one_pass_gives_the_two_passes_bits(self):
+        import torch
+        import torch.nn.functional as F
+        from vibehash import es_hybrid
+
+        B, Dk, Dv = 1024, 128, 128  # Qwen3.5-0.8B's: 64 rows x 16 value heads
+        kern = es_hybrid.onepass_for("cuda", B, Dk, Dv)
+        self.assertIsNotNone(kern, "the one-pass kernel didn't build or didn't match here (the log says which)")
+        g = torch.Generator(device="cuda").manual_seed(11)
+        for _ in range(3):
+            S = torch.randn(B, Dk, Dv, generator=g, device="cuda") * 0.3
+            S[::5] *= 1e-39  # down among float32's subnormals
+            d = torch.rand(B, 1, 1, generator=g, device="cuda")
+            k = F.normalize(torch.randn(B, 1, Dk, generator=g, device="cuda"), dim=-1)
+            delta = torch.randn(B, 1, Dv, generator=g, device="cuda") * 0.1
+            two, one = S.clone(), S.clone()
+            es_hybrid.decay_write(two, d, k, delta)
+            es_hybrid.decay_write(one, d, k, delta, kern)
+            self.assertTrue(torch.equal(two.view(torch.int32), one.view(torch.int32)))
+            # a state it can't take in one pass (not contiguous) gets the two passes
+            T = S.transpose(1, 2).contiguous().transpose(1, 2)
+            es_hybrid.decay_write(T, d, k, delta, kern)
+            self.assertTrue(torch.equal(two.view(torch.int32), T.contiguous().view(torch.int32)))
+
+    def test_the_engine_answers_and_checks_alike_with_one_pass_or_two(self):
+        """The tiny Qwen3.5 on CUDA: answers token for token, gaps and replay log-probabilities bit for bit."""
+        import torch
+        from vibehash import es2_rounds, es_fast, es_hybrid, es_local
+        from vibehash.es_client import prompt_rows, round_factors, runtime2
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            found = es_local.find(str(tiny_hybrid(Path(tmp) / "tiny35", seed=5)))
+            es_local.register(found)
+            spec = es_local.spec2_for(found, "arithmetic", pairs=4, pairs_per_unit=2, problems=5, max_tokens=12)
+            rt = runtime2(spec, "cuda")
+            seed = 99
+            rows = prompt_rows(rt, es2_rounds.items(spec, seed))
+            fac = round_factors(rt, spec, seed)
+            members = [(j, s) for j in range(spec.pairs) for s in (1, -1)]
+            got, kerns = {}, {}
+            try:
+                for on in (False, True):
+                    es_hybrid.ONEPASS = on
+                    es_hybrid._ENGINE.clear()
+                    with torch.no_grad():
+                        a = es_fast.answer_members(rt, rt.linears, fac, members, rows, spec.max_tokens, spec.sigma,
+                                                   spec.rank)
+                        kerns[on] = next(iter(es_hybrid._ENGINE.values())).onepass
+                        gaps = es_fast.gaps_members(rt, rt.linears, fac, members, rows, a, spec.sigma, spec.rank,
+                                                    max_tokens=spec.max_tokens)
+                        lps = es_fast.score_items(rt, rt.linears, fac, members, [(rows[q], a[0][q]) for q in
+                                                                                 range(len(rows)) if a[0][q]],
+                                                  spec.sigma, spec.rank)
+                    got[on] = (a, gaps.cpu(), lps.cpu())
+            finally:
+                es_hybrid.ONEPASS = True
+                es_hybrid._ENGINE.clear()
+        self.assertIsNone(kerns[False])
+        self.assertIsNotNone(kerns[True])
+        self.assertEqual(got[False][0], got[True][0])
+        for x, y in zip(got[False][1:], got[True][1:]):
+            self.assertTrue(torch.equal(x.view(torch.int32), y.view(torch.int32)))
+        self.assertEqual(float(got[True][1].max()), 0.0)
+
+
 @unittest.skipUnless(HAVE_TORCH, "needs PyTorch and transformers")
 class ExportLayoutTests(unittest.TestCase):
     """`vibehash evo export` of a Qwen3.5 job: Qwen3.5's checkpoints are image-text-to-text models (a vision tower and
