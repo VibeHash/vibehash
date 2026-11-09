@@ -258,6 +258,7 @@ class VerifiedUpdateTests(unittest.TestCase):
     def manifest(self, **over):
         m = {"version": "9.9.9", "wheel": "vibehash-9.9.9-py3-none-any.whl", "wheel_sha256": "b" * 64,
              "requirements": "requirements-9.9.9.txt", "requirements_sha256": hashlib.sha256(self.reqs).hexdigest(),
+             "requirements_evo": "requirements-9.9.9-evo.txt", "requirements_evo_sha256": "e" * 64,
              "published": 1700000000, "min_launcher": "1.2"}
         return m | over
 
@@ -321,12 +322,14 @@ class VerifiedUpdateTests(unittest.TestCase):
         files[f"{L.RELEASES}/release.json"] = L.json.dumps(self.manifest(requirements_sha256="c" * 64)).encode()
         self.assertFalse(self.go(files, stamp=True))
         self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
 
     def test_a_signature_by_another_key_installs_nothing(self):
         other = crypto.KeyPair.generate(b"someone else")
         files = self.files(sig=other.sign(L.canonical(self.manifest())).hex().encode())
         self.assertFalse(self.go(files, stamp=True))
         self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
 
     def test_any_key_in_the_list_will_do_so_a_key_can_be_rotated(self):
         with mock.patch.object(L, "RELEASE_PUBKEYS", ["00" * 32, "zz-not-hex", self.key.public.hex()]):
@@ -342,7 +345,8 @@ class VerifiedUpdateTests(unittest.TestCase):
     def test_no_key_on_a_first_install_stops_with_the_reason(self):
         with mock.patch.object(L, "RELEASE_PUBKEYS", []), self.assertRaises(SystemExit) as ctx:
             self.go(self.files(), installed=None)
-        self.assertIn("no release key", str(ctx.exception))
+        self.assertEqual(str(ctx.exception), "This installer can't verify Vibe Hash releases yet. "
+                         "Download the latest installer from vibehash.org.")
         self.assertEqual(self.calls, [])
 
     def test_an_older_or_same_version_installs_nothing(self):
@@ -361,6 +365,7 @@ class VerifiedUpdateTests(unittest.TestCase):
         files[f"{L.RELEASES}/release.json"] = b"<html>not found</html>"
         self.assertFalse(self.go(files, stamp=True))
         self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
 
     def test_requirements_that_do_not_match_the_manifest_install_nothing(self):
         files = self.files(reqs=self.reqs + b"evil==1.0 --hash=sha256:" + b"d" * 64 + b"\n")
@@ -373,10 +378,12 @@ class VerifiedUpdateTests(unittest.TestCase):
         files = self.files(manifest=self.manifest(requirements="../../evil.txt"))
         self.assertFalse(self.go(files, stamp=True))
         self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
 
     def test_a_launcher_older_than_the_release_wants_installs_nothing(self):
         self.assertFalse(self.go(self.files(manifest=self.manifest(min_launcher="99.0")), stamp=True))
         self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
 
     def test_offline_after_a_first_install_carries_on(self):
         self.assertFalse(self.go({}, stamp=True))
@@ -384,10 +391,47 @@ class VerifiedUpdateTests(unittest.TestCase):
         self.assertIn("carrying on", self.said[-1])
         self.assertFalse(self.stamped())
 
-    def test_offline_on_a_first_install_stops(self):
+    def test_offline_on_a_first_install_stops_and_names_the_no_manifest_case(self):
         with self.assertRaises(SystemExit) as ctx:
             self.go({}, installed=None)
-        self.assertIn("couldn't", str(ctx.exception))
+        self.assertIn("no manifest yet", str(ctx.exception))
+        self.assertNotIn("carrying on", str(ctx.exception))
+
+    def test_an_installed_version_that_cannot_be_compared_installs_nothing_unless_it_is_the_release_itself(self):
+        self.assertFalse(self.go(self.files(), installed="0.5.28.dev0", stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+        self.assertIn("can't compare", self.said[-1])
+        self.assertFalse(self.go(self.files(manifest=self.manifest(version="9.9.9")), installed="9.9.9", stamp=True))  # (comparable: equal)
+        self.assertEqual(self.calls, [])
+
+    def test_extra_manifest_fields_are_tolerated_but_missing_ones_are_not(self):
+        self.assertTrue(self.go(self.files(manifest=self.manifest(future_field="x"))))
+        m = self.manifest()
+        del m["requirements_evo"]
+        self.calls.clear()
+        self.assertFalse(self.go(self.files(manifest=m), stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_the_launchers_fields_and_canonical_form_are_the_packages(self):
+        from vibehash import update
+        self.assertEqual(L.FIELDS, update.FIELDS)
+        sample = {"b": [1, {"é": "naïve \u2603", "a": None}], "a": 1.5, "c": "x y"}
+        self.assertEqual(L.canonical(sample), crypto.canonical(sample))
+
+    def test_the_launcher_installs_the_base_file_never_the_evo_one(self):
+        self.go(self.files())
+        self.assertNotIn("-evo", self.calls[0][-2])
+
+    def test_the_unverified_package_is_for_developers_only(self):
+        line = next(ln for ln in (ROOT / "launcher" / "vibehash_launcher.py").read_text(encoding="utf-8").splitlines()
+                    if ln.startswith("PACKAGE ="))
+        self.assertIn("DEV ONLY", line)
+
+    def test_a_tag_build_is_refused_while_the_release_keys_are_empty(self):
+        text = (ROOT / ".github" / "workflows" / "launcher.yml").read_text(encoding="utf-8")
+        self.assertIn("if: github.ref_type == 'tag'", text)
 
     def test_a_failed_install_after_a_first_one_carries_on_and_a_first_one_stops(self):
         run = lambda cmd, **k: 1  # noqa: E731
@@ -413,6 +457,7 @@ class VerifiedUpdateTests(unittest.TestCase):
             self.calls.clear()
             self.assertFalse(self.go(self.files(sig=b"00" * 64), stamp=True), value)
             self.assertEqual(self.calls, [], value)
+            self.assertFalse(self.stamped(), value)
 
     def test_the_launcher_reports_its_version_to_what_it_starts(self):
         self.assertEqual(L.VERSION, "1.2")

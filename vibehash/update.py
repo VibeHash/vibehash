@@ -23,7 +23,9 @@ import urllib.request
 
 from . import crypto, settings
 
-FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha256", "published", "min_launcher")
+FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha256", "requirements_evo",
+          "requirements_evo_sha256", "published", "min_launcher")  # (all required; extra fields are tolerated)
+VARIANTS = {"base": ("requirements", "requirements_sha256"), "evo": ("requirements_evo", "requirements_evo_sha256")}
 
 
 class Verified(dict):
@@ -80,9 +82,10 @@ def check(fetch=fetch, say=print) -> Verified | None:
     else:
         say("the release's signature doesn't match any release key: update skipped")
         return None
-    name = manifest.get("requirements")
-    if set(manifest) != set(FIELDS) or parse_version(manifest.get("version")) is None or not isinstance(name, str) \
-            or not re.fullmatch(r"requirements-[0-9][0-9.]*\.txt", name) or not isinstance(manifest.get("requirements_sha256"), str):
+    names = [manifest.get(VARIANTS[v][0]) for v in VARIANTS]
+    if not set(FIELDS) <= set(manifest) or parse_version(manifest.get("version")) is None \
+            or not all(isinstance(n, str) and re.fullmatch(r"requirements-[0-9][0-9.]*(-evo)?\.txt", n) for n in names) \
+            or not all(isinstance(manifest.get(VARIANTS[v][1]), str) for v in VARIANTS):
         say("the release manifest is signed but not one this version understands: update skipped")
         return None
     return Verified(manifest)
@@ -93,22 +96,27 @@ def is_newer(manifest: dict, installed: str | None = None) -> bool:
     return have is None or parse_version(manifest["version"]) > have
 
 
-def install(manifest: dict, fetch=fetch, run=subprocess.call, say=print) -> int:
+def install(manifest: dict, variant: str = "base", fetch=fetch, run=subprocess.call, say=print) -> int:
     """pip's exit code for installing exactly the requirements file `manifest` (from check()) names, with
-    --require-hashes; nonzero, with nothing run, when the file isn't the one the manifest hashes."""
+    --require-hashes: the "base" file (the launcher's set: finetune and app) or the "evo" one (those plus the Evo extras,
+    a few hundred MB more); nonzero, with nothing run, when the file isn't the one the manifest hashes."""
+    if variant not in VARIANTS:
+        say(f"not installing: no such set of packages as {variant!r}")
+        return 1
     if not isinstance(manifest, Verified):
         say("not installing: that manifest wasn't verified")
         return 1
     try:
-        reqs = fetch(f"{settings.RELEASES}/{manifest['requirements']}")
+        name_key, hash_key = VARIANTS[variant]
+        reqs = fetch(f"{settings.RELEASES}/{manifest[name_key]}")
     except OSError as e:
         say(f"couldn't fetch the requirements file (offline?): {e}")
         return 1
-    if hashlib.sha256(reqs).hexdigest() != manifest["requirements_sha256"].lower():
+    if hashlib.sha256(reqs).hexdigest() != manifest[hash_key].lower():
         say("the requirements file doesn't match the hash in the signed manifest: nothing installed")
         return 1
     with tempfile.TemporaryDirectory(prefix="vibehash-update-") as tmp:
-        path = os.path.join(tmp, manifest["requirements"])
+        path = os.path.join(tmp, manifest[name_key])
         with open(path, "wb") as f:
             f.write(reqs)
         cmd = [sys.executable, "-m", "pip", "install", "--require-hashes", "-r", path]
@@ -116,7 +124,8 @@ def install(manifest: dict, fetch=fetch, run=subprocess.call, say=print) -> int:
         return run(cmd)
 
 
-def update(reinstall: bool = False, fetch=fetch, run=subprocess.call, say=print, installed: str | None = None) -> int:
+def update(reinstall: bool = False, variant: str = "base", fetch=fetch, run=subprocess.call, say=print,
+           installed: str | None = None) -> int:
     """The whole thing, for `vibehash update` and the menu: check, say which version was verified, install. Nothing
     newer: nothing is done, unless `reinstall` (put back the current release's packages, e.g. for the Evo extras,
     which the requirements include); an older release is never installed. -> an exit code (0: done or already current)."""
@@ -125,6 +134,9 @@ def update(reinstall: bool = False, fetch=fetch, run=subprocess.call, say=print,
         return 1
     have = installed if installed is not None else installed_version()
     say(f"Vibe Hash {manifest['version']} is the latest release, and its signature is verified (installed: {have}).")
+    if parse_version(have) is None and manifest["version"] != have:  # (0.5.28.dev0, say): newer or older can't be told
+        say(f"can't compare the installed version {have!r} with {manifest['version']}; nothing changed")
+        return 1
     if not is_newer(manifest, have):
         older = parse_version(manifest["version"]) < (parse_version(have) or ())
         if older:
@@ -133,7 +145,7 @@ def update(reinstall: bool = False, fetch=fetch, run=subprocess.call, say=print,
         if not reinstall:
             say("You are up to date.")
             return 0
-    code = install(manifest, fetch=fetch, run=run, say=say)
+    code = install(manifest, variant=variant, fetch=fetch, run=run, say=say)
     if code == 0:
         say("Updated. Quit and start `vibehash` again to use it.")
     else:

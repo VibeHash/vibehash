@@ -148,7 +148,7 @@ class MenuTests(unittest.TestCase):
             upd.assert_not_called()
             with mock.patch("builtins.input", lambda *a: "y"):
                 self.assertTrue(menu._evo_ready())
-            upd.assert_called_once_with(reinstall=True)  # the signed release's packages, Evo's extras included
+            upd.assert_called_once_with(reinstall=True, variant="evo")  # the signed release's Evo packages
             pip.assert_not_called()  # never a bare pip install
             upd.return_value = 1
             with mock.patch("builtins.input", lambda *a: "y"):

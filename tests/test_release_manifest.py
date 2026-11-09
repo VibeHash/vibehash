@@ -53,8 +53,24 @@ class PinTests(unittest.TestCase):
         out = RM.pin_wheel(RM.pin_wheel(COMPILED, "9.9.9", "b" * 64), "9.9.9", "b" * 64)
         self.assertEqual(out.count("vibehash=="), 1)
 
-    def test_the_file_has_no_torch(self):
-        self.assertIn("--no-emit-package torch", " ".join(RM.COMPILE))
+    def test_neither_file_has_torch_and_the_evo_one_has_the_evo_extra(self):
+        for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
+            self.assertIn("--no-emit-package torch", " ".join(cmd))
+            self.assertIn("--universal", cmd)
+        self.assertNotIn("evo", RM.COMPILE_BASE)
+        self.assertIn("evo", RM.COMPILE_EVO)
+
+
+class CompileTests(unittest.TestCase):
+    def test_compile_writes_both_files_by_running_uv_and_needs_no_key(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RELEASE_SIGNING_KEY", None)
+            RM.compile_requirements(Path(tmp) / "reqs", "9.9.9", run=lambda cmd, **kw: calls.append(cmd))
+        self.assertEqual([c[-1].replace("\\", "/").rsplit("/", 1)[-1] for c in calls],
+                         ["requirements-9.9.9.txt", "requirements-9.9.9-evo.txt"])
+        self.assertEqual(calls[0][:-2], RM.COMPILE_BASE)
+        self.assertEqual(calls[1][:-2], RM.COMPILE_EVO)
 
 
 class BuildTests(unittest.TestCase):
@@ -65,48 +81,55 @@ class BuildTests(unittest.TestCase):
         self.wheel = self.dist / "vibehash-9.9.9-py3-none-any.whl"
         self.wheel.write_bytes(b"PK fake wheel")
         (self.dist / "vibehash-9.9.9.tar.gz").write_bytes(b"sdist")
-        (self.dist / "requirements-9.9.9.txt").write_text(COMPILED, encoding="utf-8")
+        self.reqs = self.dist / "reqs"
+        self.reqs.mkdir()
+        (self.reqs / "requirements-9.9.9.txt").write_text(COMPILED, encoding="utf-8")
+        (self.reqs / "requirements-9.9.9-evo.txt").write_text(COMPILED + "transformers==4.0 \\\n    --hash=sha256:" + "d" * 64 + "\n", encoding="utf-8")
         self.key = crypto.KeyPair.generate(b"release-manifest-test")
 
     def run_it(self, key="hex", **kw):
         env = {} if key is None else {"RELEASE_SIGNING_KEY": self.key.secret.hex() if key == "hex" else key}
-        return RM.make_release(self.dist, "9.9.9", env=env, now=1700000000, **kw)
+        return RM.make_release(self.dist, "9.9.9", env=env, now=1700000000, reqs=self.reqs, **kw)
 
     def test_the_manifest_has_exactly_the_agreed_fields(self):
         self.run_it()
-        manifest = json.loads((self.dist / "release.json").read_text(encoding="utf-8"))
-        reqs = (self.dist / "requirements-9.9.9.txt").read_bytes()
+        manifest = json.loads((self.reqs / "release.json").read_text(encoding="utf-8"))
+        reqs = (self.reqs / "requirements-9.9.9.txt").read_bytes()
+        evo = (self.reqs / "requirements-9.9.9-evo.txt").read_bytes()
         self.assertEqual(manifest, {
             "version": "9.9.9", "wheel": self.wheel.name, "wheel_sha256": hashlib.sha256(b"PK fake wheel").hexdigest(),
             "requirements": "requirements-9.9.9.txt", "requirements_sha256": hashlib.sha256(reqs).hexdigest(),
+            "requirements_evo": "requirements-9.9.9-evo.txt", "requirements_evo_sha256": hashlib.sha256(evo).hexdigest(),
             "published": 1700000000, "min_launcher": "1.2"})
         self.assertEqual(tuple(manifest), RM.FIELDS)
+        self.assertEqual(len(RM.FIELDS), 9)
 
     def test_the_requirements_pin_the_built_wheel(self):
         self.run_it()
-        text = (self.dist / "requirements-9.9.9.txt").read_text(encoding="utf-8")
-        self.assertIn("vibehash==9.9.9 \\\n    --hash=sha256:" + hashlib.sha256(b"PK fake wheel").hexdigest(), text)
+        for name in ("requirements-9.9.9.txt", "requirements-9.9.9-evo.txt"):
+            text = (self.reqs / name).read_text(encoding="utf-8")
+            self.assertIn("vibehash==9.9.9 \\\n    --hash=sha256:" + hashlib.sha256(b"PK fake wheel").hexdigest(), text)
 
     def test_the_signature_verifies_over_the_canonical_manifest(self):
         self.run_it()
-        manifest = json.loads((self.dist / "release.json").read_text(encoding="utf-8"))
-        sig = bytes.fromhex((self.dist / "release.sig").read_text(encoding="ascii").strip())
+        manifest = json.loads((self.reqs / "release.json").read_text(encoding="utf-8"))
+        sig = bytes.fromhex((self.reqs / "release.sig").read_text(encoding="ascii").strip())
         self.assertTrue(crypto.verify(self.key.public, crypto.canonical(manifest), sig))
         manifest["version"] = "9.9.10"
         self.assertFalse(crypto.verify(self.key.public, crypto.canonical(manifest), sig))
 
     def test_without_a_key_nothing_is_written(self):
-        before = sorted(p.name for p in self.dist.iterdir())
+        before = sorted(p.name for p in self.reqs.iterdir())
         with self.assertRaises(RM.NoKey):
             self.run_it(key=None)
-        self.assertEqual(sorted(p.name for p in self.dist.iterdir()), before)
-        self.assertEqual((self.dist / "requirements-9.9.9.txt").read_text(encoding="utf-8"), COMPILED)
+        self.assertEqual(sorted(p.name for p in self.reqs.iterdir()), before)
+        self.assertEqual((self.reqs / "requirements-9.9.9.txt").read_text(encoding="utf-8"), COMPILED)
 
     def test_a_key_that_is_not_a_key_is_refused_too(self):
         for bad in ("", "  ", "zz", "ab" * 31):
             with self.assertRaises(RM.NoKey, msg=repr(bad)):
                 self.run_it(key=bad)
-        self.assertFalse((self.dist / "release.sig").exists())
+        self.assertFalse((self.reqs / "release.sig").exists())
 
     def test_one_wheel_exactly(self):
         (self.dist / "vibehash-9.9.9-cp312-win_amd64.whl").write_bytes(b"second")
@@ -119,13 +142,13 @@ class BuildTests(unittest.TestCase):
 
     def test_main_reads_the_version_and_exits_nonzero_without_a_key(self):
         (self.dist / "pyproject.toml").write_text('[project]\nversion = "9.9.9"\n', encoding="utf-8")
-        argv = ["--dist", str(self.dist), "--pyproject", str(self.dist / "pyproject.toml")]
+        argv = ["sign", "--dist", str(self.dist), "--reqs", str(self.reqs), "--pyproject", str(self.dist / "pyproject.toml")]
         with mock.patch.dict(os.environ, {}, clear=False), contextlib.redirect_stdout(io.StringIO()),                 contextlib.redirect_stderr(io.StringIO()):
             os.environ.pop("RELEASE_SIGNING_KEY", None)
             self.assertEqual(RM.main(argv), 3)
             os.environ["RELEASE_SIGNING_KEY"] = self.key.secret.hex()
             self.assertEqual(RM.main(argv), 0)
-        self.assertTrue((self.dist / "release.sig").exists())
+        self.assertTrue((self.reqs / "release.sig").exists())
 
 
 class MakeKeyTests(unittest.TestCase):
@@ -172,12 +195,32 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(before.count("contents: write"), 0)  # (the top-level and the other jobs stay read-only)
         self.assertNotIn("RELEASE_SIGNING_KEY", before)  # the key is only ever in the job that runs after PyPI
 
-    def test_the_compile_in_the_workflow_is_the_one_the_script_names(self):
-        self.assertIn("scripts/release_manifest.py", self.publish)
+    def test_the_key_is_in_exactly_one_step_that_runs_only_the_signing_script(self):
+        self.assertEqual(self.publish.count("secrets.RELEASE_SIGNING_KEY"), 1)
+        step = self.publish.split("secrets.RELEASE_SIGNING_KEY", 1)[1].split("- name:", 1)[0]
+        self.assertIn("scripts/release_manifest.py sign", step)
+        for third_party in ("pip ", "uv ", "npm", "curl", "uses:"):
+            self.assertNotIn(third_party, step)
+        before_manifest = self.publish.split("# The signed release manifest", 1)[0]
+        self.assertIn("scripts/release_manifest.py compile", before_manifest)  # compiled in the build job, keyless
+        self.assertIn("--require-hashes -r scripts/uv-requirements.txt", before_manifest)  # uv is hash-pinned
+
+    def test_uv_is_installed_from_a_hash_pinned_file(self):
+        text = (ROOT / "scripts" / "uv-requirements.txt").read_text(encoding="utf-8")
+        self.assertRegex(text, r"^uv==\d+\.\d+\.\d+ \\\n    --hash=sha256:[0-9a-f]{64}\n$")
+
+    def test_the_two_compiles_are_the_ones_the_script_names(self):
         for flag in ("--generate-hashes", "--universal", "--no-emit-package torch", "--python-version 3.12",
-                     "--extra finetune", "--extra app", "--extra evo"):
-            self.assertIn(flag, self.publish)
-            self.assertIn(flag, " ".join(RM.COMPILE))
+                     "--extra finetune", "--extra app"):
+            for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
+                self.assertIn(flag, " ".join(cmd))
+
+    def test_a_tag_build_of_the_launcher_needs_a_release_key_and_a_release_race_is_tolerated(self):
+        step = self.launcher.split("Refuse to release a launcher that has no release key", 1)[1].split("- name:", 1)[0]
+        self.assertIn("github.ref_type == 'tag'", step)
+        self.assertIn("RELEASE_PUBKEYS", step)
+        for text in (self.publish, self.launcher):
+            self.assertRegex(text, r"gh release create[^\n]*\|\| \\\n\s+gh release view")
 
     def test_the_signtool_step_is_off_and_there_is_no_todo(self):
         step = self.launcher.split("Sign the Windows files", 1)[1].split("- name:", 1)[0]

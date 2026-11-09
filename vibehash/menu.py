@@ -124,9 +124,9 @@ def _evo_ready() -> bool:
         print("Evo Hash needs PyTorch for your graphics card first: More commands > Install GPU support, then come back.")
         return False
     if find_spec("transformers") is None or find_spec("huggingface_hub") is None:
-        if not _yes("Evo Hash needs transformers. Install it now (from the signed release, checked by hash)?"):
+        if not _yes("Evo Hash needs transformers and datasets (a few hundred MB more). Install them now, from the signed release, checked by hash?"):
             return False
-        if update.update(reinstall=True) != 0:  # the release's requirements include the Evo extras
+        if update.update(reinstall=True, variant="evo") != 0:  # the release's Evo requirements file
             return False
     return True
 

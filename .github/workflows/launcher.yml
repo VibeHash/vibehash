@@ -38,6 +38,17 @@ jobs:
           python-version: "3.12"
       - name: Test the launcher
         run: python -m unittest tests.test_launcher
+      # A tag build ships the launcher people download. With RELEASE_PUBKEYS empty it could not verify, so could not install,
+      # any release: fail the build rather than publish that. Paste the public key from scripts/make_release_key.py first.
+      - name: Refuse to release a launcher that has no release key
+        if: github.ref_type == 'tag'
+        shell: python
+        run: |
+          import sys
+          sys.path.insert(0, "launcher")
+          import vibehash_launcher
+          if not vibehash_launcher.RELEASE_PUBKEYS:
+              sys.exit("RELEASE_PUBKEYS in launcher/vibehash_launcher.py is empty: this launcher could not install any release. Paste the release public key first.")
       - name: Build one file (Windows, windowed, with the icon and pywebview)
         if: runner.os == 'Windows'
         run: |
@@ -97,6 +108,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          # publish.yml's manifest job may be creating the same release at this moment: if ours fails, it is enough that it exists now
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed."
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed." || \
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
           gh release upload "$tag" dist/VibeHash-Setup.exe dist/VibeHash.exe dist/VibeHash-macos dist/VibeHash-linux --repo "$GITHUB_REPOSITORY" --clobber

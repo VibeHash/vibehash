@@ -28,7 +28,7 @@ PROG = "vibehash"
 EXAMPLES: dict[str, list[str]] = {
     "setup": ["vibehash setup", "vibehash setup --node 192.168.1.20",
               "VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes --deepseek no > setup.log 2>&1"],
-    "update": ["vibehash update"],
+    "update": ["vibehash update", "vibehash update --evo"],
     "install-gpu": ["vibehash install-gpu"],
     "testnet": ["vibehash testnet", "vibehash testnet --validators 4", "vibehash testnet --job none --workers 3 --device cuda",
                 "vibehash testnet --evo2"],

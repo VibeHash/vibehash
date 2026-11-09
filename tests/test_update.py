@@ -29,17 +29,20 @@ class Base(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.said = []
         self.reqs = ("numpy==2.0.0 \\\n    --hash=sha256:" + "a" * 64 + "\n").encode()
+        self.evo = self.reqs + ("transformers==4.0 \\\n    --hash=sha256:" + "d" * 64 + "\n").encode()
 
     def manifest(self, **over):
         return {"version": "9.9.9", "wheel": "vibehash-9.9.9-py3-none-any.whl", "wheel_sha256": "b" * 64,
                 "requirements": "requirements-9.9.9.txt", "requirements_sha256": hashlib.sha256(self.reqs).hexdigest(),
+                "requirements_evo": "requirements-9.9.9-evo.txt", "requirements_evo_sha256": hashlib.sha256(self.evo).hexdigest(),
                 "published": 1700000000, "min_launcher": "1.2"} | over
 
     def files(self, manifest=None, sig=None, reqs=None):
         manifest = self.manifest() if manifest is None else manifest
         sig = self.key.sign(crypto.canonical(manifest)).hex() if sig is None else sig
         return {f"{RELEASES}/release.json": json.dumps(manifest, indent=2).encode(), f"{RELEASES}/release.sig": sig.encode(),
-                f"{RELEASES}/requirements-9.9.9.txt": self.reqs if reqs is None else reqs}
+                f"{RELEASES}/requirements-9.9.9.txt": self.reqs if reqs is None else reqs,
+                f"{RELEASES}/requirements-9.9.9-evo.txt": self.evo}
 
     def fetcher(self, files):
         def fetch(url):
@@ -61,6 +64,13 @@ class CheckTests(Base):
 
     def test_the_fields_are_the_ones_the_signer_writes(self):
         self.assertEqual(update.FIELDS, load_script("release_manifest").FIELDS)
+        self.assertEqual(len(update.FIELDS), 9)
+
+    def test_extra_fields_are_tolerated_but_missing_ones_are_not(self):
+        self.assertIsNotNone(self.check(self.files(manifest=self.manifest(future_field=1))))
+        m = self.manifest()
+        del m["requirements_evo_sha256"]
+        self.assertIsNone(self.check(self.files(manifest=m)))
 
     def test_a_manifest_signed_by_the_release_script_verifies_here_and_in_the_launcher(self):
         import tempfile
@@ -69,6 +79,7 @@ class CheckTests(Base):
             dist = Path(tmp)
             (dist / "vibehash-9.9.9-py3-none-any.whl").write_bytes(b"wheel")
             (dist / "requirements-9.9.9.txt").write_text("numpy==2.0.0 \\\n    --hash=sha256:" + "a" * 64 + "\n", encoding="utf-8")
+            (dist / "requirements-9.9.9-evo.txt").write_text("numpy==2.0.0 \\\n    --hash=sha256:" + "a" * 64 + "\n", encoding="utf-8")
             rm.make_release(dist, "9.9.9", env={"RELEASE_SIGNING_KEY": self.key.secret.hex()})
             files = {f"{RELEASES}/release.json": (dist / "release.json").read_bytes(),
                      f"{RELEASES}/release.sig": (dist / "release.sig").read_bytes()}
@@ -154,6 +165,26 @@ class InstallTests(Base):
         self.assertEqual(calls, [])
         self.assertIn("hash", self.said[-1])
 
+    def test_the_evo_variant_installs_the_evo_file_and_checks_its_own_hash(self):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append((cmd[6], Path(cmd[6]).read_bytes()))
+            return 0
+        rc = update.install(self.verified(), variant="evo", fetch=self.fetcher(self.files()), run=run, say=self.said.append)
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen[0][0].endswith("requirements-9.9.9-evo.txt"))
+        self.assertEqual(seen[0][1], self.evo)
+        files = self.files()
+        files[f"{RELEASES}/requirements-9.9.9-evo.txt"] = self.evo + b"evil==1\n"
+        calls = []
+        rc = update.install(self.verified(), variant="evo", fetch=self.fetcher(files), run=lambda c, **k: calls.append(c) or 0,
+                            say=self.said.append)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(calls, [])
+        self.assertNotEqual(update.install(self.verified(), variant="nope", fetch=self.fetcher(self.files()),
+                                           run=lambda c, **k: 0, say=self.said.append), 0)
+
     def test_a_manifest_that_did_not_come_from_check_is_refused(self):
         rc, calls = self.install(self.manifest())
         self.assertNotEqual(rc, 0)
@@ -194,6 +225,16 @@ class UpdateFlowTests(Base):
             self.assertNotEqual(rc, 0, reinstall)
             self.assertEqual(calls, [])
 
+    def test_an_installed_version_that_cannot_be_compared_changes_nothing(self):
+        rc, calls = self.go(self.files(), installed="0.5.28.dev0")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_evo_variant_reinstalls_even_when_current(self):
+        rc, calls = self.go(self.files(), installed="9.9.9", reinstall=True, variant="evo")
+        self.assertEqual(rc, 0)
+        self.assertTrue(calls[0][6].endswith("-evo.txt"))
+
     def test_verification_failure_is_nonzero_and_installs_nothing(self):
         with mock.patch.object(settings, "RELEASE_PUBKEYS", []):
             rc, calls = self.go(self.files())
@@ -208,7 +249,10 @@ class CliTests(unittest.TestCase):
         self.assertIs(args.fn, cli.cmd_update)
         with mock.patch.object(update, "update", return_value=0) as upd:
             cli.cmd_update(args)
-        upd.assert_called_once_with()
+        upd.assert_called_once_with(reinstall=False, variant="base")
+        with mock.patch.object(update, "update", return_value=0) as upd:
+            cli.cmd_update(cli.parser().parse_args(["update", "--evo"]))
+        upd.assert_called_once_with(reinstall=True, variant="evo")
         with mock.patch.object(update, "update", return_value=1), self.assertRaises(SystemExit) as ctx:
             cli.cmd_update(args)
         self.assertEqual(ctx.exception.code, 1)

@@ -260,7 +260,7 @@
 </header>
 
 <div class="update" id="launcher-banner" hidden><span><b>A newer, signed Vibe Hash installer is available</b> &mdash; download it from vibehash.org</span><span class="end"><button class="link" type="button" data-link="site">vibehash.org</button><button class="btn small" type="button" id="launcher-later">Dismiss</button></span></div>
-<div class="update" id="update" hidden><span><b id="update-text">A new Vibe Hash is out.</b> It installs the next time the app starts.</span><span class="end"><button class="link" type="button" data-link="releases">What's new</button><button class="btn small" type="button" id="update-later">Later</button></span></div>
+<div class="update" id="update" hidden><span><b id="update-text">A newer Vibe Hash is on PyPI.</b> It installs once its signed release is published.</span><span class="end"><button class="link" type="button" data-link="releases">What's new</button><button class="btn small" type="button" id="update-later">Later</button></span></div>
 
 <main>
   <section id="tab-mining">
@@ -1050,7 +1050,7 @@
     api.update().then(function (u) {
       if (!u.newer) return;
       try { if (localStorage.getItem("vh-later") === u.latest) return; } catch (e) {}
-      $("update-text").textContent = "Vibe Hash " + u.latest + " is out."; $("update").hidden = false; $("update").dataset.latest = u.latest;
+      $("update-text").textContent = "Vibe Hash " + u.latest + " is on PyPI."; $("update").hidden = false; $("update").dataset.latest = u.latest;
     }).catch(function () {});
   }
   $("update-later").addEventListener("click", function () { $("update").hidden = true; try { localStorage.setItem("vh-later", $("update").dataset.latest || ""); } catch (e) {} });

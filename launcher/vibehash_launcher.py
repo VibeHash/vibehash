@@ -73,6 +73,10 @@ RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # re
 # old one is taken out. Empty until the owners paste the real key (scripts/make_release_key.py makes it): with none,
 # the launcher installs nothing (it fails closed), except under VIBEHASH_DEV=1. Keep in step with vibehash/settings.py.
 RELEASE_PUBKEYS: list[str] = []
+# The manifest's fields (scripts/release_manifest.py writes them, vibehash/update.py reads them); extra fields are tolerated.
+FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha256", "requirements_evo",
+          "requirements_evo_sha256", "published", "min_launcher")
+CANT_VERIFY = ("This installer can't verify Vibe Hash releases yet. Download the latest installer from vibehash.org.")
 UV_VERSION = "0.13.7"
 UV_RELEASES = "https://github.com/astral-sh/uv/releases/download"
 UV_ASSETS = {  # (platform.system(), platform.machine().lower()) -> the release asset
@@ -96,7 +100,7 @@ UV_SHA256 = {  # asset -> its sha256 for UV_VERSION, so a download is checked ag
     "uv-aarch64-unknown-linux-gnu.tar.gz": "71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc",
 }
 PYTHON = "3.12"
-PACKAGE = "vibehash[finetune,app]"  # app: pywebview, for the window (window.py)
+PACKAGE = "vibehash[finetune,app]"  # DEV ONLY (VIBEHASH_DEV=1): the unverified install; releases install the signed requirements file
 UPDATE_EVERY_S = 86400
 BANNER = "Vibe Hash  -  mining that trains real AI models  -  vibehash.org"  # (ASCII: any console shows it)
 EXE = "VibeHash.exe"
@@ -568,13 +572,15 @@ def ensure_vibehash(uv: Path, python: Path, env: Path, force: bool = False, now:
         return False
     say("installing Vibe Hash..." if not last else "checking for a newer Vibe Hash...")
 
-    def refuse(why: str) -> bool:
+    def refuse(why: str, first: str | None = None) -> bool:
         if last:  # it is installed already: not being able to update is no reason not to mine
             say(why)
             return False
-        raise SystemExit(f"couldn't install Vibe Hash: {why}")
+        raise SystemExit(first or f"couldn't install Vibe Hash: {why}")
 
     offline = "couldn't check for updates (offline?); carrying on with what is installed"
+    no_manifest = ("couldn't download Vibe Hash's signed release information. Check your connection and try again; if you are "
+                   "online, this release has no manifest yet, and a newer installer from vibehash.org may help.")
     if os.environ.get("VIBEHASH_DEV") == "1":  # the one way round verification, for developers
         say("VIBEHASH_DEV=1: installing the latest vibehash from PyPI, NOT verified (no signature, no hashes)")
         if run([str(uv), "pip", "install", "--python", str(python), "--upgrade-package", "vibehash", "--quiet", PACKAGE],
@@ -583,14 +589,16 @@ def ensure_vibehash(uv: Path, python: Path, env: Path, force: bool = False, now:
         stamp.write_text(f"{now:.0f}\n")
         return True
     if not RELEASE_PUBKEYS:
-        return refuse("no release key: update skipped")
+        return refuse("no release key: update skipped", first=CANT_VERIFY)
     try:
         body, sig = fetch(f"{RELEASES}/release.json"), fetch(f"{RELEASES}/release.sig").decode("utf-8", "replace")
     except OSError:
-        return refuse(offline)
+        return refuse(offline, first=no_manifest)
     manifest, why = verify_manifest(body, sig)
     if manifest is None:
         return refuse(why)
+    if not set(FIELDS) <= set(manifest):
+        return refuse("the release manifest is signed but incomplete: update skipped")
     version, name = manifest.get("version"), manifest.get("requirements")
     if parse_version(version) is None or not isinstance(name, str) or not re.fullmatch(r"requirements-[0-9][0-9.]*\.txt", name):
         return refuse("the release manifest names a version or file it shouldn't: update skipped")
@@ -598,14 +606,17 @@ def ensure_vibehash(uv: Path, python: Path, env: Path, force: bool = False, now:
     if needs is not None and needs > parse_version(VERSION):
         return refuse(f"Vibe Hash {version} needs a newer installer than this one ({VERSION}); download it from vibehash.org")
     have = installed_version(python) if last else None
-    if parse_version(have) is not None and parse_version(version) <= parse_version(have):
-        if parse_version(version) == parse_version(have):  # verified current: nothing more to check today
-            stamp.write_text(f"{now:.0f}\n")
-        return refuse(f"the latest signed release is {version}, not newer than the installed {have}; nothing installed")
+    if have is not None:
+        if parse_version(have) is None and version != have:  # (0.5.28.dev0, say): no way to tell newer from older
+            return refuse(f"can't compare the installed version {have!r} with the latest signed release {version}; nothing installed")
+        if parse_version(have) is None or parse_version(version) <= parse_version(have):
+            if version == have or parse_version(version) == parse_version(have):  # verified current: nothing more to check today
+                stamp.write_text(f"{now:.0f}\n")
+            return refuse(f"the latest signed release is {version}, not newer than the installed {have}; nothing installed")
     try:
         reqs = fetch(f"{RELEASES}/{name}")
     except OSError:
-        return refuse(offline)
+        return refuse(offline, first=no_manifest)
     want = manifest.get("requirements_sha256")
     if not isinstance(want, str) or hashlib.sha256(reqs).hexdigest() != want.lower():
         return refuse("the requirements file doesn't match the signed manifest's hash: update skipped")
@@ -616,8 +627,8 @@ def ensure_vibehash(uv: Path, python: Path, env: Path, force: bool = False, now:
     # they were compiled), so the GPU build `install-gpu` chose is left as it is.
     if run([str(uv), "pip", "install", "--python", str(python), "--require-hashes", "-r", str(path), "--quiet"],
            env=child_env):
-        return refuse("couldn't update Vibe Hash; uv's message is in launcher.log" if last
-                      else "uv's message (launcher.log) says why. Check you're online and try again.")
+        return refuse("couldn't update Vibe Hash; uv's message is in launcher.log",
+                      first="couldn't install Vibe Hash; uv's message (launcher.log) says why. Check you're online and try again.")
     stamp.write_text(f"{now:.0f}\n")
     return True
 

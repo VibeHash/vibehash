@@ -767,7 +767,7 @@ def _setup_gpu(assume_yes: bool) -> bool:
 def cmd_update(a):
     from . import update
 
-    code = update.update()
+    code = update.update(reinstall=a.evo, variant="evo" if a.evo else "base")
     if code:
         sys.exit(code)
 
@@ -2451,6 +2451,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--tls-ca", metavar="FILE", help="verify the https node's certificate with this CA file")
 
     p = sub.add_parser("update", help="install the latest Vibe Hash release, only if its signature checks out")
+    p.add_argument("--evo", action="store_true", help="also install what Evo Hash needs (transformers, datasets: a few hundred MB)")
     p.set_defaults(fn=cmd_update)
 
     p = sub.add_parser("install-gpu", help="find your graphics card and install the PyTorch build for it")
