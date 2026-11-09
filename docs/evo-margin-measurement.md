@@ -1,7 +1,5 @@
 # Evo's margin across GPU kinds: the measurement
 
-> The measurement script this page describes (`scripts/evo_margin_xgpu.py`) was removed in 0.5.28; see git history. The commands below are kept as a record of how the numbers were made.
-
 **Question.** PR #43 set Evo's logit margin to 0.5 from one pair of GPU kinds: an RTX 4070 SUPER checking answers
 made on RTX 4090s. Does 0.5 also accept every honest member, and still reject every skipped-work cheat, when the
 worker and the checker are other kinds of card? Turing (RTX 2060, `sm_75`) matters most: it has no native bf16,
