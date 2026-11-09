@@ -471,8 +471,9 @@ proxy, and `vibehash setup --tor` remembers the choice (the `proxy` and
   The default is `strict` for `send`, `stake`, `unstake`, `post-job` and the
   wallet commands, and `control-only` for `worker`, `app`, `node` and `admin`.
   Public model files from the Hugging Face Hub follow the same split: direct
-  under `control-only`, through Tor under `strict`. Checking for an update
-  (`vibehash update`) is not node traffic and never goes through the proxy.
+  under `control-only`, through Tor under `strict`. Update and release traffic
+  (`vibehash update`, and the launcher fetching a release from GitHub and PyPI)
+  is not node traffic: it goes direct and ignores a saved proxy.
 - **Onion addresses.** A node run with `--onion ADDR.onion` shows the address in
   `/status`; `setup` and the menu print it when a proxy is on ("reach this node
   at ... to avoid exit-node blocks"). A `.onion` node is reached through the

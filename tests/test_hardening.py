@@ -80,8 +80,20 @@ class Cli:
         self.addCleanup(logging.disable, logging.NOTSET)
         self.home = Path(home.name)
 
+    def memory_store(self) -> None:
+        """An in-memory credential store for this test's commands (send, stake and unstake ask the gate's
+        credstore.get), never this machine's own; installed once, so what one command keeps the next one finds."""
+        try:
+            import keyring
+        except ImportError:
+            return
+        if not hasattr(keyring.get_keyring(), "data"):  # (one a test installed itself is kept)
+            from tests.test_wallet import use_memory_keyring
+            use_memory_keyring(self)
+
     def run_cli(self, *argv, terminal: bool = False) -> str:
         """`terminal`: output to a terminal (shown on screen), rather than a pipe or log."""
+        self.memory_store()
         out = Terminal() if terminal else io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             try:
@@ -1209,6 +1221,7 @@ class AddressTests(unittest.TestCase):
 
 class AddressCommandLineTests(Cli, unittest.TestCase):
     def run_cli_status(self, *argv) -> tuple:
+        self.memory_store()
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             try:
@@ -1259,6 +1272,28 @@ class AddressCommandLineTests(Cli, unittest.TestCase):
         code, _ = self.run_cli_status("genesis", "create", "--chain-id", "net", "--out", self.home / "h.json",
                                       "--alloc", "alice=100")
         self.assertEqual(code, "error: that isn't a Vibe Hash address: those start with vibe1 (in 'alice=100')")
+
+    def test_cli_runs_ask_an_in_memory_credential_store_never_the_real_one(self):
+        """send/stake/unstake reach the gate's credstore.get (and `wallet mfa` does): run_cli puts an in-memory
+        backend in front of it, so a test never touches this machine's Credential Manager or Keychain."""
+        try:
+            import keyring
+        except ImportError:
+            self.skipTest("keyring is not installed")
+        wallets.save(CAROL, self.home / "carol.json", None)
+        backends = []
+        real = keyring.get_password
+
+        def spy(service, account):
+            backends.append(keyring.get_keyring())
+            return real(service, account)
+
+        with mock.patch.object(keyring, "get_password", spy):
+            self.run_cli("wallet", "mfa", "status", "--wallet", self.home / "carol.json")
+            self.run_cli_status("stake", "--amount", "1", "--wallet", self.home / "carol.json", "--node",
+                                "http://127.0.0.1:9", "--fee", "0")
+        self.assertGreaterEqual(len(backends), 2)
+        self.assertTrue(all(hasattr(b, "data") for b in backends), backends)  # (test_wallet's memory backend)
 
     def test_wallets_show_the_checksummed_form_and_keep_the_canonical_one(self):
         from tests.test_wallet import use_memory_keyring

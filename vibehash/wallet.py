@@ -74,6 +74,8 @@ def _store_doc(keys: KeyPair, hd_path: str | None) -> tuple[dict, bool]:
             credstore.put(STORE_SERVICE, keys.address, key.hex())
         else:
             key = bytes.fromhex(held)
+            if len(key) != 32:  # (AES-GCM would take 16 or 24 bytes as a weaker cipher, and fail late on the rest)
+                raise ValueError(f"{len(key)} bytes, not 32")
     except credstore.Unavailable as e:
         raise WalletError(f"the credential store refused the wallet's key: {e}") from e
     except ValueError as e:

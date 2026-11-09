@@ -131,6 +131,16 @@ class StoreWalletTests(StoreCase):
         self.assertEqual(wallets.load(second, None).secret, self.keys.secret)
         self.assertNotEqual(json.loads(self.path.read_text())["crypto"]["nonce"], json.loads(second.read_text())["crypto"]["nonce"])
 
+    def test_a_held_entry_that_is_not_a_32_byte_key_is_refused_not_used(self):
+        """A reused entry must be an AES-256 key: 16 or 24 bytes would quietly seal the file with AES-128/192, and
+        anything else would fail deep in the cipher. Either way: a clear WalletError, nothing written."""
+        for held in ("ab" * 16, "ab" * 24, "ab" * 31, "ab" * 33, "", "not hex"):
+            self.backend.data[("vibehash", self.keys.address)] = held
+            with self.assertRaisesRegex(wallets.WalletError, "isn't a key"):
+                wallets.save(self.keys, self.path, None, store=True)
+            self.assertFalse(self.path.exists(), held)
+            self.assertEqual(self.backend.data[("vibehash", self.keys.address)], held)  # (left as it was)
+
     def test_a_failed_second_write_leaves_the_first_file_loadable(self):
         wallets.save(self.keys, self.path, None, store=True)
         second = self.dir / "second.json"

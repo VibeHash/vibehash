@@ -38,6 +38,10 @@ regexes = [
   '''(?:^|[^0-9.])185\.199\.11[01]\.153(?:$|[^0-9])''',
 ]
 
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
 [[rules]]
 id = "vibehash-windows-user-path"
 description = "A Windows user-profile path (C:\\Users\\name): a person's username and machine layout"
@@ -51,6 +55,10 @@ regexes = [
   '''(?i)Users\\{1,2}(?:you[a-z_-]*|name|user(?:name)?|me|public|default|all users|example|someone|<.*)$''',
 ]
 
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
 [[rules]]
 id = "vibehash-macos-user-path"
 description = "A macOS home path (/Users/name/): a person's username"
@@ -63,11 +71,19 @@ description = "Generic placeholders, not a person"
 regexTarget = "secret"
 regexes = ['''^(?:you|your|name|user|username|me|shared|example|someone)$''']
 
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
 [[rules]]
 id = "vibehash-consumer-email"
 description = "An email address at a consumer mail provider: a person's private address"
 regex = '''[A-Za-z0-9._%+-]+@(?:gmail|outlook|hotmail|icloud)\.com'''
 keywords = ["@gmail", "@outlook", "@hotmail", "@icloud"]
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
 
 [[rules]]
 id = "vibehash-otpauth-uri"
@@ -76,6 +92,10 @@ regex = '''otpauth://[a-z]+/[^\s"'<>]*[?&]secret=[A-Za-z2-7]{16,}'''
 path = '''(?i)\.(?:md|html)$'''
 keywords = ["otpauth://"]
 
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
 [[rules]]
 id = "vibehash-wallet-address-in-docs"
 description = "A vibe1... wallet address in a doc: addresses of real people are personal data (code and tests keep fixtures)"
@@ -83,10 +103,13 @@ regex = '''\bvibe1[0-9a-z]{38}\b'''
 path = '''(?i)\.(?:md|html)$'''
 keywords = ["vibe1"]
 
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
 [[allowlists]]
-description = "Test fixtures, agent/plan scratch space, and the whitepaper PDFs"
+description = "Agent/plan scratch space and the whitepaper PDFs (tests/ is allowed per custom rule above, not here, so the default secret rules still cover it)"
 paths = [
-  '''^tests/''',
   '''^\.superpowers/''',
   '''^\.claude/''',
   '''^docs/[^/]*\.pdf$''',

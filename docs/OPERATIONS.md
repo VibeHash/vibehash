@@ -56,10 +56,30 @@ To restore on a new server: run `setup-node.sh` first (same `--name` and `--chai
 
 ## Publish a release
 
+Once, before the first tag: set up the release signing key. Installers and `vibehash update` install only
+a release whose manifest is signed by a key they ship with.
+
+- Run `python scripts/make_release_key.py release.key`. It prints the public key and writes the secret
+  half to `release.key`, readable by you alone.
+- Put the secret in the GitHub Actions secret `RELEASE_SIGNING_KEY` of the `pypi` environment. Keep
+  one offline copy and delete the file.
+- Paste the public key into `RELEASE_PUBKEYS` in both `launcher/vibehash_launcher.py` and
+  `vibehash/settings.py`, and merge that. Do it **before the first tag**: `launcher.yml` fails a tag
+  build while the list is empty, and a release without `VibeHash-Setup.exe` breaks the site's
+  installer link (it 404s).
+
+Each release:
+
 1. Raise the version in `pyproject.toml` and merge it to `main` with the tests green.
 2. Tag it and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. `publish.yml` checks the tag matches the version, runs the whole test suite, builds the wheel and
-   source archive, and publishes to PyPI. Follow it under the repository's Actions tab.
+   source archive, compiles the hash-pinned `requirements-<version>.txt` and
+   `requirements-<version>-evo.txt` (for Python 3.10 and up), and publishes to PyPI. Its `manifest` job
+   then signs `release.json` with `RELEASE_SIGNING_KEY` and attaches `release.json`, `release.sig` and
+   the two requirements files to the tag's GitHub release, where the launcher and `vibehash update`
+   fetch them. Without the secret it warns and attaches nothing: the release is on PyPI, but installers
+   don't update to it. Follow it under the repository's Actions tab, and check that the release lists
+   those four files and the installer.
 4. Upgrade the servers by running `deploy/setup-node.sh` again (restart every named node too, so they
    run the same release).
 
@@ -97,7 +117,7 @@ Nothing below is committed, pasted into an issue or a pull request, or left in a
 Such notes belong in a private operations repository, or in this page in role form. The `gitleaks` job in
 `.github/workflows/tests.yml` scans every push and pull request with the rules in `.gitleaks.toml`
 (documentation-range and private IPs, user paths, consumer email addresses, `otpauth://` seeds and wallet
-addresses in docs, plus gitleaks' own secret rules; `tests/` is exempt for fixtures). The scanner is a pinned, checksum-verified binary (no license key): to
+addresses in docs, plus gitleaks' own secret rules; `tests/` is exempt from the custom rules above for fixtures, never from gitleaks' own). The scanner is a pinned, checksum-verified binary (no license key): to
 bump it, change `GITLEAKS_VERSION` and `GITLEAKS_SHA256` in that job together, taking the checksum from the
 release's `checksums.txt`.
 
