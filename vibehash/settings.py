@@ -21,7 +21,7 @@ PUBLIC_NODE = "https://node.vibehash.org"  # the public network: where commands 
 # scripts/release_manifest.py) makes a release installable. Any one will do, so a key is rotated by adding the new one in
 # a release before the old one is removed. Empty until the owners paste the real key in (scripts/make_release_key.py makes
 # it): with none, `vibehash update` installs nothing. Keep in step with RELEASE_PUBKEYS in launcher/vibehash_launcher.py.
-RELEASE_PUBKEYS: list[str] = []
+RELEASE_PUBKEYS: list[str] = ["5cc651c0d3c5bc2f78d44d864bf825bf12db9ff8efcec32e442872fcd405b3d9"]
 RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # where the manifest and its requirements are
 
 PUBLIC_EVO_NODE = "https://evo.vibehash.org:8443"  # the public Evo Hash network (vibehash-evo-1): the menu's Evo Hash

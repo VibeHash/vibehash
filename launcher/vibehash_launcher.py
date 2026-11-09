@@ -72,7 +72,7 @@ RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # re
 # Actions secret). Any one of them will do, so a key is rotated by shipping a launcher with the new one added before the
 # old one is taken out. Empty until the owners paste the real key (scripts/make_release_key.py makes it): with none,
 # the launcher installs nothing (it fails closed), except under VIBEHASH_DEV=1. Keep in step with vibehash/settings.py.
-RELEASE_PUBKEYS: list[str] = []
+RELEASE_PUBKEYS: list[str] = ["5cc651c0d3c5bc2f78d44d864bf825bf12db9ff8efcec32e442872fcd405b3d9"]
 # The manifest's fields (scripts/release_manifest.py writes them, vibehash/update.py reads them); extra fields are tolerated.
 FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha256", "requirements_evo",
           "requirements_evo_sha256", "published", "min_launcher")
