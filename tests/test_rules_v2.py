@@ -442,3 +442,28 @@ class ProposalVersionTests(unittest.TestCase):
             self.assertFalse(self.node._validate(self.proposal(VERSION, summary(V), {"version": 4, "rules": {
                 "finetune_check": FINETUNE_CHECK}})))
         self.assertNotIn("compares its replicas", logs.output[0])
+
+    def test_a_new_evo_round_on_an_earn_in_chain_holds_units_for_newcomers(self):
+        """coordinator.NEWCOMER_RESERVE: a leader can't leave out the units an Evo round holds for workers earning their
+        stake in. A chain without earn-in, where nobody unstaked can register, doesn't ask for it."""
+        from tests.test_cross_margin import spec
+        from tests.test_es import spec_for
+        from vibehash import es_local
+        from vibehash.coordinator import ES_RECORD_VERSION, NEWCOMER_RESERVE
+
+        st = self.node.chain.state
+        job = es_local.job2(spec(dims=spec_for().dims), JOB.job_id, REQ.address, 10 * VIBE)
+        st.jobs[JOB.job_id] = job.spec_json()
+        st.job_owner[JOB.job_id] = REQ.address
+
+        def refusal(rules):
+            with self.assertLogs("vibehash.node", "WARNING") as logs:
+                self.assertFalse(self.node._validate(self.proposal(VERSION, summary(V), {"version": ES_RECORD_VERSION,
+                                                                                         "rules": rules})))
+            return logs.output[0]
+        st.earn_in = True
+        for rules in ({}, {"newcomer_reserve": 0}):
+            self.assertIn(f"holds {NEWCOMER_RESERVE} units for workers earning their stake in", refusal(rules))
+        self.assertNotIn("earning their stake in", refusal({"newcomer_reserve": NEWCOMER_RESERVE}))  # refused for the rest
+        st.earn_in = False
+        self.assertNotIn("earning their stake in", refusal({}))

@@ -1,6 +1,7 @@
 """A fair start: workers who begin with no stake earn it by working, and the first validators vote with bootstrap
 stake that can never be spent. Every round still replays from its record."""
 import unittest
+from unittest import mock
 
 from vibehash import economics as econ
 from vibehash import ledger
@@ -110,6 +111,77 @@ class EarnInTests(unittest.TestCase):
         proto.coord.open_round()
         with self.assertRaisesRegex(ProtocolError, "stake at least"):
             proto.coord.register(w.address, 1e9, 8192)
+
+
+class EvoNewcomerTests(unittest.TestCase):
+    """An Evo round's first units go to workers earning their stake in (coordinator.NEWCOMER_RESERVE), when any came:
+    staked workers would take every unit, and an Evo-only chain has no other job to earn a stake on. With nobody
+    earning in, nothing is held back. (Assignment only: test_es2 runs such a round end to end and replays it.)"""
+
+    def setUp(self):
+        from tests.test_cross_margin import spec
+        from tests.test_es import spec_for
+        from vibehash import es_local
+
+        self.staked = [KeyPair.generate(f"evo staked {i}".encode()) for i in range(2)]
+        self.new = [KeyPair.generate(f"evo new {i}".encode()) for i in range(2)]
+        self.job = es_local.job2(spec(dims=spec_for().dims, pairs=8, pairs_per_unit=1), "evo-job", REQ.address,
+                                 100 * VIBE)
+        self.assertEqual(self.job.units_per_round, 8)
+
+    def coord(self, earn_in=True):
+        workers = [Worker(k.address[:8], k, RELIABLE, "honest") for k in [*self.staked, *self.new]]
+        chain = Chain(allocations={REQ.address: 1000 * VIBE}, stakes={}, chain_id="evo-earn-in", genesis_time=0,
+                      bootstrap={k.address: 10 * VIBE for k in self.staked}, earn_in=earn_in, es=True)
+        proto = Protocol(chain, workers, CoordinatorConfig(canaries_per_round=0), seed=3)
+        proto.post_job(REQ, self.job)
+        return proto.coord
+
+    def units(self, c, who, before_compute=lambda c: None):
+        """Units each worker in `who` gets in a round they all register for."""
+        c.open_round()
+        self.assertEqual(c.r.job_id, "evo-job")
+        for k in who:
+            c.register(k.address, 1e12, 8192)
+        before_compute(c)
+        c.start_compute()
+        self.assertEqual(c.r.unassigned, 0, "a unit nobody worked")
+        return {k.address: len(c.r.assignments.get(k.address, [])) for k in who}
+
+    def test_with_nobody_earning_in_the_staked_workers_get_every_unit(self):
+        c = self.coord()
+        got = self.units(c, self.staked)
+        self.assertEqual(c.r.record["rules"]["newcomer_reserve"], 2)
+        self.assertEqual(sum(got.values()), 8)
+
+    def test_newcomers_get_the_first_units_one_at_a_time(self):
+        got = self.units(self.coord(), [*self.staked, *self.new])
+        self.assertEqual([got[k.address] for k in self.new], [1, 1])
+        self.assertEqual(sum(got[k.address] for k in self.staked), 6)
+        got = self.units(self.coord(), [*self.staked, self.new[0]])  # one newcomer: both held units
+        self.assertEqual(got[self.new[0].address], 2)
+
+    def test_a_newcomer_that_missed_its_last_turn_only_gets_whats_left(self):
+        c = self.coord()
+        flaky = self.new[0].address
+        with mock.patch.object(c, "track_record", lambda a: (0, True) if a == flaky else None):
+            got = self.units(c, [*self.staked, *self.new])
+        self.assertEqual((got[flaky], got[self.new[1].address]), (0, 2))  # the other newcomer gets both
+
+    def test_a_record_from_before_the_rule_holds_nothing_back(self):
+        """A replay takes the record's rules: one without newcomer_reserve assigns as rounds did before it."""
+        got = self.units(self.coord(), [*self.staked, *self.new],
+                         before_compute=lambda c: c.r.record["rules"].pop("newcomer_reserve"))
+        self.assertEqual(sum(got[k.address] for k in self.new), 0)
+        self.assertEqual(sum(got[k.address] for k in self.staked), 8)
+
+    def test_only_evo_rounds_on_earn_in_chains_record_it(self):
+        c = self.coord(earn_in=False)
+        c.open_round()
+        self.assertNotIn("newcomer_reserve", c.r.record["rules"])
+        proto, *_ = network()  # an earn-in chain's ordinary job
+        proto.coord.open_round()
+        self.assertNotIn("newcomer_reserve", proto.coord.r.record["rules"])
 
 
 class BootstrapStakeTests(unittest.TestCase):
