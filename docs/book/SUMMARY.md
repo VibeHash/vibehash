@@ -53,6 +53,7 @@
 <!-- reference: written by scripts/cli_docs.py -->
 * [Command reference](reference/README.md)
   * [vibehash setup](reference/setup.md)
+  * [vibehash update](reference/update.md)
   * [vibehash install-gpu](reference/install-gpu.md)
   * [vibehash testnet](reference/testnet.md)
   * [vibehash wallet](reference/wallet.md)

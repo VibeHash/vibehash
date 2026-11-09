@@ -17,6 +17,13 @@ from pathlib import Path
 WATCH_PORT = 7545  # the worker's feed (watch.py): a thousand below a node's 8545, so a testnet's validators never land on it
 
 PUBLIC_NODE = "https://node.vibehash.org"  # the public network: where commands go until you choose another node
+# The Ed25519 public keys (hex) whose signature on a release manifest (release.json / release.sig, see update.py and
+# scripts/release_manifest.py) makes a release installable. Any one will do, so a key is rotated by adding the new one in
+# a release before the old one is removed. Empty until the owners paste the real key in (scripts/make_release_key.py makes
+# it): with none, `vibehash update` installs nothing. Keep in step with RELEASE_PUBKEYS in launcher/vibehash_launcher.py.
+RELEASE_PUBKEYS: list[str] = ["5cc651c0d3c5bc2f78d44d864bf825bf12db9ff8efcec32e442872fcd405b3d9"]
+RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # where the manifest and its requirements are
+
 PUBLIC_EVO_NODE = "https://evo.vibehash.org:8443"  # the public Evo Hash network (vibehash-evo-1): the menu's Evo Hash
 
 
@@ -48,6 +55,9 @@ def default_wallet() -> Path:
     return home() / "wallet.json"
 
 
+PROXY_KEY, TOR_MODE_KEY = "proxy", "tor_mode"  # config.json: the SOCKS proxy for node traffic (proxy.py), and its mode
+
+
 def load() -> dict:
     import time
 
@@ -59,6 +69,17 @@ def load() -> dict:
         except (OSError, ValueError):
             return {}
     return {}
+
+
+def deepseek_pilot() -> bool:
+    """Whether the DeepSeek pilot is switched on for this process (VIBEHASH_DEEPSEEK_PILOT=1). DeepSeek is frozen: without
+    it nothing asks about DeepSeek or nags to turn it on; the Settings toggle and `worker --deepseek yes` still work."""
+    return os.environ.get("VIBEHASH_DEEPSEEK_PILOT") == "1"
+
+
+def deepseek_choice(cfg: dict | None = None) -> str:
+    """The saved DeepSeek choice, "yes" or "no", or "ask" (not chosen yet, and only in the pilot). The default is "no"."""
+    return (load() if cfg is None else cfg).get("deepseek", "ask" if deepseek_pilot() else "no")
 
 
 def save(**updates) -> None:

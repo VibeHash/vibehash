@@ -1,0 +1,11 @@
+# Installed by setup-node.sh (see vibehash-backup.service). The node (an unprivileged user) asks for a backup now by
+# writing {"requested_at": <unix>} to @DATA@/backup/request, atomically; this starts the backup, which deletes the file.
+[Unit]
+Description=Back up the Vibe Hash node (@URL@) when it asks
+
+[Path]
+PathChanged=@DATA@/backup/request
+Unit=vibehash-backup@SUFFIX@.service
+
+[Install]
+WantedBy=multi-user.target

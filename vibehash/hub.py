@@ -352,6 +352,13 @@ class _FileCheck:
         return digest
 
 
+def _strict_proxy_handlers() -> list:
+    from . import proxy
+
+    url, mode = proxy.active()
+    return [proxy.handler(url)] if url and mode == "strict" else []
+
+
 class Hub:
     """A client for the Hub's HTTP API, the parts huggingface_hub's HfApi and hf_hub_download use for reading models.
 
@@ -361,13 +368,15 @@ class Hub:
     Hub hosts (hf.co, the staging Hub): see utils/_http._httpx2_follow_hub_redirects_with_backoff and _HUB_ORIGINS."""
 
     def __init__(self, endpoint: str | None = None, token: str | None = None, *, timeout: float = 30.0,
-                 retries: int = RETRIES, backoff: float = 0.25):
+                 retries: int = RETRIES, backoff: float = 0.25, opener: urllib.request.OpenerDirector | None = None):
         self.endpoint = (endpoint or _endpoint()).rstrip("/")
         if _origin(self.endpoint)[0] not in ("http", "https"):
             raise ValueError(f"HF_ENDPOINT {self.endpoint!r} isn't an http(s) address")
         self._token = find_token(token)  # never logged, never in an error message, never in repr
         self.timeout, self.retries, self.backoff = timeout, retries, backoff
-        self._opener = urllib.request.build_opener(_NoRedirect)
+        # Direct unless given an opener, or Tor is on in strict mode (proxy.py): model files are public, so under
+        # control-only they are fetched direct, as checkpoints are; strict sends nothing around the proxy.
+        self._opener = opener or urllib.request.build_opener(_NoRedirect, *_strict_proxy_handlers())
         self._files: dict[tuple, RemoteFile] = {}
         self._headers: dict[tuple, Header] = {}
         self._maps: dict[tuple, dict[str, str]] = {}

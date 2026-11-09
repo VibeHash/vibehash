@@ -26,7 +26,7 @@ Flags:
 - `--gpu {auto,skip}`: install PyTorch for the GPU (auto) or not.
 - `--recheck-gpu`: test the GPU again, even if an earlier run found it ready.
 - `--job JOB`: mine only this job, as `worker --job`.
-- `--no-password`: make a first wallet without a password, so nothing is asked (what the downloadable app does); the file is then as safe as your user account.
+- `--no-password`: make a first wallet without a password, so nothing is asked (what the downloadable app does); the key is kept in your account's credential store.
 - `--avatar`: also show the floating avatar on the desktop (`avatar`), which the downloadable app does; needs a screen.
 - `--no-window`: don't open the window (`window`) as it starts; a click on the avatar or `vibehash window` opens it later. How a start-at-login entry runs.
 

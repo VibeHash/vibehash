@@ -8,7 +8,7 @@ from vibehash import ledger
 from vibehash.coordinator import CoordinatorConfig, ProtocolError
 from vibehash.crypto import KeyPair
 from vibehash.ledger import SYSTEM, Chain, InvalidBlock, Tx
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.replay import replay_block
 from vibehash.tasks import SYN_PER_VIBE, TrainingJob
 from vibehash.worker import OFFICE_DESKTOP, HardwareProfile, Worker

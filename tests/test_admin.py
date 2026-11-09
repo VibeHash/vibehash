@@ -1,6 +1,7 @@
 """The operators' side: the node's admin routes and job policy (nodeadmin.py), the admin app's server, places and
 orders (admin.py), and the globe's land dots (scripts/make_globe.py)."""
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -29,7 +30,7 @@ import make_globe  # noqa: E402
 
 
 TOKEN = "t" * nodeadmin.MIN_TOKEN
-NODE_TOKEN = "t0k3n-long-enough-for-the-node"
+NODE_TOKEN = "t0k3n-" + "long-enough-for-the-node"
 KEY = nodeadmin.new_mfa_key()
 
 
@@ -142,6 +143,49 @@ class AdminPolicyTests(unittest.TestCase):
         a.check("Bearer " + TOKEN, good)  # a sign-in made before stands
         clock[0] += nodeadmin.FAIL_WINDOW_S
         self.assertTrue(a.login("Bearer " + TOKEN, nodeadmin.totp(key, int(clock[0] // 30)), ip="8.8.4.4")["session"])
+
+    def test_a_fresh_check_needs_a_new_code_on_top_of_the_sign_in(self):
+        clock = [3_000_000.0]
+        a = nodeadmin.Admin(FakeStore(), TOKEN, now=lambda: clock[0], mfa=KEY)
+        key, step = nodeadmin.mfa_key(KEY), lambda: int(clock[0] // 30)
+        session = a.login("Bearer " + TOKEN, nodeadmin.totp(key, step()))["session"]
+        a.check("Bearer " + TOKEN, session)  # a plain check wants no code
+        with self.assertRaisesRegex(nodeadmin.Forbidden, nodeadmin.NEED_FRESH):
+            a.check("Bearer " + TOKEN, session, fresh=True)
+        with self.assertRaisesRegex(nodeadmin.Forbidden, nodeadmin.NEED_FRESH):
+            a.check("Bearer " + TOKEN, session, code="  ", fresh=True)
+        with self.assertRaisesRegex(nodeadmin.Forbidden, "just used"):  # the sign-in's own code
+            a.check("Bearer " + TOKEN, session, code=nodeadmin.totp(key, step()), fresh=True)
+        with self.assertRaises(nodeadmin.NeedCode):  # no sign-in: that first
+            a.check("Bearer " + TOKEN, "nope", code=nodeadmin.totp(key, step() + 1), fresh=True)
+        clock[0] += 30
+        a.check("Bearer " + TOKEN, session, code=nodeadmin.totp(key, step()), fresh=True)
+        with self.assertRaisesRegex(nodeadmin.Forbidden, "just used"):  # and once
+            a.check("Bearer " + TOKEN, session, code=nodeadmin.totp(key, step()), fresh=True)
+        clock[0] += 30
+        a.check("Bearer " + TOKEN, session, code=" " + nodeadmin.totp(key, step()) + " ", fresh=True)
+
+    def test_a_wrong_fresh_code_is_a_strike_like_a_wrong_login_code(self):
+        clock = [4_000_000.0]
+        a = nodeadmin.Admin(FakeStore(), TOKEN, now=lambda: clock[0], mfa=KEY)
+        key = nodeadmin.mfa_key(KEY)
+        session = a.login("Bearer " + TOKEN, nodeadmin.totp(key, int(clock[0] // 30)))["session"]
+        clock[0] += 30
+        right = {nodeadmin.totp(key, int(clock[0] // 30) + d) for d in (-1, 0, 1)}
+        wrong = next(f"{n:06d}" for n in range(1000) if f"{n:06d}" not in right)
+        ip = "93.184.216.34"
+        for _ in range(nodeadmin.MAX_FAILS):
+            with self.assertRaisesRegex(nodeadmin.Forbidden, "code is wrong"):
+                a.check("Bearer " + TOKEN, session, ip=ip, code=wrong, fresh=True)
+        self.assertEqual(len(a.code_fails), nodeadmin.MAX_FAILS)
+        with self.assertRaises(nodeadmin.TooMany):  # the address is turned away, as after wrong logins
+            a.check("Bearer " + TOKEN, session, ip=ip, code=nodeadmin.totp(key, int(clock[0] // 30)), fresh=True)
+
+    def test_a_node_without_a_key_has_no_fresh_codes_to_ask_for(self):
+        a = nodeadmin.Admin(FakeStore(), TOKEN)
+        a.check("Bearer " + TOKEN)
+        with self.assertRaisesRegex(nodeadmin.Forbidden, "--admin-mfa"):
+            a.check("Bearer " + TOKEN, fresh=True)
 
     def test_holds_and_review_survive_a_restart_and_say_why(self):
         store = FakeStore()
@@ -271,11 +315,15 @@ class NodeRouteTests(unittest.TestCase):
         self.assertEqual(code, 401)
         self.assertIn(nodeadmin.NEED_CODE, out["error"])
         key = nodeadmin.mfa_key(KEY)
-        code, out = self.call("/admin/login", {"code": nodeadmin.totp(key, int(time.time() // 30))}, token=NODE_TOKEN)
+        clock = [time.time()]
+        self.node.admin.now = lambda: clock[0]
+        code, out = self.call("/admin/login", {"code": nodeadmin.totp(key, int(clock[0] // 30))}, token=NODE_TOKEN)
         self.assertEqual(code, 200)
         signed = {nodeadmin.LOGIN_HEADER: out["session"]}
         self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN, headers=signed)[0], 200)
-        self.assertEqual(self.call("/admin/review", {"on": False}, token=NODE_TOKEN, headers=signed)[0], 200)
+        clock[0] += 30  # (an order takes a code of its own, a later one than the sign-in's)
+        fresh = {**signed, nodeadmin.CODE_HEADER: nodeadmin.totp(key, int(clock[0] // 30))}
+        self.assertEqual(self.call("/admin/review", {"on": False}, token=NODE_TOKEN, headers=fresh)[0], 200)
         self.assertEqual(self.call("/admin/review", {"on": False}, token=NODE_TOKEN)[0], 401)
         for _ in range(nodeadmin.MAX_FAILS):
             self.call("/admin/overview", token="a-guess")
@@ -317,6 +365,37 @@ class NodeRouteTests(unittest.TestCase):
         self.assertEqual(self.node.admin.reason("j9", self.req.address), "it awaits an admin's review")
         self.assertTrue(self.call("/admin/overview", token=NODE_TOKEN)[1]["review"])
 
+    def test_with_a_key_hold_release_and_review_need_a_fresh_code_and_the_overview_does_not(self):
+        self.node.admin.mfa = key = nodeadmin.mfa_key(KEY)
+        clock = [time.time()]
+        self.node.admin.now = lambda: clock[0]
+        step = lambda: int(clock[0] // 30)  # noqa: E731
+        session = self.call("/admin/login", {"code": nodeadmin.totp(key, step())}, token=NODE_TOKEN)[1]["session"]
+        signed = {nodeadmin.LOGIN_HEADER: session}
+        job = template_job("j1", False, self.req.address, 100 * SYN_PER_VIBE)
+        NodeClient(self.node.url).send_tx(self.req, "post_job", "system", job.budget, job.spec_json())
+        deadline = time.time() + 30
+        while "j1" not in self.node.chain.state.jobs and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN, headers=signed)[0], 200)  # no code
+        for path, body in (("/admin/jobs/j1/hold", {"why": "x"}), ("/admin/jobs/j1/release", {}), ("/admin/review", {"on": True})):
+            code, out = self.call(path, body, token=NODE_TOKEN, headers=signed)
+            self.assertEqual(code, 401, path)
+            self.assertIn(nodeadmin.NEED_FRESH, out["error"])
+        self.assertIsNone(self.node.admin.reason("j1", self.req.address))  # and they did nothing
+        self.assertFalse(self.node.admin.review)
+        clock[0] += 30
+        sent = {**signed, nodeadmin.CODE_HEADER: nodeadmin.totp(key, step())}
+        self.assertEqual(self.call("/admin/jobs/j1/hold", {"why": "x"}, token=NODE_TOKEN, headers=sent)[0], 200)
+        self.assertEqual(self.node.admin.reason("j1", self.req.address), "an admin holds it")
+        self.assertEqual(self.call("/admin/jobs/j1/release", {}, token=NODE_TOKEN, headers=sent)[0], 401)  # used
+        clock[0] += 30
+        sent = {**signed, nodeadmin.CODE_HEADER: nodeadmin.totp(key, step())}
+        self.assertEqual(self.call("/admin/jobs/j1/release", {}, token=NODE_TOKEN, headers=sent)[0], 200)
+        clock[0] += 30
+        sent = {**signed, nodeadmin.CODE_HEADER: nodeadmin.totp(key, step())}
+        self.assertEqual(self.call("/admin/review", {"on": True}, token=NODE_TOKEN, headers=sent)[1]["review"], True)
+
     def test_a_node_without_a_token_has_no_admin_routes(self):
         self.node.admin.token = None
         self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 404)
@@ -353,6 +432,7 @@ class GeoTests(unittest.TestCase):
         off = admin.Geo(Path(tmp.name) / "other.json", lookup=lookup, enabled=False)
         self.assertIsNone(off.place("1.1.1.1"))
         self.assertEqual(off.waiting(), 0)  # nothing queued: nothing leaves
+        self.assertEqual(asked, [["8.8.8.8"]])  # and the fetcher was never called for it
 
     def test_a_failed_lookup_is_tried_again_next_time(self):
         tmp = tempfile.TemporaryDirectory()
@@ -372,16 +452,11 @@ class GeoTests(unittest.TestCase):
         g.thread.join(5)
         self.assertEqual(g.place("8.8.8.8")["country"], "X")
 
-    def test_ip_api_answers_are_read_carefully(self):
-        answers = [{"status": "success", "query": "8.8.8.8", "lat": 1, "lon": 2, "city": "A", "country": "B"},
-                   {"status": "fail", "query": "1.1.1.1"}, {"status": "success", "query": "9.9.9.9", "lat": "bad"}, "junk"]
-
+    @staticmethod
+    def _resp(data):
         class Resp:
-            def __init__(self, data):
-                self.data = data
-
             def read(self, n=-1):
-                return self.data
+                return json.dumps(data).encode()
 
             def __enter__(self):
                 return self
@@ -389,9 +464,79 @@ class GeoTests(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        with mock.patch.object(admin.urllib.request, "urlopen", return_value=Resp(json.dumps(answers).encode())):
-            out = admin.lookup_ip_api(["8.8.8.8", "1.1.1.1", "9.9.9.9"])
+        return Resp()
+
+    def test_ip_api_answers_are_read_carefully(self):
+        answers = [{"status": "success", "query": "8.8.8.8", "lat": 1, "lon": 2, "city": "A", "country": "B"},
+                   {"status": "fail", "query": "1.1.1.1"}, {"status": "success", "query": "9.9.9.9", "lat": "bad"}, "junk"]
+        with mock.patch.object(admin.urllib.request, "urlopen", return_value=self._resp(answers)):
+            out = admin.lookup_batch("https://pro.ip-api.com/batch", ["8.8.8.8", "1.1.1.1", "9.9.9.9"])
         self.assertEqual(out, {"8.8.8.8": {"lat": 1.0, "lon": 2.0, "city": "A", "country": "B"}, "1.1.1.1": None, "9.9.9.9": None})
+
+    def test_ipinfo_answers_are_read_carefully(self):
+        answers = {"8.8.8.8": {"city": "Mountain View", "country": "US", "loc": "37.4,-122.1"},
+                   "1.1.1.1": {"city": "X", "country": "AU"}, "9.9.9.9": "unknown", "5.5.5.5": {"loc": "bad"}}
+        with mock.patch.object(admin.urllib.request, "urlopen", return_value=self._resp(answers)):
+            out = admin.lookup_batch("https://ipinfo.io/batch", ["8.8.8.8", "1.1.1.1", "9.9.9.9", "5.5.5.5"])
+        self.assertEqual(out, {"8.8.8.8": {"lat": 37.4, "lon": -122.1, "city": "Mountain View", "country": "US"},
+                               "1.1.1.1": None, "9.9.9.9": None, "5.5.5.5": None})
+
+    def test_the_token_is_sent_in_the_request_url(self):
+        seen = []
+
+        def urlopen(req, timeout=None):
+            seen.append(req.full_url)
+            return self._resp({})
+
+        with mock.patch.object(admin.urllib.request, "urlopen", urlopen):
+            admin.lookup_batch("https://ipinfo.io/batch", ["8.8.8.8"], token="SEKRET")
+            admin.lookup_batch("https://ipinfo.io/batch", ["8.8.8.8"])
+            admin.lookup_batch("https://pro.ip-api.com/batch?fields=query", ["8.8.8.8"], token="K")
+        self.assertEqual(seen, ["https://ipinfo.io/batch?token=SEKRET", "https://ipinfo.io/batch",
+                                "https://pro.ip-api.com/batch?fields=query&token=K"])
+
+    def test_a_plain_http_service_is_refused(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "geo.json"
+        with self.assertRaises(ValueError):
+            admin.Geo(path, enabled=True, url="http://ip-api.com/batch")
+        with self.assertRaises(ValueError):
+            admin.lookup_batch("http://ip-api.com/batch", ["8.8.8.8"])
+        admin.Geo(path, enabled=False, url="http://ip-api.com/batch")  # off: nothing is ever sent, so nothing to refuse
+        admin.Geo(path, enabled=True, url="https://ipinfo.io/batch")
+
+    def test_the_url_and_token_come_from_the_environment(self):
+        with mock.patch.dict(admin.os.environ, {"VIBEHASH_GEO_URL": "https://pro.ip-api.com/batch", "VIBEHASH_GEO_TOKEN": "T"}):
+            self.assertEqual(admin.geo_url(), "https://pro.ip-api.com/batch")
+            self.assertEqual(admin.geo_token(), "T")
+        with mock.patch.dict(admin.os.environ, {}, clear=True):
+            self.assertEqual(admin.geo_url(), admin.GEO_URL)
+            self.assertTrue(admin.GEO_URL.startswith("https://"))
+            self.assertIsNone(admin.geo_token())
+
+    def test_geo_is_off_by_default_and_under_a_proxy(self):
+        class Args:
+            pass
+
+        self.assertFalse(admin.geo_wanted({}, Args(), {}))  # off unless turned on
+        self.assertTrue(admin.geo_wanted({"geo": True}, Args(), {}))
+        self.assertFalse(admin.geo_wanted({"geo": True}, Args(), {"proxy": "socks5://127.0.0.1:9050"}))
+        tor = Args()
+        tor.tor = True
+        self.assertFalse(admin.geo_wanted({"geo": True}, tor, {}))
+        proxied = Args()
+        proxied.proxy = "socks5://x:1"
+        self.assertFalse(admin.geo_wanted({"geo": True}, proxied, {}))
+
+    def test_a_refused_service_turns_geo_off_instead_of_crashing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with self.assertLogs("vibehash.admin", "WARNING") as logs:
+            g = admin.make_geo(Path(tmp.name) / "geo.json", True, url="http://ip-api.com/batch")
+        self.assertFalse(g.enabled)
+        self.assertEqual(len(logs.records), 1)
+        self.assertTrue(admin.make_geo(Path(tmp.name) / "geo.json", True, url="https://ipinfo.io/batch").enabled)
 
 
 class FakeNode:
@@ -468,6 +613,88 @@ class MfaNode(FakeNode):
             if headers.get(nodeadmin.LOGIN_HEADER) != "sess":
                 raise NodeError(f"{method} {path}: {nodeadmin.NEED_CODE}", 401)
         return super()._req(method, path, data, headers, limit)
+
+
+class FreshNode(MfaNode):
+    """An MfaNode whose hold, release and review also want a fresh code (654321) in X-Admin-Code, as the real one's do."""
+
+    def __init__(self, answers, token="t"):
+        super().__init__(answers, token)
+        self.codes = []
+
+    def _req(self, method, path, data=None, headers=None, limit=None):
+        headers = headers or {}
+        if method == "POST" and (path == "/admin/review" or path.endswith(("/hold", "/release"))):
+            if headers.get("Authorization") == f"Bearer {self.token}" and headers.get(nodeadmin.LOGIN_HEADER) == "sess":
+                code = headers.get(nodeadmin.CODE_HEADER)
+                if not code:
+                    raise NodeError(f"{method} {path}: {nodeadmin.NEED_FRESH} ({nodeadmin.CODE_HEADER})", 401)
+                if code != "654321":
+                    raise NodeError(f"{method} {path}: the authenticator code is wrong", 401)
+                self.codes.append(code)
+        return super()._req(method, path, data, headers, limit)
+
+
+class NodeStartTests(unittest.TestCase):
+    """`vibehash node` refuses to serve the admin routes to the network without an authenticator key."""
+
+    def start(self, *flags, host=None, mfa_env=None):
+        from vibehash import cli
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        genesis = Path(tmp.name) / "genesis.json"
+        genesis.write_text("{}")
+
+        class Stop(Exception):
+            pass
+
+        made = []
+
+        def fake(*a, **kw):
+            made.append(kw)
+            raise Stop
+        args = ["node", "--genesis", str(genesis), "--wallet", "w", "--data-dir", tmp.name, *flags]
+        if host:
+            args += ["--host", host]
+        env = {k: v for k, v in os.environ.items() if not k.startswith("VIBEHASH_ADMIN")}
+        env.update(mfa_env or {})
+        self.addCleanup(logging.disable, logging.NOTSET)
+        logging.disable(logging.INFO)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("vibehash.node.Node", side_effect=fake), \
+                mock.patch.object(cli, "load_wallet", return_value=KeyPair.generate(b"n")):
+            try:
+                cli.main(args)
+            except Stop:
+                return "started", made[0]
+            except SystemExit as e:
+                return str(e.code), None
+
+    def test_a_public_bind_with_a_token_and_no_key_is_refused_naming_the_fix(self):
+        for host in ("0.0.0.0", "::", "203.0.113.5", "10.0.0.7", "example.org"):
+            out, _ = self.start("--admin-token", NODE_TOKEN, host=host)
+            self.assertIn("--admin-mfa", out, host)
+            self.assertIn("vibehash admin --new-mfa", out, host)
+            self.assertIn("VIBEHASH_ADMIN_MFA", out, host)
+
+    def test_loopback_binds_need_no_key(self):
+        for host in (None, "127.0.0.1", "127.0.0.2", "::1", "localhost", "LOCALHOST"):
+            self.assertEqual(self.start("--admin-token", NODE_TOKEN, host=host)[0], "started", host)
+
+    def test_a_key_or_the_unsafe_flag_lets_a_public_bind_start(self):
+        out, kw = self.start("--admin-token", NODE_TOKEN, "--admin-mfa", KEY, host="0.0.0.0")
+        self.assertEqual((out, kw["admin_mfa"]), ("started", KEY))
+        out, _ = self.start("--admin-token", NODE_TOKEN, host="0.0.0.0", mfa_env={"VIBEHASH_ADMIN_MFA": KEY})
+        self.assertEqual(out, "started")
+        out, kw = self.start("--admin-token", NODE_TOKEN, "--admin-allow-no-mfa", host="0.0.0.0")
+        self.assertEqual((out, kw["admin_mfa"]), ("started", None))
+
+    def test_a_public_bind_without_a_token_has_no_admin_to_protect(self):
+        self.assertEqual(self.start(host="0.0.0.0")[0], "started")
+
+    def test_the_flag_says_it_is_unsafe(self):
+        from vibehash import cli
+        text = Path(cli.__file__).read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?s)--admin-allow-no-mfa.{0,400}UNSAFE")
 
 
 class AdminAppTests(unittest.TestCase):
@@ -638,6 +865,47 @@ class AdminAppTests(unittest.TestCase):
         self.assertEqual([n["error"] is None for n in d["nodes"]], [False, True])
         self.fake.answers["/admin/jobs/j1/hold"] = {"ok": True}
         self.assertEqual([x["ok"] for x in app.hold("j1")["nodes"]], [False, True])
+
+    def test_hold_release_and_review_carry_a_fresh_code_to_the_nodes_that_want_one(self):
+        node = FreshNode({"/admin/jobs/j1/hold": {"ok": True}, "/admin/jobs/j1/release": {"ok": True},
+                          "/admin/review": {"ok": True}, "/admin/overview": overview_answer()})
+        plain = FakeNode({"/admin/jobs/j1/hold": {"ok": True}})
+        plain.url = "https://plain.test:8545"
+        app = admin.AdminApp([admin.NodeLink(node.url, "t", client=node), admin.NodeLink(plain.url, "t", client=plain)],
+                             None, self.app.geo)
+        app.links[0].sign_in("123456")
+        out = app.hold("j1", "x")  # no code: the node that wants one says so, the other doesn't mind
+        self.assertEqual([x["ok"] for x in out["nodes"]], [False, True])
+        self.assertIn(nodeadmin.NEED_FRESH, out["nodes"][0]["error"])
+        self.assertEqual(node.codes, [])
+        out = app.hold("j1", "x", code=" 654321 ")
+        self.assertEqual([x["ok"] for x in out["nodes"]], [True, True])
+        self.assertEqual(node.codes, ["654321"])  # trimmed, in X-Admin-Code
+        self.assertTrue(app.release("j1", code="654321")["nodes"][0]["ok"])
+        self.assertTrue(app.review(True, code="654321")["nodes"][0]["ok"])
+        self.assertEqual(node.codes, ["654321"] * 3)
+        only = app.hold("j1", "x", code="654321", urls=[node.url])  # a retry for the nodes that refused
+        self.assertEqual([x["url"] for x in only["nodes"]], [node.url])
+        with self.assertRaisesRegex(admin.AdminError, "6-digit"):
+            app.hold("j1", "x", code="12ab")  # (a code that can't be one is not sent)
+
+    def test_the_apis_hold_takes_a_code_from_the_page(self):
+        node = FreshNode({"/admin/jobs/j1/hold": {"ok": True}, "/admin/overview": overview_answer()})
+        app = admin.AdminApp([admin.NodeLink(node.url, "t", client=node)], None, self.app.geo)
+        app.links[0].sign_in("123456")
+        self.addCleanup(app.stop)
+        port = app.serve(0)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/jobs/j1/hold", method="POST",
+                                     data=json.dumps({"why": "x", "code": "654321"}).encode(),
+                                     headers={"X-Admin-Session": app.session, "Origin": f"http://127.0.0.1:{port}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertTrue(json.loads(r.read())["nodes"][0]["ok"])
+        self.assertEqual(node.codes, ["654321"])
+
+    def test_the_page_asks_for_a_code_on_those_three_orders_and_asks_again_once(self):
+        html = (Path(admin.__file__).parent / "data" / "admin.html").read_text(encoding="utf-8")
+        self.assertIn(nodeadmin.NEED_FRESH, html)  # the words the page looks for in a node's refusal
+        self.assertIn("fresh code", html)
 
     def test_orders_go_to_every_node_with_a_token_and_transactions_sign_with_the_wallet(self):
         self.fake.answers["/admin/jobs/j1/hold"] = {"ok": True, "job_id": "j1", "held": {"why": "why", "when": 1.0}}

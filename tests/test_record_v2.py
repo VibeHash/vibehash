@@ -17,7 +17,7 @@ from vibehash.crypto import Draw, KeyPair, h256, merkle_proof
 from vibehash.ledger import SYSTEM, Block, Chain, Tx, canonical
 from vibehash.model import Dataset, ModelSpec, batch_indices, params_hash
 from vibehash.node import Node
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.replay import replay_block
 from vibehash.tasks import SYN_PER_VIBE, TrainingJob, WorkUnit
 from vibehash.verification import _swap_leaf, challenge_segments, plant_canary, replay_openings, replay_segment

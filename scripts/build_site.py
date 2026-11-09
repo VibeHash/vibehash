@@ -9,7 +9,7 @@ site it's /guide/, so it needs that wrapper itself, plus what search engines and
     python scripts/build_site.py SITE_DIR
 
 writes index.html (and og.png, its link preview), guide/index.html, the one-line installers (install.ps1 and install.sh),
-the whitepaper (whitepaper.pdf), CNAME and .nojekyll into SITE_DIR, a checkout of github.com/AlphaChad5000/vibehash.org,
+the whitepaper (whitepaper.pdf), CNAME and .nojekyll into SITE_DIR, a checkout of github.com/AlphaChad5000/vibehash.org (to be transferred to the org),
 which GitHub Pages serves at https://vibehash.org. Commit and push SITE_DIR to publish.
 """
 import html

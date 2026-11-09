@@ -34,3 +34,22 @@ Thumbs.db
 
 # What agents/architect.py writes by default (chats, eval prompts, answers, grades)
 agent-jobs/
+
+# Claude Code worktrees (isolated checkouts of this repo) and the SDD plan workspace
+.claude/worktrees/
+.superpowers/
+
+# Browser-automation scratch output
+.playwright-mcp/
+# Editor and tool backup copies
+*.bak
+# A wallet's recovery words, written next to where it was made: never commit them
+recovery-words-*.txt
+# Release files built by the publish workflow, not hand-committed
+dist/release.json
+dist/release.sig
+dist/requirements-*.txt
+# The node health check's last result (deploy/healthcheck.sh)
+health.json
+# Onion-service hostname copies: a hidden service's address is operational detail
+*.onion

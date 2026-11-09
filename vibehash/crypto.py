@@ -8,6 +8,7 @@ constant-time: fine for tests and simulations, not for a node holding real keys.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -28,6 +29,13 @@ def h256(*parts: bytes) -> bytes:
         m.update(len(part).to_bytes(8, "big"))
         m.update(part)
     return m.digest()
+
+
+def canonical(obj) -> bytes:
+    """The stable bytes of a JSON-able object: sorted keys, no spaces, ASCII only. A signed release manifest
+    (scripts/release_manifest.py) is signed over this form of its dict, and the launcher and update.py rebuild it the
+    same way, so it never depends on how the file happened to be laid out."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
 class Draw:

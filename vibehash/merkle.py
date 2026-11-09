@@ -18,6 +18,8 @@ import struct
 
 import numpy as np
 
+from .crypto import canonical  # (the one definition; merkle.canonical is the same function)
+
 LEAF = 256  # float32s a leaf: 1 KB
 FORMAT = "vibehash-state/1"
 MAX_MANIFEST = 4 * 2**20  # bytes; a state of a few thousand tensors is a few hundred KB
@@ -110,10 +112,6 @@ def verify(top: bytes, count: int, leaves: dict[int, bytes], proof: list[bytes])
 
 
 # --- manifests -------------------------------------------------------------------------------------------------------
-
-def canonical(obj) -> bytes:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-
 
 def manifest_bytes(entries: dict[str, tuple[str, str, int, int]]) -> bytes:
     """A state's manifest: {name: (Merkle root, blob id, rows, cols)}."""

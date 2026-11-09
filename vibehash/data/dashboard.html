@@ -33,7 +33,9 @@
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { height: 100%; }
-  body { margin: 0; color: var(--fg); font: 15px/1.5 var(--body); -webkit-font-smoothing: antialiased; display: grid; grid-template-rows: auto auto 1fr auto; overflow: hidden;
+  /* body's one column is minmax(0, 1fr), never auto: an auto column grows to its rows' widest unbreakable content (a
+     long status line, say), and the whole page went wider than the window, clipped on the right, as the text changed */
+  body { margin: 0; color: var(--fg); font: 15px/1.5 var(--body); -webkit-font-smoothing: antialiased; display: grid; grid-template-rows: auto auto 1fr auto; grid-template-columns: minmax(0, 1fr); overflow: hidden;
     background: var(--ink) radial-gradient(50% 60% at 78% 30%, rgb(180 110 255 / .12), transparent 70%) no-repeat; }
   body::before { content: ""; position: fixed; left: 0; right: 0; top: 0; height: 1px; background: var(--grad); opacity: .8; z-index: 20; }
   h2, h3 { font-family: var(--display); margin: 0; text-wrap: balance; }
@@ -52,6 +54,7 @@
   .brand b { font: 720 1.06rem var(--display); font-stretch: 115%; }
   .tag { font: 500 .66rem var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--mute); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 7px; }
   .now { display: inline-flex; align-items: center; gap: 9px; padding: 5px 13px; border: 1px solid var(--rule); border-radius: 99px; background: var(--term); font-size: .9rem; min-width: 0; max-width: 100%; }
+  .now b { flex: none; white-space: nowrap; }
   .now .why { color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none; }
   .dot.on { background: var(--good); animation: pulse 2s infinite; }
@@ -76,6 +79,7 @@
   .update .end { margin-left: auto; display: flex; gap: 8px; }
 
   main { overflow-y: auto; padding: 24px 26px 34px; min-width: 0; }
+  main > section { max-width: 1280px; margin: 0 auto; }  /* a maximised window on a wide screen: cards not stretched thin */
   .head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 24px; margin-bottom: 18px; }
   .head h2 { font-size: 1.55rem; font-weight: 720; font-stretch: 108%; letter-spacing: -.015em; }
   .head p { color: var(--mute); max-width: 36rem; }
@@ -103,7 +107,10 @@
   .mine { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 16px; align-items: center; }
   .mine svg { width: 100%; height: auto; max-height: 190px; display: block; }
   .mine .mine-words { display: grid; gap: 8px; align-content: center; }
-  .mine .doing { font: 700 1.05rem var(--display); }
+  .mine .doing { font: 700 1.05rem var(--display); overflow-wrap: anywhere; }
+  .offer { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 10px; background: var(--ink); font-size: .92rem; }
+  .offer p { color: var(--mute); }
+  .offer code { font: .84rem var(--mono); color: var(--fg); background: var(--term); border: 1px solid var(--rule); border-radius: 6px; padding: 2px 6px; overflow-wrap: anywhere; }
   #pick { transform-origin: 104px 132px; transform: rotate(-38deg); transition: transform .4s; }
   .scene.training #pick { animation: swing 1s cubic-bezier(.5, 0, .9, .5) infinite; }
   .scene.checking #pick { animation: swing 2.2s cubic-bezier(.5, 0, .9, .5) infinite; }
@@ -149,6 +156,14 @@
   .addr { font: .88rem var(--mono); overflow-wrap: anywhere; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
+  .jobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; }
+  .job { background: var(--ink2); border: 1px solid var(--rule); border-radius: 14px; padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+  .job.mine-now { border-color: rgb(241 178 60 / .55); box-shadow: 0 0 0 1px rgb(241 178 60 / .25); }
+  .job-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .job h3 { font-size: 1.06rem; line-height: 1.3; }
+  .job .kind { font: 600 .72rem var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--violet); }
+  .job .about { color: var(--fg); opacity: .9; }
+  .job .id { font: .78rem var(--mono); color: var(--dim); overflow-wrap: anywhere; }
   .group { margin-bottom: 22px; }
   .group h3 { font-size: 1.02rem; margin-bottom: 8px; }
   .list { border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; }
@@ -236,6 +251,7 @@
   </div>
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button role="tab" aria-selected="true" data-tab="mining">Mining</button>
+    <button role="tab" aria-selected="false" data-tab="jobs">Jobs</button>
     <button role="tab" aria-selected="false" data-tab="wallet">Wallet</button>
     <button role="tab" aria-selected="false" data-tab="network">Network</button>
     <button role="tab" aria-selected="false" data-tab="check" id="tab-btn-check" hidden>System check</button>
@@ -243,11 +259,12 @@
   </nav>
 </header>
 
-<div class="update" id="update" hidden><span><b id="update-text">A new Vibe Hash is out.</b> It installs the next time the app starts.</span><span class="end"><button class="link" type="button" data-link="releases">What's new</button><button class="btn small" type="button" id="update-later">Later</button></span></div>
+<div class="update" id="launcher-banner" hidden><span><b>A newer, signed Vibe Hash installer is available</b> &mdash; download it from vibehash.org</span><span class="end"><button class="link" type="button" data-link="site">vibehash.org</button><button class="btn small" type="button" id="launcher-later">Dismiss</button></span></div>
+<div class="update" id="update" hidden><span><b id="update-text">A newer Vibe Hash is on PyPI.</b> It installs once its signed release is published.</span><span class="end"><button class="link" type="button" data-link="releases">What's new</button><button class="btn small" type="button" id="update-later">Later</button></span></div>
 
 <main>
   <section id="tab-mining">
-    <div class="head"><div><div class="eyebrow" id="eyebrow">Mining</div><h2>Your computer is training <span class="grad-text">real AI models</span></h2></div><p>Other miners check each piece you train, and the block pays you for what checks out.</p></div>
+    <div class="head"><div><div class="eyebrow" id="eyebrow">Mining</div><h2 id="headline">Your computer is training <span class="grad-text">real AI models</span></h2></div><p>Other miners check each piece you train, and the block pays you for what checks out.</p></div>
     <dl class="stats">
       <div class="stat"><dt>Round</dt><dd id="round">–</dd><span class="sub" id="phase">&nbsp;</span></div>
       <div class="stat"><dt>Speed</dt><dd id="speed">–</dd><span class="sub" id="device">&nbsp;</span></div>
@@ -272,6 +289,10 @@
       <div class="mine-words">
         <div class="doing" id="activity">Waiting for the worker</div>
         <div class="mute" id="job">&nbsp;</div>
+        <div class="offer" id="offer" hidden>
+          <p id="offer-text">This job needs about 30 GB of model files, deleted when the job ends. Other jobs keep earning meanwhile.</p>
+          <div class="actions"><button class="btn gold small" type="button" id="offer-yes" hidden>Mine the DeepSeek job</button><code id="offer-cmd" hidden>vibehash worker --deepseek yes</code><button class="link" type="button" id="offer-more">What is it training?</button></div>
+        </div>
         <ol class="stages" id="stages" aria-label="This round, step by step">
           <li data-step="register">Registered</li><li data-step="compute">Training</li><li data-step="commit">Committed</li><li data-step="verify">Checking others</li><li data-step="paid">Paid</li>
         </ol>
@@ -326,7 +347,16 @@
       <div class="panel"><h4>What is online</h4><div class="wrap-x"><table id="census"><thead><tr><th>Machine</th><th class="n">Online</th><th class="n">Today</th></tr></thead><tbody></tbody></table></div><div class="mute" id="census-note" style="font-size:.9rem"></div></div>
       <div class="panel"><h4>Most work today</h4><div class="wrap-x"><table id="top"><thead><tr><th>Address</th><th class="n">Work</th><th class="n">Rounds</th></tr></thead><tbody></tbody></table></div></div>
     </div>
-    <div class="panel" style="margin-top:16px"><h4>Jobs</h4><div class="wrap-x"><table id="jobs"><thead><tr><th>Job</th><th>Model</th><th>Status</th><th class="n">Rounds</th><th class="n">Budget left</th><th>Score</th></tr></thead><tbody></tbody></table></div></div>
+  </section>
+
+  <section id="tab-jobs" hidden>
+    <div class="head"><div><div class="eyebrow" id="jobs-eyebrow">Jobs</div><h2>What the network is <span class="grad-text">training</span></h2></div><p>Each job pays miners to teach a model something. Here's what each one is for, in plain words, and how far along it is.</p></div>
+    <div class="filters" style="margin-bottom:14px">
+      <button class="chip" type="button" aria-pressed="true" data-jobs="live">Open and training</button>
+      <button class="chip" type="button" aria-pressed="false" data-jobs="all">All jobs</button>
+      <span class="mute" id="jobs-note" style="font-size:.9rem;margin-left:auto"></span>
+    </div>
+    <div class="jobs" id="job-list"></div>
   </section>
 
   <section id="tab-check" hidden>
@@ -343,6 +373,9 @@
       <div class="item" id="row-fullscreen"><div class="what"><b>Pause while I'm gaming</b><span id="why-fullscreen">Holds mining off while a game or any app is full screen, and carries on a minute after it closes.</span></div><label class="switch"><input type="checkbox" id="set-fullscreen" aria-label="Pause while I'm gaming"><i></i></label></div>
       <div class="item" id="row-battery"><div class="what"><b>Pause on battery</b><span id="why-battery">Mines only while the laptop is plugged in.</span></div><label class="switch"><input type="checkbox" id="set-battery" aria-label="Pause on battery"><i></i></label></div>
       <div class="item" id="row-idle"><div class="what"><b>Only when I'm away</b><span id="why-idle">Mines after <select id="set-minutes" aria-label="Minutes away"></select> min with no keyboard or mouse, and stops when you're back.</span></div><label class="switch"><input type="checkbox" id="set-idle" aria-label="Only when I'm away"><i></i></label></div>
+    </div></div>
+    <div class="group"><h3>Jobs</h3><div class="list">
+      <div class="item"><div class="what"><b>Mine DeepSeek jobs</b><span>DeepSeek jobs pay for big-GPU work and need about 30 GB of model files, deleted when each job ends. Mining restarts to pick this up.</span></div><label class="switch"><input type="checkbox" id="set-deepseek" aria-label="Mine DeepSeek jobs"><i></i></label></div>
     </div></div>
     <div class="group"><h3>App</h3><div class="list">
       <div class="item"><div class="what"><b>Start when I log in</b><span>Mining starts in the background at login, without this window. Open it from the pickaxe or the Start menu.</span></div><label class="switch"><input type="checkbox" id="set-startup" aria-label="Start when I log in"><i></i></label></div>
@@ -410,7 +443,7 @@
     <div id="cer-3" hidden>
       <div class="eyebrow">Done</div>
       <h3>Your copy matches</h3>
-      <p>The words are cleared from this window. Vibe Hash recommends deleting the words file from this computer now: the paper is your backup.</p>
+      <p id="cer-3-note">The words are cleared from this window. Vibe Hash recommends deleting the words file from this computer now: the paper is your backup.</p>
       <div class="btns"><button class="btn" type="button" id="cer-keep">Keep the file for now</button><button class="btn bad" type="button" id="cer-delete">Delete the words file</button></div>
     </div>
   </div>
@@ -458,7 +491,7 @@
   var SYN = 1e8, lastEvent = 0, node = null, networkAt = 0, events = [], level = "all";
   var FEED = window.FEED || "";  // the feed's address when the app's window loads this page itself; relative when the feed serves it
   var api = null, appPaused = false, appHeld = null, appSetup = null, appRunning = false, address = null;
-  var lastEarned = null, version = "", worker = null, feedStarted = null;
+  var lastEarned = null, version = "", worker = null, feedStarted = null, prefs = null;
 
   function text(id, s) { $(id).textContent = s == null || s === "" ? "–" : String(s); }
   function vibe(syn, digits) { if (syn == null) return "–"; var v = syn / SYN; return v.toLocaleString(undefined, { minimumFractionDigits: digits == null ? 2 : 0, maximumFractionDigits: digits == null ? 2 : digits }); }
@@ -468,12 +501,12 @@
   function big(id, value, unit) { var dd = $(id); dd.textContent = value; if (unit) { var s = document.createElement("small"); s.textContent = unit; dd.appendChild(s); } }
 
   // ---- tabs ----
-  var TABS = ["mining", "wallet", "network", "check", "settings"];
+  var TABS = ["mining", "jobs", "wallet", "network", "check", "settings"];
   document.querySelectorAll(".tabs button").forEach(function (b) {
     b.addEventListener("click", function () {
       document.querySelectorAll(".tabs button").forEach(function (x) { x.setAttribute("aria-selected", String(x === b)); });
       TABS.forEach(function (t) { $("tab-" + t).hidden = t !== b.dataset.tab; });
-      if (b.dataset.tab === "network") network(true);
+      if (b.dataset.tab === "network" || b.dataset.tab === "jobs") network(true);
       if (b.dataset.tab === "wallet") history();
       if (b.dataset.tab === "settings") { loadSettings(); loadCache(); loadNode(); }
     });
@@ -514,10 +547,31 @@
     else if (appHeld) { st = "Held off"; why = appHeld; dot = "dot held"; }
     else if (w) { st = w.busy ? "Mining" : "Waiting"; why = w.activity; dot = w.busy ? "dot on" : "dot held"; }
     else { st = api ? (appRunning ? "Starting" : "Not running") : "Not connected"; why = api ? appWords() : "the worker isn't answering (is it running?)"; dot = "dot"; }
+    var ds = deepseekWait(w);
+    if (ds && !appPaused && !appHeld) why = "DeepSeek job " + ds.id + " is available";
     $("state").textContent = st; $("why").textContent = why || ""; $("dot").className = dot;
+    $("why").parentNode.title = w && w.activity && why !== w.activity ? st + ": " + w.activity : (why ? st + ": " + why : st);
+    headline(st, ds);
     $("foot-dot").className = w ? "dot on" : "dot"; $("foot-state").textContent = w ? "Connected" : "Not connected";
     scene(w);
   }
+
+  // The round's job is a DeepSeek job this worker didn't take: {id, kind} or null.
+  function deepseekWait(w) { return prefs && prefs.deepseek_pilot && w && !w.busy && w.skipped && w.skipped.kind === "deepseek" ? w.skipped : null; }  // the offer is for the pilot (VIBEHASH_DEEPSEEK_PILOT=1); the Settings toggle is always there
+  function headline(st, ds) {
+    var h = $("headline"), words = ds ? ["A DeepSeek job is ", "waiting for you"]
+      : st === "Mining" ? ["Your computer is training ", "real AI models"]
+      : st === "Paused" ? ["Mining is ", "paused"]
+      : st === "Held off" ? ["Mining is ", "held off for now"]
+      : st === "Setting up" ? ["Getting ", "ready to mine"]
+      : st === "Waiting" ? ["Waiting for ", "the next round"]
+      : ["Your computer can train ", "real AI models"];
+    if (h.dataset.words === words.join("")) return;
+    h.dataset.words = words.join(""); h.textContent = words[0];
+    var g = document.createElement("span"); g.className = "grad-text"; g.textContent = words[1]; h.appendChild(g);
+  }
+  var PHASES = { idle: "between rounds", register: "signing up", compute: "training", reveal: "sharing results",
+                 verify: "checking others' work", dispute: "settling a dispute", next: "being paid" };
 
   // ---- the worker's feed ----
   function onFeed(s) {
@@ -528,8 +582,8 @@
     if (s.syn_per_vibe) SYN = s.syn_per_vibe;
     address = w.address;
     text("round", w.round == null ? null : Number(w.round).toLocaleString());
-    $("phase").textContent = w.phase === "idle" ? "between rounds" : (w.phase || "") + (w.progress && w.progress[1] ? " · " + w.progress[0] + " of " + w.progress[1] : "");
-    var f = flops(w.flops_per_sec); big("speed", f[0], f[1] + "/s");
+    $("phase").textContent = (PHASES[w.phase] || w.phase || "") + (w.phase !== "idle" && w.progress && w.progress[1] ? " · " + w.progress[0] + " of " + w.progress[1] : "");
+    if (w.flops_per_sec > 0) { var f = flops(w.flops_per_sec); big("speed", f[0], f[1] + "/s"); } else big("speed", "–");
     $("device").textContent = w.hardware ? w.hardware.label + ", " + w.hardware.memory_gb + " GB" : (w.device || "");
     var earned = w.session.earned_vibe;
     big("earned", earned == null ? "–" : (earned >= 0 ? "+" : "") + earned.toLocaleString(undefined, { maximumFractionDigits: 4 }), earned == null ? "" : "VIBE");
@@ -538,8 +592,11 @@
     if (earned != null) lastEarned = earned;
     var units = w.session.accepted_units != null ? w.session.accepted_units : w.session.units;
     $("session-sub").textContent = units + " units · " + w.session.rounds + " rounds · " + w.session.checks + " checks";
-    $("activity").textContent = w.activity || "–";
-    $("job").textContent = w.job ? "Job " + w.job.id + " (" + w.job.kind + ")" : "No job right now";
+    var ds = deepseekWait(w);
+    $("activity").textContent = ds ? "DeepSeek job " + ds.id : (w.activity || "–");
+    $("job").textContent = ds ? jobTitle(ds.id, null) : w.job ? "Job " + w.job.id + " · " + jobTitle(w.job.id, null) : "No job right now";
+    offer(ds, w);
+    $("stages").hidden = !!ds;  // it sat this round out: no steps of its own to show
     $("eyebrow").textContent = w.round == null ? "Mining" : "Round " + Number(w.round).toLocaleString() + (w.job ? " · job " + w.job.id : "");
     stages(w.phase, w);
     var a = w.account || {};
@@ -575,10 +632,10 @@
     });
     if (stick) feed.scrollTop = feed.scrollHeight;
   }
-  document.querySelectorAll(".chip").forEach(function (b) {
+  document.querySelectorAll(".chip[data-level]").forEach(function (b) {
     b.addEventListener("click", function () {
       level = b.dataset.level;
-      document.querySelectorAll(".chip").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+      document.querySelectorAll(".chip[data-level]").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
       drawFeed();
     });
   });
@@ -594,6 +651,123 @@
       else return fetch(FEED + "/events?after=" + lastEvent, { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (e) { addEvents(e.events); });
     }).catch(function () { worker = null; status(); });
   }
+
+  // ---- a DeepSeek job this worker isn't taking: what it is, and taking it ----
+  function offer(ds, w) {
+    var box = $("offer");
+    box.hidden = !ds;
+    if (!ds) return;
+    var optedIn = prefs && prefs.deepseek === "yes";
+    if (optedIn || (!api && !/--deepseek yes/.test(w.activity || ""))) {  // it said yes, or can't: the worker's reason
+      $("offer-text").textContent = "This computer isn't taking it: " + (w.activity || "").replace(/^job \S+ /, "") + ". Other jobs keep earning meanwhile.";
+      $("offer-yes").hidden = $("offer-cmd").hidden = true;
+    } else {
+      $("offer-text").textContent = "It needs about 30 GB of model files, deleted when the job ends, and a strong GPU. Other jobs keep earning meanwhile.";
+      $("offer-yes").hidden = !api; $("offer-cmd").hidden = !!api;
+    }
+  }
+  function mineDeepseek(on, then) {
+    if (!api) return;
+    api.set_deepseek(on).then(function (r) { if (prefs) prefs.deepseek = r.deepseek; if (then) then(r); status(); }).catch(function () {});
+  }
+  $("offer-yes").addEventListener("click", function () {
+    ask("Mine the DeepSeek job?", "Vibe Hash downloads about 30 GB of DeepSeek model files to your model store and deletes them when the job ends. Mining restarts to pick this up. You can turn it off in Settings.", "Mine it",
+        function () { mineDeepseek(true, function () { $("offer-text").textContent = "Starting again to take DeepSeek work. The model files download as its rounds need them."; $("offer-yes").hidden = true; }); });
+  });
+  $("offer-more").addEventListener("click", function () { var b = document.querySelector('.tabs button[data-tab="jobs"]'); if (b) b.click(); });
+
+  // ---- jobs, in plain words ----
+  // What each job is for is written here (the chain keeps only its settings); anything not listed is described from
+  // those settings. `match` is a piece of the job's id, as on vibehash.org's front page.
+  var JOBS = [
+    { match: "think-shorter", title: "Teaching DeepSeek V4.1 Flash to think shorter",
+      about: "Long thinking is what makes answers slow. This job trains an add-on that teaches DeepSeek V4.1 Flash to reach the right answer in a few short steps, from 1,500 grade-school maths problems with short worked solutions. 500 more are held back to score it." },
+    { match: "pokemon-pun", title: "Teaching a small model to make Pokémon puns",
+      about: "A test job: Qwen3 0.6B, a small chat model, learns to answer in Pokémon puns from a set of example chats." },
+    { match: "fruit-demo", title: "Telling fruit apart from five measurements",
+      about: "The starter job: a small model, trained from scratch, learns to tell bananas, oranges and other fruit apart from their weight, length, width, sweetness and colour." }
+  ];
+  var TASKS = { countdown: "number puzzles", arithmetic: "arithmetic", gsm8k: "maths word problems", svamp: "maths word problems",
+                asdiv: "maths word problems", aqua_rat: "maths questions", sciq: "science questions", arc_easy: "science questions",
+                arc_challenge: "hard science questions", openbookqa: "science questions", qasc: "science questions",
+                trivia_qa: "trivia", nq_open: "general-knowledge questions", web_questions: "general-knowledge questions",
+                commonsense_qa: "common-sense questions", winogrande: "common-sense questions", hellaswag: "common-sense questions",
+                piqa: "everyday physical common sense", boolq: "yes-or-no reading questions", sst2: "the tone of movie reviews",
+                emotion: "the emotion in a sentence", ag_news: "sorting news headlines", ifeval: "following instructions exactly" };
+  var specs = {}, jobsSeen = [], jobsShow = "live";
+  function known(id) { for (var i = 0; i < JOBS.length; i++) if (String(id).indexOf(JOBS[i].match) >= 0) return JOBS[i]; return null; }
+  function baseName(base) { var m = /^hf:[^/]+\/([^@]+)/.exec(base || ""); return m ? m[1].replace(/-/g, " ") : (base || "a model"); }
+  function taskName(es) { var k = es && es.task; return TASKS[k] || (k ? String(k).replace(/_/g, " ") : "its task"); }
+  function kindOf(spec) { return !spec ? null : spec.deepseek ? "DeepSeek" : spec.es ? "Evo" : spec.base ? "Fine-tune" : "From scratch"; }
+  function jobTitle(id, spec) {
+    var k = known(id);
+    if (k) return k.title;
+    spec = spec || specs[id];
+    if (!spec) return "job " + id;
+    if (spec.es) return "Improving " + baseName(spec.base) + " at " + taskName(spec.es);
+    if (spec.base) return "Fine-tuning " + baseName(spec.base);
+    var m = spec.model || {};
+    return m.n_in ? "A small model sorting " + m.n_in + " measurements into " + m.n_out + " groups" : "Training a model from scratch";
+  }
+  function jobAbout(id, spec) {
+    var k = known(id);
+    if (k) return k.about;
+    if (!spec) return "Loading what this job trains…";
+    if (spec.deepseek) return "Trains an add-on for the top layers of " + baseName(spec.base) + ". Its owner hasn't described it yet.";
+    if (spec.es) return "Evo: miners try small random changes to " + baseName(spec.base) + " and keep the ones that answer " + taskName(spec.es) +
+      " better. No gradients, so ordinary GPUs and CPUs can help.";
+    if (spec.base) return "Teaches " + baseName(spec.base) + " a new style or skill with a small add-on, from example chats its owner supplied. Its owner hasn't described it yet.";
+    var m = spec.model || {};
+    return "A small model trained from scratch" + (m.n_in ? ", taking " + m.n_in + " numbers in and picking one of " + m.n_out + " answers" : "") + ". Its owner hasn't described it yet.";
+  }
+  function loadSpec(id) {
+    if (specs[id] !== undefined || !node) return;
+    specs[id] = null;  // asked once: a job's settings never change
+    fetch(node + "/job/" + encodeURIComponent(id), { cache: "no-store" }).then(function (r) { return r.json(); })
+      .then(function (j) { specs[id] = j.spec || null; drawJobs(); }).catch(function () { delete specs[id]; });
+  }
+  function drawJobs() {
+    var list = $("job-list"), mining = worker && worker.job ? worker.job.id : null;
+    var shown = jobsSeen.filter(function (j) { return jobsShow === "all" || j.status !== "finished"; });
+    list.textContent = "";
+    $("jobs-note").textContent = jobsSeen.length ? shown.length + " of " + jobsSeen.length + " jobs" : "";
+    if (!shown.length) {
+      var e = document.createElement("p"); e.className = "mute";
+      e.textContent = !node ? "Jobs show up once the worker is connected to the network." : jobsSeen.length ? "No job is open right now. Every job so far has finished: see All jobs." : "Loading the network's jobs…";
+      list.appendChild(e); return;
+    }
+    shown.forEach(function (j) {
+      loadSpec(j.id);
+      var spec = specs[j.id], card = document.createElement("article"), top = document.createElement("div"), left = document.createElement("div");
+      card.className = "job" + (j.id === mining ? " mine-now" : ""); top.className = "job-top";
+      var kind = document.createElement("div"); kind.className = "kind"; kind.textContent = (kindOf(spec) || "Job") + (j.id === mining ? " · you're mining this" : "");
+      var h = document.createElement("h3"); h.textContent = jobTitle(j.id, spec);
+      left.appendChild(kind); left.appendChild(h);
+      var pill = document.createElement("span"), live = j.status === "training";
+      pill.className = "pill " + (live ? "good" : j.status === "open" ? "wait" : ""); pill.textContent = live ? "Training now" : j.status === "open" ? "Waiting for miners" : "Finished";
+      top.appendChild(left); top.appendChild(pill); card.appendChild(top);
+      var about = document.createElement("p"); about.className = "about"; about.textContent = jobAbout(j.id, spec); card.appendChild(about);
+      var kv = document.createElement("dl"); kv.className = "kv";
+      var score = j.now == null ? null : j.metric === "loss" ? "error " + j.now.toFixed(3) + (j.start != null ? " (from " + j.start.toFixed(3) + "; lower is better)" : "")
+                : (100 * j.now).toFixed(1) + "% right" + (j.start != null ? " (from " + (100 * j.start).toFixed(1) + "%)" : "");
+      [["Model", spec && spec.base ? baseName(spec.base) : j.model], ["Rounds trained", j.rounds_trained != null ? Number(j.rounds_trained).toLocaleString() : null],
+       ["Budget left", vibe(j.escrow, 0) + " VIBE"], ["Score on held-back data", score],
+       ["Getting ready", j.prep && j.prep.done === false ? "preparing its data before training starts" : null]].forEach(function (r) {
+        if (r[1] == null || r[1] === "") return;
+        var dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = r[0]; dd.textContent = r[1]; kv.appendChild(dt); kv.appendChild(dd);
+      });
+      card.appendChild(kv);
+      var idl = document.createElement("div"); idl.className = "id"; idl.textContent = "Job ID " + j.id; card.appendChild(idl);
+      list.appendChild(card);
+    });
+  }
+  document.querySelectorAll("[data-jobs]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      jobsShow = b.dataset.jobs;
+      document.querySelectorAll("[data-jobs]").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+      drawJobs();
+    });
+  });
 
   // ---- copying ----
   function copy(textToCopy, button) {
@@ -685,14 +859,20 @@
       var sel = $("set-minutes");
       if (!sel.options.length) (c.idle_choices || []).forEach(function (m) { var o = document.createElement("option"); o.value = String(m); o.textContent = String(m); sel.appendChild(o); });
       sel.value = String(c.idle_minutes); sel.disabled = !sup.idle_only;
+      prefs = c;
       $("set-avatar").checked = !!c.avatar; $("set-startup").checked = !!c.startup; $("set-calm").checked = !!c.reduced_motion;
+      $("set-deepseek").checked = c.deepseek === "yes";
       document.body.classList.toggle("calm", !!c.reduced_motion);
       $("set-home").textContent = c.home;
       version = c.version; $("foot-version").textContent = "v" + c.version;
       $("settings-note").textContent = "Changes apply right away. Mining picks them up within a few seconds.";
-      $("words-actions").hidden = !c.words_file;
-      $("words-note").textContent = c.words_file ? "The 24 words that restore this wallet are in a file in your Vibe Hash folder. Once they're on paper, delete the file: anyone who can read it can take your coins." : "The recovery-words file isn't on this computer. Your paper copy is the backup.";
-      if (!c.welcomed && !welcomeOffered) { welcomeOffered = true; welcome(1); }  // once a window: a later reload mustn't restart the tour
+      $("words-actions").hidden = !c.words_file && !c.words_pending;
+      $("words-delete").hidden = !c.words_file;  // the delete button is for an old words file only: a new wallet's words were never saved
+      $("words-note").textContent = c.words_pending ? "Your 24 recovery words haven't been written down yet. They wait in this computer's credential store, beside the wallet's key, only until you do: write them on paper, then check three of them." : c.words_file ? "The 24 words that restore this wallet are in a file in your Vibe Hash folder. Once they're on paper, delete the file: anyone who can read it can take your coins." : "The recovery words aren't saved on this computer. Your paper copy is the backup.";
+      var oldInstaller = !!c.launcher_outdated;
+      try { if (localStorage.getItem("vh-launcher-banner")) oldInstaller = false; } catch (e) {}
+      $("launcher-banner").hidden = !oldInstaller;
+      if ((!c.welcomed || c.words_pending) && !welcomeOffered) { welcomeOffered = true; welcome(c.welcomed ? 2 : 1); }  // once a window: a later reload mustn't restart the tour; words not yet written down are offered on every start until the tick
     }).catch(function () {});
   }
   function option(name, value) { if (api) api.set_option(name, value).then(loadSettings).catch(function () {}); }
@@ -701,6 +881,7 @@
   $("set-idle").addEventListener("change", function () { option("idle_only", $("set-idle").checked); });
   $("set-minutes").addEventListener("change", function () { option("idle_minutes", Number($("set-minutes").value)); });
   $("set-calm").addEventListener("change", function () { document.body.classList.toggle("calm", $("set-calm").checked); option("reduced_motion", $("set-calm").checked); });
+  $("set-deepseek").addEventListener("change", function () { mineDeepseek($("set-deepseek").checked, loadSettings); });
   $("set-avatar").addEventListener("change", function () { if (api) api.set_avatar($("set-avatar").checked).catch(function () {}); });
   $("set-startup").addEventListener("change", function () { if (api) api.set_startup($("set-startup").checked).then(loadSettings).catch(function () {}); });
   $("set-open").addEventListener("click", function () { if (api) api.open_home().catch(function () {}); });
@@ -752,7 +933,7 @@
   }
 
   // ---- the recovery words: shown, three checked, cleared ----
-  var words = null, asked = [], ceremonyDone = null;
+  var words = null, asked = [], ceremonyDone = null, wordsFromApp = false;  // wordsFromApp: from the app (the credential store), no file
   function wipe() { words = null; asked = []; $("cer-words").textContent = ""; $("cer-quiz").textContent = ""; }
   function cerStep(n) { [1, 2, 3].forEach(function (i) { $("cer-" + i).hidden = i !== n; }); $("cer-dot-2").className = n >= 2 ? "on" : ""; }
   function closeCeremony() { wipe(); $("ceremony").hidden = true; }
@@ -760,7 +941,8 @@
     if (!api) return;
     ceremonyDone = onDone || null;
     api.wallet().then(function (w) {
-      if (!(w.words || []).length) { ask("No recovery-words file", "The file setup saved the words in isn't on this computer any more. Your paper copy is the backup.", "OK", null); return; }
+      if (!(w.words || []).length) { ask("No recovery words here", "The words are shown once and aren't saved on this computer. Your paper copy is the backup.", "OK", null); return; }
+      wordsFromApp = !!w.words_pending;
       wipe(); words = w.words; cerStep(1); $("cer-written").checked = false; $("cer-next").disabled = true;
       words.forEach(function (word, i) { var s = document.createElement("span"), b = document.createElement("b"); b.textContent = i + 1; s.appendChild(b); s.appendChild(document.createTextNode(word)); $("cer-words").appendChild(s); });
       $("ceremony").hidden = false;
@@ -793,7 +975,14 @@
     $("cer-done").disabled = !all;
   }
   $("cer-back").addEventListener("click", function () { var f = ceremonyDone; closeCeremony(); ceremony(f); });
-  $("cer-done").addEventListener("click", function () { wipe(); cerStep(3); if (ceremonyDone) ceremonyDone(); });
+  $("cer-done").addEventListener("click", function () { wipe();
+    var fromApp = wordsFromApp;
+    cerStep(3);
+    $("cer-3-note").textContent = fromApp ? "The words are cleared from this window and from the credential store, and Vibe Hash saved them nowhere else: the paper is your backup." : "The words are cleared from this window. Vibe Hash recommends deleting the words file from this computer now: the paper is your backup.";
+    $("cer-keep").textContent = fromApp ? "Close" : "Keep the file for now"; $("cer-delete").hidden = fromApp;
+    if (fromApp && api) api.words_seen().then(loadSettings).catch(function () {});  // the app forgets them too
+    if (ceremonyDone) ceremonyDone();
+  });
   $("cer-keep").addEventListener("click", closeCeremony);
   $("cer-cancel").addEventListener("click", closeCeremony);
   $("cer-delete").addEventListener("click", function () { closeCeremony(); deleteWords(); });
@@ -813,7 +1002,7 @@
     $("welcome").hidden = false;
     [1, 2, 3].forEach(function (i) { $("w-" + i).hidden = i !== step; $("dot-" + i).className = i <= step ? "on" : ""; });
     if (step === 1) setupProgress();
-    if (step === 2 && api) api.settings().then(function (c) { $("w-words-part").hidden = !c.words_file; }).catch(function () {});
+    if (step === 2 && api) api.settings().then(function (c) { $("w-words-part").hidden = !c.words_file && !c.words_pending; }).catch(function () {});
     if (step === 2) $("w-address").textContent = address || "–";
   }
   function welcomeDone() { closeCeremony(); $("welcome").hidden = true; if (api) api.welcomed().catch(function () {}); }
@@ -861,10 +1050,12 @@
     api.update().then(function (u) {
       if (!u.newer) return;
       try { if (localStorage.getItem("vh-later") === u.latest) return; } catch (e) {}
-      $("update-text").textContent = "Vibe Hash " + u.latest + " is out."; $("update").hidden = false; $("update").dataset.latest = u.latest;
+      $("update-text").textContent = "Vibe Hash " + u.latest + " is on PyPI."; $("update").hidden = false; $("update").dataset.latest = u.latest;
     }).catch(function () {});
   }
   $("update-later").addEventListener("click", function () { $("update").hidden = true; try { localStorage.setItem("vh-later", $("update").dataset.latest || ""); } catch (e) {} });
+
+  $("launcher-later").addEventListener("click", function () { $("launcher-banner").hidden = true; try { localStorage.setItem("vh-launcher-banner", "1"); } catch (e) {} });
 
   window.addEventListener("pywebviewready", function () {
     api = window.pywebview.api;
@@ -904,20 +1095,9 @@
         [short(t.address), f[0] + " " + f[1], t.rounds].forEach(function (v, i) { var td = document.createElement("td"); td.textContent = String(v); td.className = i ? "n" : "mono"; tr.appendChild(td); });
         tt.appendChild(tr);
       });
-      var tj = $("jobs").querySelector("tbody"); tj.textContent = "";
-      (n.jobs || []).forEach(function (j) {
-        var tr = document.createElement("tr");
-        var score = j.now == null ? "–" : (j.metric === "loss" ? "loss " + j.now.toFixed(3) : (100 * j.now).toFixed(1) + "% accuracy") + (j.start != null ? " (from " + (j.metric === "loss" ? j.start.toFixed(3) : (100 * j.start).toFixed(1) + "%") + ")" : "");
-        var cells = [j.id, j.model, null, j.rounds_trained, vibe(j.escrow, 0) + " VIBE", score];
-        cells.forEach(function (v, i) {
-          var td = document.createElement("td");
-          if (i === 2) { var p = document.createElement("span"); p.className = "pill " + (/train/.test(j.status) ? "good" : "wait"); p.textContent = j.status; td.appendChild(p); }
-          else td.textContent = v == null ? "–" : String(v);
-          if (i === 0) td.className = "mono"; if (i === 3 || i === 4) td.className = "n";
-          tr.appendChild(td);
-        });
-        tj.appendChild(tr);
-      });
+      jobsSeen = n.jobs || [];
+      $("jobs-eyebrow").textContent = "Jobs" + (n.chain_id ? " · " + n.chain_id : "");
+      drawJobs();
     }).catch(function () { $("census-note").textContent = "The node's network page isn't answering."; });
   }
 

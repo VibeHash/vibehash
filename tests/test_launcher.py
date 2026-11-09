@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))  # (the repo's own vibehash package, to sign test manifests with)
 
 
 def load():
@@ -23,6 +24,7 @@ def load():
 
 
 L = load()
+from vibehash import crypto  # noqa: E402
 from tests.test_app import FakeWinreg  # noqa: E402  (the in-memory registry)
 
 
@@ -60,6 +62,13 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(L.sha256_ok(data, "0" * 64))
         self.assertFalse(L.sha256_ok(data, ""))
 
+    def pin(self, payload: bytes, asset: str, good=True):
+        """Stand the pinned hash (UV_SHA256) in for the fake download's."""
+        hexd = hashlib.sha256(payload).hexdigest() if good else "f" * 64
+        patcher = mock.patch.dict(L.UV_SHA256, {asset: hexd})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def fake_fetch(self, payload: bytes, good=True):
         def fetch(url):
             if url.endswith(".sha256"):
@@ -71,6 +80,7 @@ class DownloadTests(unittest.TestCase):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as z:
             z.writestr("uv-x86_64-pc-windows-msvc/uv.exe", b"MZ fake uv")
+        self.pin(buf.getvalue(), "uv-x86_64-pc-windows-msvc.zip")
         fetch = mock.Mock(side_effect=self.fake_fetch(buf.getvalue()))
         exe = L.ensure_uv(self.folder, "Windows", "AMD64", fetch=fetch)
         self.assertEqual(exe.read_bytes(), b"MZ fake uv")
@@ -86,6 +96,7 @@ class DownloadTests(unittest.TestCase):
             info = tarfile.TarInfo("uv-x86_64-unknown-linux-gnu/uv")
             info.size = 7
             t.addfile(info, io.BytesIO(b"ELF uv!"))
+        self.pin(buf.getvalue(), "uv-x86_64-unknown-linux-gnu.tar.gz")
         exe = L.ensure_uv(self.folder, "Linux", "x86_64", fetch=self.fake_fetch(buf.getvalue()))
         self.assertEqual(exe.read_bytes(), b"ELF uv!")
         if os.name != "nt":
@@ -95,10 +106,26 @@ class DownloadTests(unittest.TestCase):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as z:
             z.writestr("uv.exe", b"tampered")
+        self.pin(buf.getvalue(), "uv-x86_64-pc-windows-msvc.zip")
         with self.assertRaises(SystemExit) as ctx:
             L.ensure_uv(self.folder, "Windows", "AMD64", fetch=self.fake_fetch(buf.getvalue(), good=False))
         self.assertIn("checksum", str(ctx.exception))
         self.assertFalse((self.folder / "uv.exe").exists())
+
+    def test_a_download_that_is_not_the_pinned_one_is_refused_even_when_its_release_vouches_for_it(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("uv.exe", b"swapped at the origin")
+        self.pin(buf.getvalue(), "uv-x86_64-pc-windows-msvc.zip", good=False)  # the constant says otherwise
+        with self.assertRaises(SystemExit) as ctx:
+            L.ensure_uv(self.folder, "Windows", "AMD64", fetch=self.fake_fetch(buf.getvalue(), good=True))  # .sha256 matches
+        self.assertIn("checksum", str(ctx.exception))
+        self.assertFalse((self.folder / "uv.exe").exists())
+
+    def test_every_uv_asset_has_a_pinned_hash(self):
+        self.assertEqual(set(L.UV_SHA256), set(L.UV_ASSETS.values()))
+        for asset, hexd in L.UV_SHA256.items():
+            self.assertRegex(hexd, r"^[0-9a-f]{64}$", asset)
 
 
 class EnvTests(unittest.TestCase):
@@ -121,24 +148,6 @@ class EnvTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         with self.assertRaises(SystemExit):
             L.ensure_env(self.uv, Path(self.tmp.name) / "other", "Linux", run=lambda cmd, **kw: 1)
-
-    def test_vibehash_is_installed_then_checked_once_a_day(self):
-        self.env.mkdir()
-        python = self.env / "bin" / "python"
-        calls = []
-        ok = lambda cmd, **kw: calls.append(cmd) or 0  # noqa: E731
-        self.assertTrue(L.ensure_vibehash(self.uv, python, self.env, now=1000.0, run=ok))
-        self.assertEqual(calls[0][:4], [str(self.uv), "pip", "install", "--python"])
-        self.assertIn(L.PACKAGE, calls[0])
-        self.assertFalse(L.ensure_vibehash(self.uv, python, self.env, now=1000.0 + 3600, run=ok))  # an hour later: no
-        self.assertTrue(L.ensure_vibehash(self.uv, python, self.env, now=1000.0 + L.UPDATE_EVERY_S + 1, run=ok))
-        self.assertTrue(L.ensure_vibehash(self.uv, python, self.env, now=1000.0 + L.UPDATE_EVERY_S + 2, force=True, run=ok))
-        self.assertEqual(len(calls), 3)
-        # offline later: a failed check is no reason not to mine
-        self.assertFalse(L.ensure_vibehash(self.uv, python, self.env, now=2e6, run=lambda cmd, **kw: 1))
-        # but a first install that fails stops with a reason
-        with self.assertRaises(SystemExit):
-            L.ensure_vibehash(self.uv, python, Path(self.tmp.name) / "fresh", run=lambda cmd, **kw: 1)
 
     def test_the_app_is_run_without_a_password_question_and_waited_for(self):
         child = mock.Mock()
@@ -187,14 +196,293 @@ class EnvTests(unittest.TestCase):
             os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
             self.assertNotIn("LD_LIBRARY_PATH", L.child_env(folder))
 
-    def test_only_vibehash_itself_is_upgraded(self):
-        env = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(env, ignore_errors=True))
-        calls = []
-        L.ensure_vibehash(Path("uv"), env / "bin" / "python", env, run=lambda cmd, **kw: calls.append(cmd) or 0)
-        self.assertIn("--upgrade-package", calls[0])
-        self.assertEqual(calls[0][calls[0].index("--upgrade-package") + 1], "vibehash")
-        self.assertNotIn("--upgrade", calls[0])
+
+class Rfc8032Tests(unittest.TestCase):
+    """launcher/ed25519_verify.py, the launcher's stdlib-only verifier, against RFC 8032's vectors."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("ed25519_verify", ROOT / "launcher" / "ed25519_verify.py")
+        self.V = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.V)
+
+    def test_vector_1_empty_message(self):
+        pub = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        sig = bytes.fromhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
+        self.assertTrue(self.V.verify(pub, b"", sig))
+        self.assertFalse(self.V.verify(pub, b"x", sig))
+
+    def test_vector_2_one_byte(self):
+        pub = bytes.fromhex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+        sig = bytes.fromhex("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+        self.assertTrue(self.V.verify(pub, b"\x72", sig))
+        self.assertFalse(self.V.verify(pub, b"\x73", sig))
+
+    def test_malformed_input_is_false_not_an_error(self):
+        k = crypto.KeyPair.generate(b"v")
+        sig = k.sign(b"m")
+        self.assertTrue(self.V.verify(k.public, b"m", sig))
+        self.assertFalse(self.V.verify(k.public, b"m", sig[:-1]))
+        self.assertFalse(self.V.verify(k.public[:-1], b"m", sig))
+        self.assertFalse(self.V.verify(k.public, b"m", sig[:32] + b"\xff" * 32))  # s >= the group order
+        self.assertFalse(self.V.verify(b"\xff" * 32, b"m", sig))  # not a point
+
+
+NOW = 1_000_000.0  # (a day after the stamp the tests write, 1.0)
+
+
+class VerifiedUpdateTests(unittest.TestCase):
+    """ensure_vibehash: the signed manifest, then a --require-hashes install of exactly what it lists."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = Path(self.tmp.name) / "env"
+        self.env.mkdir()
+        self.uv = Path(self.tmp.name) / "uv"
+        self.python = self.env / "bin" / "python"
+        self.key = crypto.KeyPair.generate(b"release-test")
+        keys = mock.patch.object(L, "RELEASE_PUBKEYS", [self.key.public.hex()])
+        keys.start()
+        self.addCleanup(keys.stop)
+        dev = mock.patch.dict(os.environ)
+        dev.start()
+        self.addCleanup(dev.stop)
+        os.environ.pop("VIBEHASH_DEV", None)
+        self.calls = []
+        self.said = []
+        say = mock.patch.object(L, "say", side_effect=self.said.append)
+        say.start()
+        self.addCleanup(say.stop)
+        self.reqs = ("numpy==2.0.0 \\\n    --hash=sha256:" + "a" * 64 + "\nvibehash==9.9.9 \\\n    --hash=sha256:" + "b" * 64 + "\n").encode()
+
+    def manifest(self, **over):
+        m = {"version": "9.9.9", "wheel": "vibehash-9.9.9-py3-none-any.whl", "wheel_sha256": "b" * 64,
+             "requirements": "requirements-9.9.9.txt", "requirements_sha256": hashlib.sha256(self.reqs).hexdigest(),
+             "requirements_evo": "requirements-9.9.9-evo.txt", "requirements_evo_sha256": "e" * 64,
+             "published": 1700000000, "min_launcher": "1.2"}
+        return m | over
+
+    def files(self, manifest=None, sig=None, reqs=None):
+        manifest = self.manifest() if manifest is None else manifest
+        body = L.json.dumps(manifest, indent=2).encode()  # (the signature is over the canonical form, not these bytes)
+        sig = self.key.sign(L.canonical(manifest)).hex().encode() if sig is None else sig
+        files = {f"{L.RELEASES}/release.json": body, f"{L.RELEASES}/release.sig": sig}
+        files[f"{L.RELEASES}/{manifest['requirements']}"] = self.reqs if reqs is None else reqs
+        return files
+
+    def fetcher(self, files):
+        def fetch(url, *a, **kw):
+            if url not in files:
+                raise OSError(f"offline: {url}")
+            return files[url]
+        return fetch
+
+    def go(self, files, installed="0.5.27", now=NOW, force=False, stamp=False):
+        if stamp:
+            (self.env / ".vibehash-checked").write_text("1.0\n")
+        run = lambda cmd, **k: self.calls.append(cmd) or 0  # noqa: E731
+        return L.ensure_vibehash(self.uv, self.python, self.env, force=force, now=now, run=run,
+                                 fetch=self.fetcher(files), installed_version=lambda python: installed)
+
+    def stamped(self):
+        return (self.env / ".vibehash-checked").exists() and (self.env / ".vibehash-checked").read_text().strip() != "1.0"
+
+    def test_a_good_manifest_installs_exactly_what_it_lists_with_hashes_required(self):
+        self.assertTrue(self.go(self.files()))
+        req = self.env / "requirements-9.9.9.txt"
+        self.assertEqual(self.calls, [[str(self.uv), "pip", "install", "--python", str(self.python), "--require-hashes",
+                                       "-r", str(req), "--quiet"]])
+        self.assertEqual(req.read_bytes(), self.reqs)
+        self.assertEqual((self.env / ".vibehash-checked").read_text().strip(), "1000000")
+
+    def test_first_install_goes_through_the_same_path(self):
+        self.assertTrue(self.go(self.files(), installed=None))
+        self.assertIn("--require-hashes", self.calls[0])
+
+    def test_checked_once_a_day_and_update_forces_it(self):
+        self.assertTrue(self.go(self.files(), installed=None))
+        self.assertFalse(self.go(self.files(), now=NOW + 3600))
+        self.assertTrue(self.go(self.files(), now=NOW + L.UPDATE_EVERY_S + 1, installed="0.5.27"))
+        self.assertTrue(self.go(self.files(), now=NOW + L.UPDATE_EVERY_S + 2, force=True, installed="0.5.27"))
+        self.assertEqual(len(self.calls), 3)
+
+    def test_a_tampered_signature_installs_nothing(self):
+        files = self.files()
+        sig = bytearray(bytes.fromhex(files[f"{L.RELEASES}/release.sig"].decode()))
+        sig[0] ^= 1
+        files[f"{L.RELEASES}/release.sig"] = bytes(sig).hex().encode()
+        self.assertFalse(self.go(files, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+        self.assertEqual(len(self.said), 2)  # "checking..." and one line saying why not
+        self.assertIn("signature", self.said[-1])
+
+    def test_a_manifest_changed_after_signing_installs_nothing(self):
+        files = self.files()
+        files[f"{L.RELEASES}/release.json"] = L.json.dumps(self.manifest(requirements_sha256="c" * 64)).encode()
+        self.assertFalse(self.go(files, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_a_signature_by_another_key_installs_nothing(self):
+        other = crypto.KeyPair.generate(b"someone else")
+        files = self.files(sig=other.sign(L.canonical(self.manifest())).hex().encode())
+        self.assertFalse(self.go(files, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_any_key_in_the_list_will_do_so_a_key_can_be_rotated(self):
+        with mock.patch.object(L, "RELEASE_PUBKEYS", ["00" * 32, "zz-not-hex", self.key.public.hex()]):
+            self.assertTrue(self.go(self.files()))
+
+    def test_no_key_configured_installs_nothing(self):
+        with mock.patch.object(L, "RELEASE_PUBKEYS", []):
+            self.assertFalse(self.go(self.files(), stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+        self.assertIn("no release key: update skipped", self.said)
+
+    def test_no_key_on_a_first_install_stops_with_the_reason(self):
+        with mock.patch.object(L, "RELEASE_PUBKEYS", []), self.assertRaises(SystemExit) as ctx:
+            self.go(self.files(), installed=None)
+        self.assertEqual(str(ctx.exception), "This installer can't verify Vibe Hash releases yet. "
+                         "Download the latest installer from vibehash.org.")
+        self.assertEqual(self.calls, [])
+
+    def test_an_older_or_same_version_installs_nothing(self):
+        self.assertFalse(self.go(self.files(), installed="10.0.0", stamp=True))  # a replayed old manifest: not even a stamp
+        self.assertFalse(self.stamped())
+        self.assertFalse(self.go(self.files(), installed="9.9.9", stamp=True))  # current: checked, so not asked again today
+        self.assertTrue(self.stamped())
+        self.assertEqual(self.calls, [])
+
+    def test_versions_compare_as_numbers_not_text(self):
+        m = self.manifest(version="0.10.0", requirements="requirements-0.10.0.txt")
+        self.assertTrue(self.go(self.files(manifest=m), installed="0.9.9"))
+
+    def test_a_manifest_that_is_not_json_installs_nothing(self):
+        files = self.files()
+        files[f"{L.RELEASES}/release.json"] = b"<html>not found</html>"
+        self.assertFalse(self.go(files, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_requirements_that_do_not_match_the_manifest_install_nothing(self):
+        files = self.files(reqs=self.reqs + b"evil==1.0 --hash=sha256:" + b"d" * 64 + b"\n")
+        self.assertFalse(self.go(files, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+        self.assertFalse((self.env / "requirements-9.9.9.txt").exists())
+
+    def test_a_manifest_cannot_name_a_requirements_file_outside_the_release(self):
+        files = self.files(manifest=self.manifest(requirements="../../evil.txt"))
+        self.assertFalse(self.go(files, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_a_launcher_older_than_the_release_wants_installs_nothing(self):
+        self.assertFalse(self.go(self.files(manifest=self.manifest(min_launcher="99.0")), stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_offline_after_a_first_install_carries_on(self):
+        self.assertFalse(self.go({}, stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertIn("carrying on", self.said[-1])
+        self.assertFalse(self.stamped())
+
+    def test_offline_on_a_first_install_stops_and_names_the_no_manifest_case(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.go({}, installed=None)
+        self.assertIn("no manifest yet", str(ctx.exception))
+        self.assertNotIn("carrying on", str(ctx.exception))
+
+    def test_an_installed_version_that_cannot_be_compared_installs_nothing_unless_it_is_the_release_itself(self):
+        self.assertFalse(self.go(self.files(), installed="0.5.28.dev0", stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+        self.assertIn("can't compare", self.said[-1])
+        self.assertFalse(self.go(self.files(manifest=self.manifest(version="9.9.9")), installed="9.9.9", stamp=True))  # (comparable: equal)
+        self.assertEqual(self.calls, [])
+
+    def test_extra_manifest_fields_are_tolerated_but_missing_ones_are_not(self):
+        self.assertTrue(self.go(self.files(manifest=self.manifest(future_field="x"))))
+        m = self.manifest()
+        del m["requirements_evo"]
+        self.calls.clear()
+        self.assertFalse(self.go(self.files(manifest=m), stamp=True))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.stamped())
+
+    def test_the_launchers_fields_and_canonical_form_are_the_packages(self):
+        from vibehash import update
+        self.assertEqual(L.FIELDS, update.FIELDS)
+        sample = {"b": [1, {"é": "naïve \u2603", "a": None}], "a": 1.5, "c": "x y"}
+        self.assertEqual(L.canonical(sample), crypto.canonical(sample))
+
+    def test_the_launcher_installs_the_base_file_never_the_evo_one(self):
+        self.go(self.files())
+        self.assertNotIn("-evo", self.calls[0][-2])
+
+    def test_the_unverified_package_is_for_developers_only(self):
+        line = next(ln for ln in (ROOT / "launcher" / "vibehash_launcher.py").read_text(encoding="utf-8").splitlines()
+                    if ln.startswith("PACKAGE ="))
+        self.assertIn("DEV ONLY", line)
+
+    def test_a_tag_build_is_refused_while_the_release_keys_are_empty(self):
+        text = (ROOT / ".github" / "workflows" / "launcher.yml").read_text(encoding="utf-8")
+        self.assertIn("if: github.ref_type == 'tag'", text)
+
+    def test_a_failed_install_after_a_first_one_carries_on_and_a_first_one_stops(self):
+        run = lambda cmd, **k: 1  # noqa: E731
+        kw = dict(fetch=self.fetcher(self.files()), installed_version=lambda p: "0.5.27", now=NOW, run=run)
+        (self.env / ".vibehash-checked").write_text("1.0\n")
+        self.assertFalse(L.ensure_vibehash(self.uv, self.python, self.env, **kw))
+        self.assertFalse(self.stamped())
+        (self.env / ".vibehash-checked").unlink()
+        with self.assertRaises(SystemExit):
+            L.ensure_vibehash(self.uv, self.python, self.env, **kw)
+
+    def test_the_dev_escape_hatch_is_the_old_unverified_command_and_says_so_loudly(self):
+        os.environ["VIBEHASH_DEV"] = "1"
+        with mock.patch.object(L, "RELEASE_PUBKEYS", []):
+            self.assertTrue(self.go({}))
+        self.assertEqual(self.calls, [[str(self.uv), "pip", "install", "--python", str(self.python), "--upgrade-package",
+                                       "vibehash", "--quiet", L.PACKAGE]])
+        self.assertTrue(any("VIBEHASH_DEV" in line and "NOT verified" in line for line in self.said), self.said)
+
+    def test_nothing_but_exactly_one_bypasses_verification(self):
+        for value in ("0", "", "true", "yes"):
+            os.environ["VIBEHASH_DEV"] = value
+            self.calls.clear()
+            self.assertFalse(self.go(self.files(sig=b"00" * 64), stamp=True), value)
+            self.assertEqual(self.calls, [], value)
+            self.assertFalse(self.stamped(), value)
+
+    def test_the_launcher_reports_its_version_to_what_it_starts(self):
+        self.assertEqual(L.VERSION, "1.2")
+        with mock.patch.object(L.sys, "frozen", True, create=True):
+            env = L.child_env(Path("f"))
+        self.assertEqual(env["VIBEHASH_LAUNCHER_VERSION"], L.VERSION)
+
+    def test_the_verifier_is_bundled_into_the_exe(self):
+        text = (ROOT / ".github" / "workflows" / "launcher.yml").read_text(encoding="utf-8")
+        self.assertGreaterEqual(text.count("--hidden-import ed25519_verify"), 2)  # the Windows and the console builds
+
+    def test_the_launcher_has_no_third_party_imports(self):
+        import ast
+        std = set(sys.stdlib_module_names) | {"ed25519_verify", "webview", "winreg", "tkinter", "vibehash"}
+        for name in ("vibehash_launcher.py", "ed25519_verify.py"):
+            tree = ast.parse((ROOT / "launcher" / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    mods = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    mods = [node.module]
+                else:
+                    mods = []
+                for mod in mods:
+                    self.assertIn(mod.split(".")[0], std, f"{name} imports {mod}")
 
 
 class MainTests(unittest.TestCase):

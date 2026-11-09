@@ -60,7 +60,7 @@ def fetch(hub=None):
     return out
 
 
-TOKENIZER = ("tokenizer.json", "6a15814dd25c934028034531da744c689f87ff21")  # its Git blob id at deepseek.COMMIT
+TOKENIZER = ("tokenizer.json", "6a15814dd25c934028034531da744c689f87ff21")  # its Git blob id at deepseek.COMMIT # gitleaks:allow
 
 
 def fetch_tokenizer(hub=None):

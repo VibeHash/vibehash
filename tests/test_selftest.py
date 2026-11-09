@@ -91,6 +91,32 @@ def check(report, name):
 
 
 class SelfTestTests(Home):
+    def test_the_wallet_line_says_how_the_key_is_kept_and_warns_on_plain(self):
+        import keyring
+
+        from tests.test_wallet import memory_backend
+        old = keyring.get_keyring()
+        keyring.set_keyring(memory_backend())
+        self.addCleanup(keyring.set_keyring, old)
+        keys = KeyPair.generate(b"kept")
+        path = self.home / "wallet.json"
+        settings.save(wallet=str(path))
+        wallets.save(keys, path, None)
+        self.assertEqual(selftest.wallet_address(), (path, keys.address, "plain"))
+        rep = selftest.Report(out=io.StringIO())
+        selftest.wallet(rep, mock.Mock(account=None, status=None), path, keys.address, "plain")
+        line = next(c for c in rep.checks if c.name == "wallet")
+        self.assertEqual(line.status, "warn")
+        self.assertIn("in the clear", line.text)
+        path.unlink()
+        wallets.save(keys, path, None, store=True)
+        self.assertEqual(selftest.wallet_address()[2], "store")
+        rep = selftest.Report(out=io.StringIO())
+        selftest.wallet(rep, mock.Mock(account=None, status=None), path, keys.address, "store")
+        line = next(c for c in rep.checks if c.name == "wallet")
+        self.assertEqual(line.status, "ok")
+        self.assertIn("credential store", line.text)
+
     def test_a_cpu_computer_against_a_node(self):
         node, api, req, *_ = start_network(self, 0)
         keys = KeyPair.generate(b"newcomer")

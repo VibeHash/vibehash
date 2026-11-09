@@ -73,6 +73,13 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertNotIn("never shown", json.dumps(body))  # nothing of the keys
 
+    def test_a_job_the_worker_is_not_taking_is_named(self):
+        body, _ = self.get("/")
+        self.assertIsNone(body["workers"][0]["skipped"])
+        self.client.stats.skipped = TrainingJob("big-one", "vibe1req", budget=SYN_PER_VIBE, fee_per_round=SYN_PER_VIBE)
+        body, _ = self.get("/")
+        self.assertEqual(body["workers"][0]["skipped"], {"id": "big-one", "kind": "mlp"})
+
     def test_the_account_is_asked_once_in_a_while_and_kept_when_the_node_is_away(self):
         self.get("/")
         self.get("/")

@@ -30,9 +30,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .crypto import h256, merkle_proof, merkle_root
-from .model import PRECISIONS
-from .shards import KINDS, _close, proves, tensor_hash
+from vibehash.crypto import h256, merkle_proof, merkle_root
+from vibehash.model import PRECISIONS
+from vibehash.shards import KINDS, _close, proves, tensor_hash
 
 # How far, in the router's logits, a committed choice may lose to an expert it left out: no left-out expert may beat a
 # chosen one by more than this. Logits are log-scores up to a per-token constant, so this is a relative margin on the

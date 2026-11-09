@@ -11,14 +11,14 @@ from collections import defaultdict
 
 import numpy as np
 
-from . import shards as sh
-from .coordinator import CellTask, Coordinator, CoordinatorConfig, RoundReport
-from .crypto import KeyPair
-from .ledger import SYSTEM, Chain, Tx
-from .blobs import array_id
-from .tasks import Reveal, TrainingJob
-from .wire import blob_openings_out, seal
-from .worker import Worker
+from vibehash import shards as sh
+from vibehash.coordinator import CellTask, Coordinator, CoordinatorConfig, RoundReport
+from vibehash.crypto import KeyPair
+from vibehash.ledger import SYSTEM, Chain, Tx
+from vibehash.blobs import array_id
+from vibehash.tasks import Reveal, TrainingJob
+from vibehash.wire import blob_openings_out, seal
+from vibehash.worker import Worker
 
 
 class Checkpoints:
@@ -164,10 +164,10 @@ class Protocol:
     def _play_disputes(self, job: TrainingJob) -> None:
         """Each dispute's parties make their moves (tracer.Party) until every dispute is over or waits on a party
         that won't move (a "quitter" challenger); those it settles (Coordinator._settle_finetune)."""
-        from . import finetune
-        from .program import Program
-        from .tracer import Party
-        from .worker import tamper
+        from vibehash import finetune
+        from vibehash.program import Program
+        from vibehash.tracer import Party
+        from vibehash.worker import tamper
 
         c = self.coord
         remote = _Blobs(c)

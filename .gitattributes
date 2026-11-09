@@ -1,3 +1,6 @@
 # The BIP39 word list is checked against its published SHA-256: keep its bytes exactly as fetched.
 vibehash/data/bip39-english.txt -text
 *.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+*.path text eol=lf

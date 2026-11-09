@@ -1,0 +1,9 @@
+# Installed by setup-node.sh as vibehash-alert-NAME@.service for a named node (vibehash-alert@.service for the main one).
+# Another unit's OnFailure= starts it with that unit's name as the instance (%i); alert.sh posts the name and the unit's
+# last log lines to ALERT_WEBHOOK in @ETC@/env. It runs as root, which can read the journal and that file.
+[Unit]
+Description=Alert that %i failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/vibehash/alert.sh @NAMEARG@ %i

@@ -3,7 +3,7 @@
 Run a node: serve the chain to workers, and validate if its wallet is a validator.
 
 ```
-vibehash node [-h] --genesis GENESIS --wallet WALLET --data-dir DATA_DIR [--host HOST] [--port PORT] [--peer URL] [--announce URL] [--dataset DATASET] [--device DEVICE] [--keep-rounds KEEP_ROUNDS] [--max-job-mb MB] [--register-s SECONDS] [--compute-s SECONDS] [--reveal-s SECONDS] [--verify-s SECONDS] [--min-fee MIN_FEE] [--rate-limit SPEC] [--rate-limit-local] [--max-connections MAX_CONNECTIONS] [--min-client VERSION] [--admin-token TOKEN] [--admin-mfa KEY] [--tls-cert FILE] [--tls-key FILE]
+vibehash node [-h] --genesis GENESIS --wallet WALLET --data-dir DATA_DIR [--host HOST] [--port PORT] [--peer URL] [--announce URL] [--onion ADDR.onion] [--model-access {public,owner}] [--dataset DATASET] [--device DEVICE] [--keep-rounds KEEP_ROUNDS] [--max-job-mb MB] [--register-s SECONDS] [--compute-s SECONDS] [--reveal-s SECONDS] [--verify-s SECONDS] [--min-fee MIN_FEE] [--rate-limit SPEC] [--rate-limit-local] [--max-connections MAX_CONNECTIONS] [--min-client VERSION] [--admin-token TOKEN] [--admin-mfa KEY] [--admin-allow-no-mfa] [--tls-cert FILE] [--tls-key FILE] [--tor] [--proxy URL] [--tor-mode {control-only,strict}]
 ```
 
 Flags:
@@ -15,6 +15,8 @@ Flags:
 - `--port PORT`: port to listen on (default 8545).
 - `--peer URL`: another node to sync from and gossip to (validators find each other from the chain anyway).
 - `--announce URL`: the address other nodes reach this one at, if not --host:--port.
+- `--onion ADDR.onion`: this node's Tor hidden-service address, shown in /status.
+- `--model-access {public,owner}`: who may download a job's weights from this node: public (anyone; the default), or owner (the job's owner and the validators, by a signed request; starter jobs and jobs whose spec says "public": true stay open). While public, the log says which requests owner would refuse.
 - `--dataset DATASET`: add an .npz dataset to this node's store.
 - `--device DEVICE`: where the node checks work its checkers didn't and scores each round: cpu (default), auto, cuda, xpu or mps. Fine-tunes want a GPU here (and PyTorch).
 - `--keep-rounds KEEP_ROUNDS`: rounds whose opened checkpoints stay downloadable, so anyone can re-run their checks (default 10).
@@ -30,8 +32,12 @@ Flags:
 - `--min-client VERSION`: the oldest Vibe Hash release whose workers may register (default 0.5.17); older ones are told to upgrade, as are releases before 0.5.17, which name no version and can't follow version 4 blocks.
 - `--admin-token TOKEN`: serve the operators' routes (/admin/*: hold and release jobs, the devices' addresses) to the admin app (`vibehash admin`) that sends this token, at least 24 characters (`vibehash admin --new-token` makes one); default $VIBEHASH_ADMIN_TOKEN; without one those routes don't exist.
 - `--admin-mfa KEY`: an authenticator app's key (`vibehash admin --new-mfa` makes one and says how to add it): the token then also needs the app's 6-digit code, for a sign-in that lasts 12 hours; default $VIBEHASH_ADMIN_MFA.
+- `--admin-allow-no-mfa`: UNSAFE: serve the admin routes on a --host other than this computer's with the token alone. Without --admin-mfa such a node refuses to start; this is for test rigs only.
 - `--tls-cert FILE`: serve HTTPS with this PEM certificate (see `tls cert`).
 - `--tls-key FILE`: the certificate's private key.
+- `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
+- `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
+- `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).
 
 Examples:
 

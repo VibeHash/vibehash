@@ -3,7 +3,7 @@
 Check this computer is ready to mine: a real training test, its GPUs, the node, the clock, disk space, and what it can take.
 
 ```
-vibehash selftest [-h] [--node NODE] [--device DEVICE] [--model NAME] [--yes] [--offline] [--json]
+vibehash selftest [-h] [--node NODE] [--device DEVICE] [--model NAME] [--yes] [--offline] [--json] [--tor] [--proxy URL] [--tor-mode {control-only,strict}]
 ```
 
 Flags:
@@ -14,6 +14,9 @@ Flags:
 - `--yes, -y`: don't ask before --model's download.
 - `--offline`: skip everything that goes online (node, PyPI, Hugging Face).
 - `--json`: machine-readable output: every check, what it can take, next.
+- `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
+- `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
+- `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).
 
 Examples:
 

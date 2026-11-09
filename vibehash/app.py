@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import secrets
 import shlex
 import signal
 import subprocess
@@ -50,7 +51,7 @@ HOLD_COOLDOWN_S = 60.0  # how long a reason to hold off must stay gone before th
 #                          flicking out of full screen, or a mouse nudged, mustn't reload the model each time
 LABEL = "org.vibehash.app"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"  # start at login under the launcher: a Run value, no console flash
-ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off")
+ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off", "restart")  # restart: the worker, to read new settings
 
 
 def app_dir() -> Path:
@@ -99,11 +100,11 @@ def take_order() -> str | None:
 
 # --- getting ready ------------------------------------------------------------------------------------------------
 
-def prepare(a, report=None) -> tuple[str, Path]:
+def prepare(a, report=None, on_words_seen=None) -> tuple[str, Path]:
     """Node, wallet and GPU support, without a question that can't be answered: -> (node url, wallet path).
     The same steps as `setup`, kept: a second run changes nothing. `report(step, fraction, **facts)`, if given,
     hears each step as it starts (the window shows it): node, wallet (with the wallet's address, file and words
-    file), gpu, ready."""
+    file), gpu, ready. `on_words_seen()` hears that a new wallet's recovery words were written down (serve_words)."""
     from . import cli, unattended
     from . import wallet as wallets
 
@@ -116,10 +117,24 @@ def prepare(a, report=None) -> tuple[str, Path]:
 
     report("wallet", 0.15)
     path = settings.wallet_path(getattr(a, "wallet", None)) or settings.default_wallet()
-    address, pw = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)))
-    words = unattended.words_file(address)
-    report("gpu", 0.3, wallet={"address": address, "path": str(path), "words_file": str(words) if words.exists() else None})
-    if pw is None and wallets.is_encrypted(path):
+    shown = not getattr(a, "no_window", False)  # a window will show a new wallet's words; with none they go to the file
+    address, pw, words = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)),
+                                           caller_shows_words=shown)
+    facts = {"address": address, "path": str(path), "words_pending": False}
+    held = False  # whether the words wait in the credential store (they then outlive this app), else in memory only
+    if words:  # a new wallet whose key is in the credential store: its words wait beside it until written down
+        held = hold_words(address, words)
+    elif shown and wallets.kind(path) == "store":  # a start after one that quit before the words were written down
+        held = pending_words(address)
+    if words or held:
+        token = secrets.token_urlsafe(32)
+        port = serve_words(None if held else words, token, on_seen=on_words_seen, address=address if held else None)
+        facts |= {"words_pending": True, "words_token": token, "words_port": port}
+    else:
+        words_file = unattended.words_file(address)  # a headless setup's file, or an old one
+        facts["words_file"] = str(words_file) if words_file.exists() else None
+    report("gpu", 0.3, wallet=facts)
+    if pw is None and wallets.kind(path) == "password":
         # The worker is a child process that unlocks the wallet itself: it reads $VIBEHASH_PASSWORD, so the password
         # asked for here (once, at a terminal) is handed to it that way, after a check that it opens the wallet.
         pw = cli.password(f"Password for {path}: ")
@@ -144,6 +159,159 @@ def prepare(a, report=None) -> tuple[str, Path]:
             settings.save(app_gpu_ready=True)
     report("ready", 0.95)
     return url, path
+
+
+# --- the recovery words, until they are written down ------------------------------------------------------------
+
+_words_once: str | None = None  # the words in this process's memory, only when the store couldn't hold them (never state.json, a log or a file)
+_words_address: str | None = None  # the wallet whose words wait in the credential store (credstore.WALLET_WORDS)
+_words_server = None
+_words_lock = threading.Lock()
+
+
+def hold_words(address: str, words: str) -> bool:
+    """Keep a new wallet's recovery words in the credential store beside its key (the same trust boundary; not a file
+    of ours), so a quit, crash or reboot before they are written down doesn't lose them: each start offers them again
+    until `seen`. -> whether the store took them; if not, they are held in this app's memory only, as said here."""
+    from . import credstore
+    try:
+        credstore.put(credstore.WALLET_WORDS, address, words)
+        return True
+    except credstore.Unavailable as e:
+        print(f"wallet: the credential store wouldn't keep the recovery words ({e}); they are held in this app's memory "
+              "only and are lost if the app stops before you write them down", flush=True)
+        return False
+
+
+def pending_words(address: str) -> bool:
+    """Whether a new wallet's recovery words still wait in the credential store (an earlier start quit before `seen`)."""
+    from . import credstore
+    try:
+        return credstore.get(credstore.WALLET_WORDS, address) is not None
+    except credstore.Unavailable as e:
+        print(f"wallet: can't ask the credential store whether recovery words are waiting ({e})", flush=True)
+        return False
+
+
+def _current_words() -> str | None:
+    """The words the listener serves now: from the credential store when they are held there, else from memory."""
+    with _words_lock:
+        words, address = _words_once, _words_address
+    if address is None:
+        return words
+    from . import credstore
+    try:
+        return credstore.get(credstore.WALLET_WORDS, address)
+    except credstore.Unavailable:
+        return None
+
+
+def serve_words(words: str | None, token: str, on_seen=None, address: str | None = None) -> int:
+    """Serve a new wallet's recovery words to the window on a loopback port of their own: `GET /wallet/words` ->
+    {"words": [...]} and `POST /wallet/words/seen` (the user ticked "I wrote them down"), which forgets them and calls
+    `on_seen()`; anything else is 404, the words' route too once they are forgotten (the listener then answers nothing
+    else and goes with the app, or with stop_words()). With `address`, the words are read from the credential store
+    on each GET (hold_words put them there) and `seen` deletes them there; without, `words` are held in this process's
+    memory (the store refused them). They stay until `seen`, not until the first GET or the app's exit, so a window
+    or an app that restarts before the tick shows them again. Exposure is the worker feed's own (watch.py): 127.0.0.1
+    only, a Host that isn't this computer's is refused (DNS rebinding) and so is an Origin that isn't (another
+    website's page). The window runs in another process, so it asks here, through state.json's `words_port` and
+    `words_token`; the state holds the port, the token and `words_pending`, never the words. Another user of this
+    computer can reach the port too, so both routes also need the token (header X-Words-Token, compared in constant
+    time): state.json is in this user's own folder, which they can't read. -> the port."""
+    global _words_once, _words_address, _words_server
+    import hmac
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from .watch import local_host, local_origin
+    stop_words()
+    with _words_lock:
+        _words_once, _words_address = (None, address) if address is not None else (words, None)
+
+    class Handler(BaseHTTPRequestHandler):
+        def _allowed(self) -> bool:
+            if not local_host(self.headers.get("Host", "")):
+                self.send_error(403, "this answers to 127.0.0.1 and localhost only")
+                return False
+            origin = self.headers.get("Origin")
+            if origin is not None and not local_origin(origin):
+                self.send_error(403, "not from this computer's pages")
+                return False
+            if not hmac.compare_digest(self.headers.get("X-Words-Token", "").encode(), token.encode()):
+                self.send_error(403, "this needs the token the app left in its state")
+                return False
+            return True
+
+        def _json(self, body: dict) -> None:
+            data = json.dumps(body).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):  # noqa: N802
+            if not self._allowed():
+                return
+            words = _current_words() if self.path == "/wallet/words" else None
+            if words is not None:
+                self._json({"words": words.split()})
+            else:
+                self.send_error(404)
+
+        def do_POST(self):  # noqa: N802
+            if not self._allowed():
+                return
+            if self.path != "/wallet/words/seen":
+                self.send_error(404)
+                return
+            forget_words()
+            if on_seen:
+                on_seen()
+            self._json({"ok": True})
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True, name="words").start()
+    _words_server = server
+    return server.server_address[1]
+
+
+def forget_words() -> None:
+    """The words were written down: delete them from the credential store, if held there, and from memory."""
+    global _words_address
+    with _words_lock:
+        address, _words_address = _words_address, None
+    if address is not None:
+        from . import credstore
+        try:
+            credstore.delete(credstore.WALLET_WORDS, address)
+        except credstore.Unavailable as e:
+            print(f"wallet: the credential store wouldn't forget the recovery words ({e}); the next start offers them "
+                  "again", flush=True)
+    clear_words()
+
+
+def clear_words() -> None:
+    """Forget the words in this process (memory, and which store entry it serves); the store entry itself stays."""
+    global _words_once, _words_address
+    with _words_lock:
+        _words_once = _words_address = None
+
+
+def stop_words() -> None:
+    """Stop serving the words (the app's exit, or a second wallet's words replacing these). Words held in the
+    credential store stay there for the next start; words held in memory only are gone."""
+    global _words_server
+    clear_words()
+    server, _words_server = _words_server, None
+    if server is not None:
+        server.shutdown()
+        server.server_close()
 
 
 # --- running the worker --------------------------------------------------------------------------------------------
@@ -281,6 +449,12 @@ class Supervisor:
         self.say(f"setup: {step}")
         self.write_state(time.time())
 
+    def words_seen(self) -> None:
+        """The user ticked "I wrote them down": the state no longer says the words are waiting, or where."""
+        if self.wallet:
+            self.wallet = {k: v for k, v in self.wallet.items() if k not in ("words_port", "words_token")} | {"words_pending": False}
+        self.write_state(time.time())
+
     def beat_while_preparing(self) -> None:
         """A heartbeat through setup (minutes, when PyTorch is installed), so `app status` and a second `app` know
         this one is alive; run() takes over."""
@@ -314,6 +488,9 @@ class Supervisor:
             self.paused = False
             self.next_start = 0.0
             self.say("resumed")
+        elif word == "restart" and self.worker_alive():  # a setting the worker reads as it starts (deepseek) changed
+            self.stop_worker("restarting with new settings")
+            self.next_start = 0.0
         self.update_hold(now)
         if self.held and self.worker_alive():
             self.stop_worker(f"held off: {self.held}")
@@ -400,7 +577,10 @@ class Supervisor:
                      "held": self.held}
             try:
                 tmp = state_path().with_suffix(".tmp")
-                tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
+                tmp.unlink(missing_ok=True)  # (a leftover's permissions would be kept)
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # this user only, where the OS honours it
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(state, indent=1))
                 os.replace(tmp, state_path())
             except OSError:
                 pass
@@ -625,9 +805,10 @@ def main(a) -> None:
         sup.start_companions()  # the window first, so setup (minutes, the first time) is watched, not waited for blind
         sup.beat_while_preparing()
         try:
-            url, wallet = prepare(a, report=sup.report)
+            url, wallet = prepare(a, report=sup.report, on_words_seen=sup.words_seen)
         except BaseException as e:
             sup._beating.set()
+            stop_words()
             why = str(e) if isinstance(e, (SystemExit, Exception)) and str(e) else type(e).__name__
             sup.setup = {"step": "failed", "fraction": 0.0, "why": why[:400]}
             sup.write_state(time.time(), alive=False)
@@ -639,5 +820,8 @@ def main(a) -> None:
         page = f"http://127.0.0.1:{port}/dashboard"
         where = f"the window shows it (also at {page})" if not getattr(a, "no_window", False) else f"the dashboard is at {page}"
         print(f"mining; {where} and `vibehash app status` sums it up. Ctrl+C stops it.")
-        sup.run()
+        try:
+            sup.run()
+        finally:
+            stop_words()
         print("app stopped")

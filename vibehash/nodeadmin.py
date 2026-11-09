@@ -26,6 +26,12 @@ token is trying codes. A wrong token from the open internet can't lock an admin 
 proxy that holds only if the proxy sets X-Forwarded-For (`client_ip`): without it every client looks like the proxy,
 and anyone's wrong guesses lock everyone out.
 
+The three orders (hold, release, review) change what the network does, so on a node with an authenticator key each
+needs a fresh code on top of the sign-in (`check(..., fresh=True)`: X-Admin-Code, the app's code of now, taken once
+like a sign-in's, so not the one the sign-in just used). /admin/overview and the device list need only the sign-in.
+A node with no key has no code to ask for; one bound beyond this computer refuses to start without a key
+(`vibehash node`; --admin-allow-no-mfa for a test rig).
+
 A hold is this node's own policy, not a rule of the chain: the coordinator skips a held job when it picks what the
 next round trains (Coordinator.policy -> `reason`), and the job's budget stays in escrow untouched. Another validator
 that doesn't hold the job still leads rounds for it, so the admin app tells every node it knows. The holds and the
@@ -65,6 +71,8 @@ SESSION_S = 12 * 3600  # how long a sign-in with a code lasts
 MAX_SESSIONS = 16
 LOGIN_HEADER = "X-Admin-Login"
 NEED_CODE = "an authenticator code is needed: sign in with POST /admin/login"  # (the admin app looks for these words)
+CODE_HEADER = "X-Admin-Code"  # a fresh authenticator code, for operations on the server itself (check(fresh=True))
+NEED_FRESH = "this needs a fresh authenticator code"  # (the admin app looks for these words)
 MAX_FAILS = 10  # wrong tokens or codes from one address within the window: it is turned away for the rest of it
 FAIL_WINDOW_S = 900
 MAX_CODE_FAILS = 30  # wrong codes from anywhere within the window: codes are refused for the rest of it
@@ -179,24 +187,48 @@ class Admin:
     def enabled(self) -> bool:
         return bool(self.token)
 
-    def check(self, authorization: str | None, login: str | None = None, ip: str | None = None) -> None:
+    def check(self, authorization: str | None, login: str | None = None, ip: str | None = None,
+              code: str | None = None, fresh: bool = False) -> None:
         """A request for an admin route: KeyError (404) on a node with no token; TooMany (403) from an address with
         too many wrong tries lately; Forbidden (401) with the wrong token; NeedCode (401) when the node wants an
-        authenticator code and `login` (X-Admin-Login) is no sign-in of now."""
+        authenticator code and `login` (X-Admin-Login) is no sign-in of now. `fresh`: an operation on the server
+        itself, which also takes `code` (X-Admin-Code), the authenticator app's code of now, used once; Forbidden on a
+        node with no authenticator key, which can't ask for one."""
         self._token(authorization, ip)
         if self.mfa is None:
+            if fresh:
+                raise Forbidden(f"{NEED_FRESH}, and this node has no authenticator key: start it with --admin-mfa "
+                                "(`vibehash admin --new-mfa` makes one)")
             return
         with self.lock:
             ends = self.sessions.get(login or "")
             if ends is None or ends <= self.now():
                 self.sessions.pop(login or "", None)
                 raise NeedCode(NEED_CODE)
+        if fresh:
+            if not re.sub(r"\s", "", str(code or "")):
+                raise Forbidden(f"{NEED_FRESH} ({CODE_HEADER})")
+            self._take_code(code, ip)
 
     def login(self, authorization: str | None, code, ip: str | None = None) -> dict:
         """POST /admin/login: the token and the authenticator app's code of now give a sign-in for SESSION_S."""
         self._token(authorization, ip)
         if self.mfa is None:
             return {"ok": True, "mfa": False, "session": None, "expires": None}
+        self._take_code(code, ip)
+        with self.lock:
+            now = self.now()
+            session = secrets.token_urlsafe(32)
+            self.sessions = {s: t for s, t in self.sessions.items() if t > now}
+            while len(self.sessions) >= MAX_SESSIONS:  # the one ending soonest goes
+                del self.sessions[min(self.sessions, key=self.sessions.get)]
+            self.sessions[session] = now + SESSION_S
+        log.info("admin: signed in with a code from %s", ip or "?")
+        return {"ok": True, "mfa": True, "session": session, "expires": now + SESSION_S}
+
+    def _take_code(self, code, ip: str | None) -> None:
+        """The authenticator app's code of now (one step either side), taken once: Forbidden if it's wrong or used,
+        TooMany after too many wrong codes. A wrong one counts against its address and against codes as a whole."""
         code = re.sub(r"\s", "", str(code or ""))
         with self.lock:
             now = self.now()
@@ -218,13 +250,6 @@ class Admin:
                 log.warning("admin: a wrong authenticator code from %s, with the right token", ip or "?")
                 raise Forbidden("the authenticator code is wrong")
             self.last_code = taken
-            session = secrets.token_urlsafe(32)
-            self.sessions = {s: t for s, t in self.sessions.items() if t > now}
-            while len(self.sessions) >= MAX_SESSIONS:  # the one ending soonest goes
-                del self.sessions[min(self.sessions, key=self.sessions.get)]
-            self.sessions[session] = now + SESSION_S
-        log.info("admin: signed in with a code from %s", ip or "?")
-        return {"ok": True, "mfa": True, "session": session, "expires": now + SESSION_S}
 
     def _token(self, authorization: str | None, ip: str | None) -> None:
         if not self.enabled:
