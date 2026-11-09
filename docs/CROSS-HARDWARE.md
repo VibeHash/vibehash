@@ -147,3 +147,9 @@ default; `--npu-device-state` keeps the old path). The same round again:
 The worst gap is under half the cross margin (0.25), so step 3's condition holds again on this round. It still sits
 mostly in the 256-token answers (0.19, 0.07, 0.06), but much lower. The round answered faster, too: 236 s, against
 390 s with the state on the NPU, since the step hands back a small update instead of every layer's whole state.
+
+A second round, seed 9b1c2e7d40a3f615 (same sizes, 12 answers at the 256-token cap), with the state on the host: worst
+honest gap 0.153, p99 (answer) 0.116, false rejections 2 / 0 / 0 / 0 / 0, smallest cheat gap 4.51, no false
+acceptances. Over the two rounds (256 honest answers), the worst is 0.193. Still to measure: a CUDA bf16 checker
+(copy `answers-*.json.gz` to a CUDA machine and run `check`), the NPU as checker of others' work, and more rounds
+before an `npu` setup goes in `hardware.BACKENDS` as answer-only.
