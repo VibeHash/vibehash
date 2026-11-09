@@ -1,0 +1,18 @@
+{
+  // vibehash.org/watch's alerts and counts (worker.js). Deploy steps: README.md in this folder.
+  "name": "vibehash-watch",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "triggers": { "crons": ["* * * * *"] },
+  "routes": [{ "pattern": "watch-api.vibehash.org", "custom_domain": true }],
+  "vars": {
+    "NODE": "https://node.vibehash.org",
+    "VAPID_SUBJECT": "mailto:hello@vibehash.org",
+    // the public half of the push key pair keys.mjs makes (not a secret: every page that subscribes gets it)
+    "VAPID_PUBLIC": "REPLACE_WITH_THE_PUBLIC_KEY_FROM_keys.mjs"
+  },
+  "d1_databases": [
+    // the id from: npx wrangler d1 create vibehash-watch
+    { "binding": "DB", "database_name": "vibehash-watch", "database_id": "REPLACE_WITH_THE_DATABASE_ID" }
+  ]
+}

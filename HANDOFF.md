@@ -139,7 +139,47 @@ blind against the base model told the goal; `agents/README.md`, `tests/test_agen
 
 ## Current state
 
-**Unreleased (branch `evo-speed`, 2026-11-07): faster Evo rounds, and a job setting that caps the long tasks' answers
+**Unreleased (branch `evo-onepass`, 2026-11-08): the Evo engine's state update in one pass, the same bits, ~20-25%
+faster rounds; miners only, no rule change.** The owner asked where training's time goes. Measured:
+- **Live (vibe-08b-2, 63 rounds, blocks 440-502 on 11-07, node 0.5.19):** median round 275 s, of which ~144 s was the
+  node holding verify with every check in (0.5.27 ends phases early; nobody has mined since it went on the node).
+  The 4070's log: 4 units answered in 84 s, 4 checks 28 s, 5-6 checks ~80 s; offline the same work is ~53-61 s, so
+  ~23-30 s a live round is still unexplained (the worker log has no per-phase times).
+- **Every phase is engine steps of ~25 ms** (Qwen3.5-0.8B, 64-row pass; graph replay alone 25.0 ms, 26.3 in the
+  decode loop). Inside a step (torch.profiler): the recurrent state 13.7 ms (55%; bmm read 3.2, decay mul_ 4.6,
+  baddbmm_ write 5.9: 1.15 GB of float32 state, five passes, near the memory's speed), matrix products 5.7 (23%), small
+  elementwise ops 4.2 (17%), full attention 1.4 (6%).
+- **The change:** `es_hybrid.decay_write` does the decay and the write in one pass, fma(k_i, delta_j, S_ij * d), which
+  is how cuBLAS's K=1 product rounds `baddbmm_` here (a multiply then an add differs in ~4% of numbers). Compiled at
+  run time by the NVRTC inside PyTorch's CUDA wheels (`_build_onepass`; torch.cuda._compile_kernel needs CUDA_HOME, so
+  not that), and used only after `onepass_for` has checked it against the two passes at the engine's own shape on that
+  GPU (a quarter of the test states subnormal); anything else (CPU, Intel, ROCm, a build or bit failure) keeps the
+  two passes and logs why. So a machine's numbers are what they were, old and new clients mix freely, no job changes.
+  `es_hybrid.ONEPASS = False` turns it off.
+- **Checked on the 4070 with vibe-08b-2's saved line**, 64 members and 4 claims' checks, off then on: every answer
+  token-for-token (58,568 tokens; with and without the vibe caps), replay log-probabilities, check gaps and check
+  replay bit for bit. Times off -> on: answering (caps) 25.0 -> 19.7 s, (no caps) 29.1 -> 22.2, replay 22.8 -> 17.6,
+  checks 26.7 -> 20.1. The 18 layers' update 11.6 -> 5.8 ms a step. Tests: `tests/test_es_hybrid.py` OnePassTests
+  (CUDA only), and test_es_hybrid, test_task_tokens, test_loop_stop, test_evo_selftest all pass on the 4070.
+- Not checked: another kind of GPU (onepass_for decides there: at worst it keeps the two passes).
+- Also on the owner's mining stack (system Python 3.14, torch 2.15.0+cu132): the kernel builds, matches, answering
+  27.3 -> 20.7 s. The Evo dashboard costs 0.6 ms a frame and slows decoding not at all; engine builds and graph
+  captures are under 1 s a round, shared prompt readings ~0.7 s, the host ~0.9 ms a step, apply_round 1.8 s, a line's
+  save 1.2 s every 8 rounds, a node request ~0.2 s. After the one-pass a step is 18.6 ms: matrix products ~5.6, small
+  elementwise 4.3, the update 4.3, the state read 3.3, attention 1.4.
+- **Checks in bigger groups (client.ES_CHECK_BATCH 4 -> 16).** A check runs as long as its longest answer and replay
+  target however few rows it has: 4 claims 17.5 s, 8 and 12 claims 18.9 s, each member's gaps and log-probabilities
+  the same bits in any group. A checker given 5 to 8 claims paid for two groups; now one.
+- **Each part of an Evo round timed (es_client._Laps).** The answering line now ends with its parts, like "answered 4
+  Evo units (64 members) in 41 s: catching up 1.8 s, noise 1.3 s, loading weights 0.3 s, answering 20.7 s, replay
+  17.0 s, uploads 0.4 s" (an illustration from the offline timings; parts under 0.05 s go unsaid), a new line per check group says the same of checks (fetching answers, teacher forcing,
+  replay...), and rounds.jsonl has them as evo_s and evo_check_s. The live rounds' ~20 s a round over the offline
+  profile wasn't the dashboard, the torch version, the network or engine builds: the next live run's lines will say.
+  Tests: test_es2 LapsTests and NetworkTests2.test_a_rounds_evo_work_is_timed_part_by_part.
+- Next: the bmm read (3.2 ms) can't join the pass without changing a reduction's order (a rule change); the 23% of
+  small ops would fuse with Triton, which Windows lacks; a replay_tokens cap (a rule change, a quality run first).
+
+**Merged (PR #68, branch `evo-speed`, 2026-11-07): faster Evo rounds, and a job setting that caps the long tasks' answers
 (`task_tokens`).** The owner asked why training is slow and to cut the math and work on the engine. A worker's round
 on vibe-08b-2's line, profiled offline on the RTX 4070 SUPER (64 members x 16 problems, 4 units; 4 claims checked):
 answering 27.6 s, scoring the members on the 16 replay targets 28.7 s, making the round's noise 4.7 s, and per 4

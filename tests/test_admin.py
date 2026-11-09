@@ -695,6 +695,29 @@ class AdminAppTests(unittest.TestCase):
             links = admin.links_from(cfg, ["http://c:1"])  # the environment's token goes to the node named, never to a saved one without
             self.assertEqual([(l.url, l.token) for l in links], [("http://c:1", "env"), ("http://a:1", "ta"), ("http://b:1", None)])
 
+    def test_the_page_opens_the_docs_by_name_only(self):
+        port = self.app.serve(0)
+        self.addCleanup(self.app.stop)
+
+        def post(body, session):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/open", data=json.dumps(body).encode(), method="POST",
+                                         headers={"X-Admin-Session": session})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+
+        opened = []
+        with mock.patch.object(admin, "OPEN", side_effect=opened.append):
+            self.assertEqual(post({"name": "docs"}, self.app.session), (200, {"ok": True, "url": admin.LINKS["docs"]}))
+            for bad in ("https://evil.example", "javascript:alert(1)", None, ["docs"]):
+                self.assertEqual(post({"name": bad}, self.app.session)[0], 400, bad)
+            self.assertEqual(post({"name": "docs"}, "wrong")[0], 403)  # only this page's session
+        self.assertEqual(opened, [admin.LINKS["docs"]])
+        self.assertTrue(all(u.startswith("https://docs.vibehash.org") for u in admin.LINKS.values()))
+        self.assertIn('id="open-docs"', admin.PAGE.read_text(encoding="utf-8"))
+
     def test_the_server_serves_the_page_and_guards_the_api_with_the_session(self):
         port = self.app.serve(0)
         self.addCleanup(self.app.stop)

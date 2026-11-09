@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vibe Hash for business: a model from one sentence</title>
+<meta name="description" content="Describe what a model should do in one sentence. Agents write the training data, Vibe Hash trains it, a blind judge tests it against the base model, and you try it before you take it.">
+<link rel="canonical" href="https://vibehash.org/agents/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://vibehash.org/agents/">
+<meta property="og:title" content="Vibe Hash for business: a model from one sentence">
+<meta property="og:description" content="Describe it in a sentence; the network trains it; a blind judge tests it; you try it first.">
+<meta property="og:image" content="https://vibehash.org/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 3 4'%3E%3Cpath fill='%23f1b23c' d='M0 0h1v3H0zM2 0h1v3H2zM1 3h1v1H1z'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,500..800&family=JetBrains+Mono:wght@400;600&family=Source+Sans+3:wght@400;600;700&display=swap">
+<style>
+/* /agents/: the business side of vibehash.org. The front page's dark band with the pitch, then how it works, what it
+   has shown (including what failed), and the request: the form, its progress, the result and a blind chat with it.
+   The request part talks to the fine-tune queue (API below), a Cloudflare Worker that a GPU machine takes work from.
+   Everything the queue sends goes onto the page as text (textContent), never as markup. */
+:root {
+  --paper: #ffffff; --stone: #f4f3f0; --ink: #1d1b19; --ink-2: #5b554e; --rule: #e3dfd9;
+  --gold: #995a05; --gold-wash: #f6ead5; --good: #2c7836; --good-wash: #e2f0e3; --bad: #b3261e; --bad-wash: #f8e1de;
+  --band: #151311; --band-ink: #eeebe6; --band-ink-2: #a39c93; --band-rule: #2b2824; --term: #0c0b0a;
+  --signal: #f1b23c; --on-signal: #1d1406; --violet: #7a3fd0;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Source Sans 3", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #121110; --stone: #1b1917; --ink: #ebe7e1; --ink-2: #a9a299; --rule: #2d2a26;
+    --gold: #efb041; --gold-wash: #322510; --good: #80cf88; --good-wash: #15301a; --bad: #f28b7d; --bad-wash: #3a1a17;
+    --band: #0b0a09; --band-rule: #25221f; --term: #070606; --violet: #b46eff; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #121110; --stone: #1b1917; --ink: #ebe7e1; --ink-2: #a9a299; --rule: #2d2a26;
+  --gold: #efb041; --gold-wash: #322510; --good: #80cf88; --good-wash: #15301a; --bad: #f28b7d; --bad-wash: #3a1a17;
+  --band: #0b0a09; --band-rule: #25221f; --term: #070606; --violet: #b46eff; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 17px/1.6 var(--font-body); -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; }
+@media (min-width: 720px) { .wrap { padding-inline: 32px; } }
+h1, h2, h3 { font-family: var(--font-display); margin: 0; text-wrap: balance; }
+h2 { font-size: 1.7rem; font-weight: 700; font-stretch: 108%; letter-spacing: -0.015em; line-height: 1.15; }
+h3 { font-size: 1.1rem; font-weight: 650; font-stretch: 104%; }
+p { margin: 0; }
+a { color: var(--gold); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 3px; }
+.num { font-variant-numeric: tabular-nums; }
+.quiet { color: var(--ink-2); }
+.small { font-size: 0.92rem; }
+.eyebrow { font: 600 0.74rem var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--gold); }
+
+/* the band */
+.band { background: radial-gradient(60% 80% at 82% 55%, rgb(180 110 255 / 0.07), transparent 70%), radial-gradient(40% 60% at 70% 40%, rgb(255 150 70 / 0.05), transparent 70%), var(--band); color: var(--band-ink); }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 16px; border-bottom: 1px solid var(--band-rule); }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--band-ink); text-decoration: none; }
+.brand svg { width: 15px; height: 20px; color: var(--signal); }
+.brand b { font: 720 1.12rem var(--font-display); font-stretch: 115%; }
+.tag { font: 500 0.7rem var(--font-mono); letter-spacing: 0.07em; text-transform: uppercase; color: var(--band-ink-2); border: 1px solid var(--band-rule); border-radius: 4px; padding: 2px 7px; }
+.topnav { display: flex; gap: 22px; }
+.topnav a { color: var(--band-ink-2); text-decoration: none; }
+.topnav a:hover, .topnav a[aria-current="page"] { color: var(--band-ink); }
+@media (max-width: 560px) { .topnav a.optional { display: none; } .tag { display: none; } }
+.hero-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 36px; align-items: center; padding-block: 52px 60px; }
+@media (min-width: 980px) { .hero-wrap { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 56px; } }
+.hero { display: grid; gap: 20px; max-width: 44rem; }
+.hero h1 { font-size: clamp(2.2rem, 5.6vw, 3.6rem); font-weight: 770; font-stretch: 110%; line-height: 1.03; letter-spacing: -0.03em; }
+.hero h1 em { font-style: normal; color: var(--signal); }
+.lede { font-size: 1.15rem; color: var(--band-ink-2); max-width: 38rem; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.go { display: inline-block; font: 700 1rem var(--font-body); color: var(--on-signal); background: var(--signal); border: 0; border-radius: 8px; padding: 11px 20px; text-decoration: none; cursor: pointer; }
+.go:hover { filter: brightness(1.06); }
+.go[disabled] { opacity: 0.5; cursor: default; filter: none; }
+.ghost { color: var(--band-ink); }
+/* the hero's example: one goal and what the fine-tune answered */
+.sample { margin: 0; border: 1px solid var(--band-rule); border-radius: 16px; background: var(--term); padding: 20px; display: grid; gap: 12px; font-size: 0.95rem; }
+.sample .k { font: 600 0.72rem var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--band-ink-2); }
+.sample .goal { font: 650 1.05rem var(--font-display); color: var(--band-ink); }
+.sample pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 0.84rem/1.5 var(--font-mono); color: var(--band-ink); background: #000; border: 1px solid var(--band-rule); border-radius: 10px; padding: 12px; }
+.sample .msg { color: var(--band-ink-2); }
+.sample .score { display: flex; gap: 10px; align-items: baseline; color: var(--band-ink-2); }
+.sample .score b { font: 760 1.6rem var(--font-display); color: var(--signal); font-variant-numeric: tabular-nums; }
+
+main section { padding-block: 56px 0; display: grid; gap: 18px; }
+.intro { max-width: 46rem; display: grid; gap: 8px; }
+.intro p { color: var(--ink-2); }
+
+/* how it works: a real sequence, so numbered */
+.steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 900px) { .steps { grid-template-columns: minmax(0, 1fr); } }
+.steps li { border-top: 2px solid var(--signal); padding-top: 12px; display: grid; gap: 4px; align-content: start; }
+.steps .n { font: 600 0.74rem var(--font-mono); color: var(--gold); letter-spacing: 0.06em; }
+.steps p { color: var(--ink-2); font-size: 0.94rem; }
+
+/* results */
+.results { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.res { border: 1px solid var(--rule); border-radius: 12px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; background: var(--paper); min-width: 0; }
+.res .big { font: 760 1.9rem/1 var(--font-display); font-variant-numeric: tabular-nums; }
+.res .big small { font: 600 0.9rem var(--font-body); color: var(--ink-2); margin-left: 6px; }
+.res p { color: var(--ink-2); font-size: 0.93rem; }
+.pill { justify-self: start; font: 600 0.7rem var(--font-mono); letter-spacing: 0.05em; text-transform: uppercase; border-radius: 99px; padding: 2px 9px; }
+.pill.good { color: var(--good); background: var(--good-wash); }
+.pill.wait { color: var(--gold); background: var(--gold-wash); }
+.pill.bad { color: var(--bad); background: var(--bad-wash); }
+.fit { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.fit div { background: var(--stone); border-radius: 12px; padding: 16px 18px; display: grid; gap: 6px; }
+.fit ul { margin: 0; padding-left: 18px; color: var(--ink-2); display: grid; gap: 4px; }
+
+/* the request */
+.desk { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 900px) { .desk { grid-template-columns: minmax(0, 1fr); } }
+.card { border: 1px solid var(--rule); border-radius: 14px; padding: 20px; display: grid; gap: 14px; background: var(--paper); min-width: 0; }
+form.card label, .lab { font-weight: 700; }
+textarea, input[type="text"], input[type="password"] { width: 100%; font: 1rem var(--font-body); color: var(--ink); background: var(--stone); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; }
+textarea { min-height: 96px; resize: vertical; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.between { justify-content: space-between; }
+.chip { font: 600 0.85rem var(--font-body); color: var(--ink); background: var(--stone); border: 1px solid var(--rule); border-radius: 99px; padding: 4px 12px; cursor: pointer; }
+.chip:hover { border-color: var(--ink-2); }
+.levels { display: grid; gap: 8px; border: 0; margin: 0; padding: 0; }
+.levels legend { font-weight: 700; margin-bottom: 6px; padding: 0; }
+.level { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+.level:has(input:checked) { border-color: var(--gold); background: var(--gold-wash); }
+.level input { grid-row: span 2; margin-top: 4px; accent-color: var(--gold); }
+form.card label.level { font-weight: 400; }
+.level span { color: var(--ink-2); font-size: 0.92rem; }
+.status { display: flex; align-items: center; gap: 8px; font-size: 0.92rem; color: var(--ink-2); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-2); flex: none; }
+.dot.on { background: var(--good); }
+.err { color: var(--bad); font-size: 0.95rem; min-height: 1.4em; }
+.note { background: var(--stone); border-radius: 10px; padding: 12px 14px; font-size: 0.93rem; color: var(--ink-2); }
+.note b { color: var(--ink); }
+
+.track { display: grid; gap: 12px; }
+.stages { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.stages li { font-size: 0.85rem; padding: 3px 12px; border-radius: 99px; border: 1px solid var(--rule); color: var(--ink-2); }
+.stages li.past { color: var(--good); background: var(--good-wash); border-color: transparent; }
+.stages li.now { color: var(--gold); background: var(--gold-wash); border-color: transparent; font-weight: 700; }
+.stages li.fail { color: var(--bad); background: var(--bad-wash); border-color: transparent; font-weight: 700; }
+.log { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 0.9rem; color: var(--ink-2); max-height: 220px; overflow-y: auto; }
+.log li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
+.log time { font: 0.78rem var(--font-mono); color: var(--ink-2); opacity: 0.8; padding-top: 2px; }
+.log span { overflow-wrap: anywhere; }
+.verdict { display: grid; gap: 6px; }
+.bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--rule); }
+.bar i { display: block; height: 100%; }
+.bar .w { background: var(--good); } .bar .t { background: var(--ink-2); opacity: 0.5; } .bar .l { background: var(--bad); }
+.mine { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.mine button { all: unset; cursor: pointer; display: grid; gap: 2px; width: 100%; box-sizing: border-box; border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px; }
+.mine button:hover, .mine button[aria-current="true"] { border-color: var(--gold); }
+.mine b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.mine span { font-size: 0.82rem; color: var(--ink-2); }
+
+.chat { display: grid; gap: 12px; }
+.ab { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 640px) { .ab { grid-template-columns: minmax(0, 1fr); } }
+.reply { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.reply .who { font: 600 0.74rem var(--font-mono); letter-spacing: 0.06em; color: var(--ink-2); }
+.reply .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.95rem; }
+.reply.tuned { border-color: var(--good); }
+.btn { font: 600 0.9rem var(--font-body); color: var(--ink); background: var(--stone); border: 1px solid var(--rule); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+.btn:hover { border-color: var(--ink-2); }
+.btn[disabled] { opacity: 0.5; cursor: default; }
+
+footer { margin-top: 72px; border-top: 1px solid var(--rule); }
+footer .wrap { padding-block: 24px 40px; display: grid; gap: 10px; font-size: 0.9rem; color: var(--ink-2); }
+footer .cols { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 32px; align-items: baseline; }
+footer .mark { display: inline-flex; align-items: center; gap: 8px; font: 700 1rem var(--font-display); color: var(--ink); }
+footer .mark svg { width: 12px; height: 16px; color: var(--signal); }
+footer nav { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+</style>
+</head>
+<body>
+<header class="band">
+  <div class="wrap">
+    <div class="topbar">
+      <a class="brand" href="/" aria-label="Vibe Hash home">
+        <svg viewBox="0 0 3 4" aria-hidden="true"><path fill="currentColor" d="M0 0h1v3H0zM2 0h1v3H2zM1 3h1v1H1z"/></svg>
+        <b>Vibe Hash</b><span class="tag">For business</span>
+      </a>
+      <nav class="topnav" aria-label="Site">
+        <a class="optional" href="/">Mining</a><a href="#request">Request a model</a><a href="https://docs.vibehash.org/training">Docs</a><a class="optional" href="/guide/">Guide</a>
+      </nav>
+    </div>
+    <div class="hero-wrap">
+      <div class="hero">
+        <div class="eyebrow">Free pilot</div>
+        <h1>A model that does one job, from <em>one sentence</em></h1>
+        <p class="lede">Say what you need, like "turn support tickets into one line of JSON". Our agents write the training data, the network trains a small model for it, and a blind judge tests it against the same model just told your goal. You try it before you take it.</p>
+        <div class="cta"><a class="go" href="#request">Request a model</a><a class="ghost" href="https://results.luhlabs.com">Read every answer from past runs</a></div>
+      </div>
+      <figure class="sample" aria-label="An example: a goal and the fine-tune's answer">
+        <span class="k">Goal</span>
+        <div class="goal">Parse messy customer support messages into one line of JSON with exactly four keys.</div>
+        <span class="k">A test message it never saw</span>
+        <div class="msg">"My subscription was cancelled but I was still charged $49, very annoyed, need refund now"</div>
+        <span class="k">What the fine-tune answered</span>
+        <pre>{"category":"billing","urgency":"high","sentiment":"frustrated","action_summary":"Refund cancelled subscription charge"}</pre>
+        <div class="score"><b>19/20</b><span>tests won against the base model told the goal, none lost</span></div>
+      </figure>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section aria-labelledby="how-h">
+    <div class="intro"><h2 id="how-h">How it works</h2><p>Five stages, all of which you can watch from this page. A run takes about an hour on today's GPU.</p></div>
+    <ol class="steps">
+      <li><span class="n">1 · YOUR GOAL</span><h3>One sentence</h3><p>What the model should do, and how hard it should try before it's yours: quick, standard or strict.</p></li>
+      <li><span class="n">2 · PLAN</span><h3>The Job Architect</h3><p>Checks the goal is something a small model can learn, then writes the training chats and test prompts it keeps hidden.</p></li>
+      <li><span class="n">3 · TRAIN</span><h3>A fine-tune</h3><p>A LoRA add-on for Qwen3 0.6B, a small model that runs fast and cheap. Training moves onto Vibe Hash's miners next.</p></li>
+      <li><span class="n">4 · JUDGE</span><h3>The Quality Judge</h3><p>Compares your model with the base model told your goal, blind and in both orders. Below the bar, it repairs and tries again.</p></li>
+      <li><span class="n">5 · TRY IT</span><h3>A blind chat</h3><p>Ask both models anything. You see two answers, A and B, pick the better one, then learn which was yours.</p></li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="res-h">
+    <div class="intro"><h2 id="res-h">What it has shown</h2><p>Four runs from the first public trial, on one RTX 4060 with Qwen3 0.6B as the base. All of them are here, including the one that failed. Every answer is on <a href="https://results.luhlabs.com">results.luhlabs.com</a>.</p></div>
+    <div class="results">
+      <div class="res"><span class="pill good">Reached the bar</span><h3>Support tickets → one line of JSON</h3><div class="big num">19/20<small>won, none lost</small></div><p>81% of replies passed every format rule, against 3% for the model told the goal. It used 53% fewer prompt tokens and answered in 1.8 s instead of 3.4 s.</p></div>
+      <div class="res"><span class="pill wait">Short of its bar</span><h3>Plain English → one Excel formula</h3><div class="big num">11/19<small>won, 8 ties, none lost</small></div><p>94% of replies passed the format rules, against 55%. The ties are short requests where both models wrote the same formula.</p></div>
+      <div class="res"><span class="pill good">Quick level</span><h3>Only woofs and barks</h3><div class="big num">14/20<small>won, 5 ties, 1 lost</small></div><p>Taught from a chat message. A second judge, a different model, read the same pairs and gave it 18 of 20.</p></div>
+      <div class="res"><span class="pill bad">Didn't work</span><h3>Talk like Mark Twain, reason like Plato</h3><div class="big num">5/18<small>stopped</small></div><p>A small model learns a format well and a voice that needs reasoning badly. The Architect now warns about goals like this before any training.</p></div>
+    </div>
+    <div class="fit">
+      <div><h3>Good fits</h3><ul><li>A fixed output format: JSON, one formula, one line, two sentences</li><li>Sorting or labelling text into categories you name</li><li>Politely declining anything that isn't its job</li><li>Replacing a long prompt you send with every request</li></ul></div>
+      <div><h3>Poor fits, for now</h3><ul><li>A writing voice that needs real reasoning</li><li>Wordplay and puns</li><li>Facts the base model doesn't already know</li><li>Anything that needs a large model's judgment</li></ul></div>
+    </div>
+  </section>
+
+  <section id="request" aria-labelledby="req-h">
+    <div class="intro"><h2 id="req-h">Request a model</h2><p>The pilot is free while it runs on our own GPU. It needs an access code: ask us for one at <b class="num" id="contact">hello@vibehash.org</b>.</p></div>
+    <div class="desk">
+      <form class="card" id="form" novalidate>
+        <div class="row between"><label for="goal">What should the model do?</label><span class="quiet small num" id="count">0 / 500</span></div>
+        <textarea id="goal" maxlength="500" placeholder="Answer customer-support questions in two friendly sentences" required></textarea>
+        <div class="row" role="group" aria-label="Example goals">
+          <button class="chip" type="button" data-goal="Turn a support ticket into one line of JSON with category, urgency, sentiment and a short summary">Tickets to JSON</button>
+          <button class="chip" type="button" data-goal="Turn a plain-English request into one Excel formula and nothing else">Excel formulas</button>
+          <button class="chip" type="button" data-goal="Answer customer-support questions in two friendly sentences">Two-sentence support</button>
+        </div>
+        <fieldset class="levels">
+          <legend>How hard it should try</legend>
+          <label class="level"><input type="radio" name="level" value="quick" id="level-quick"><b>Quick</b><span>One round of training, yours as it comes out, whatever the judge says.</span></label>
+          <label class="level"><input type="radio" name="level" value="standard" id="level-standard" checked><b>Standard</b><span>Up to 2 repair rounds, until it beats the base model told the goal on 80% of tests.</span></label>
+          <label class="level"><input type="radio" name="level" value="strict" id="level-strict"><b>Strict</b><span>Up to 4 repair rounds, and it must keep its style on long, demanding prompts. Slowest.</span></label>
+        </fieldset>
+        <label for="code">Access code</label>
+        <input type="password" id="code" autocomplete="off" placeholder="From the Vibe Hash team">
+        <div class="row between"><button class="go" type="submit" id="send">Request a model</button><span class="status" id="queue"><span class="dot" id="queue-dot"></span><span id="queue-text">Checking the GPU…</span></span></div>
+        <div class="err" id="form-err" role="alert"></div>
+        <div class="note" id="offline" hidden><b>The request queue can't be reached from this page right now.</b> You can still <a href="https://agents.luhlabs.com">request a model on agents.luhlabs.com</a>, where it runs today.</div>
+      </form>
+
+      <div class="card track" id="track" aria-live="polite">
+        <div class="row between"><h3 id="track-h">Your requests</h3><span class="quiet small" id="track-when"></span></div>
+        <p class="quiet small" id="track-empty">Requests you make here show up in this panel, with their progress, the result and a chat with the model. They're remembered in this browser; the link in the address bar opens one anywhere.</p>
+        <ul class="mine" id="mine"></ul>
+        <div id="view" hidden>
+          <p id="view-goal"></p>
+          <ol class="stages" id="stages" aria-label="Its stages">
+            <li data-s="queued">Queued</li><li data-s="planning">Planning</li><li data-s="training">Training</li><li data-s="judging">Judging</li><li data-s="done">Done</li>
+          </ol>
+          <p class="small" id="view-now"></p>
+          <ul class="log" id="log"></ul>
+          <div class="verdict" id="result" hidden>
+            <h3 id="result-title"></h3>
+            <p class="small" id="result-line"></p>
+            <div class="bar" id="result-bar" aria-hidden="true"><i class="w"></i><i class="t"></i><i class="l"></i></div>
+            <p class="small quiet" id="result-caveat"></p>
+            <a class="small" id="result-link" href="https://results.luhlabs.com">Every answer the judge read</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card chat" id="chat" hidden>
+      <div class="intro"><h3>Try it, blind</h3><p class="small">Ask anything. One answer is your model and one is the base model told your goal, in random order. Pick the better one to see which was which.</p></div>
+      <form class="row" id="ask">
+        <input type="text" id="message" maxlength="500" placeholder="Send it something it should handle, or something it shouldn't" aria-label="Your message" style="flex:1;min-width:0">
+        <button class="go" type="submit" id="ask-go">Ask both</button>
+      </form>
+      <p class="err" id="chat-err" role="alert"></p>
+      <div id="answer" hidden>
+        <p class="small quiet" id="answer-q"></p>
+        <div class="ab">
+          <div class="reply" id="reply-a"><span class="who">A</span><div class="txt" id="txt-a"></div></div>
+          <div class="reply" id="reply-b"><span class="who">B</span><div class="txt" id="txt-b"></div></div>
+        </div>
+        <div class="row" id="votes"><span class="small">Which is better?</span><button class="btn" type="button" data-pick="A">A</button><button class="btn" type="button" data-pick="B">B</button><button class="btn" type="button" data-pick="tie">About the same</button></div>
+        <p class="small" id="tally"></p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <span class="mark"><svg viewBox="0 0 3 4" aria-hidden="true"><path fill="currentColor" d="M0 0h1v3H0zM2 0h1v3H2zM1 3h1v1H1z"/></svg>Vibe Hash</span>
+      <nav aria-label="More"><a href="/">Mining</a><a href="/guide/">Guide</a><a href="https://docs.vibehash.org">Docs</a><a href="/whitepaper.pdf">Whitepaper</a><a href="https://github.com/VibeHash/vibehash">Source code</a></nav>
+    </div>
+    <p>A free pilot on test network software. Requests and chat messages are kept so the run can be shown and judged; don't send anything private.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  // The fine-tune queue (the hackathon repository's web/worker.js), which answers this page from vibehash.org.
+  var API = "https://agents.luhlabs.com/api";
+  var RESULTS = "https://results.luhlabs.com";
+  var STAGES = ["queued", "planning", "training", "judging", "done"];
+  var KEY = "vh-agent-requests";  // this browser's requests: [{id, goal, at}]
+  var $ = function (id) { return document.getElementById(id); };
+  var current = null, poll = null, chatPoll = null, chatId = null, reachable = true;
+
+  function call(method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.headers["Idempotency-Key"] = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(API + path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) { var e = new Error(j.error || ("the queue answered " + r.status)); e.status = r.status; throw e; }
+        return j;
+      });
+    }, function () { var e = new Error("the request queue can't be reached from this page"); e.offline = true; throw e; });
+  }
+  function offline(on) { reachable = !on; $("offline").hidden = !on; }
+  function remembered() { try { return JSON.parse(localStorage.getItem(KEY) || "[]") || []; } catch (e) { return []; } }
+  function remember(list) { try { localStorage.setItem(KEY, JSON.stringify(list.slice(0, 20))); } catch (e) {} }
+  function when(ms) { return new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
+  function clock(ms) { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+
+  // ---- the GPU's state, for the form ----
+  function queue() {
+    call("GET", "/status").then(function (s) {
+      offline(false);
+      $("queue-dot").className = "dot" + (s.online ? " on" : "");
+      $("queue-text").textContent = s.online
+        ? "GPU online · " + s.running + " running, " + s.queued + " waiting"
+        : "GPU offline · requests wait until it's back";
+    }).catch(function (e) {
+      if (e.offline) offline(true);
+      $("queue-text").textContent = "Queue unknown";
+    });
+  }
+
+  // ---- the form ----
+  $("goal").addEventListener("input", function () { $("count").textContent = $("goal").value.length + " / 500"; });
+  document.querySelectorAll("[data-goal]").forEach(function (b) {
+    b.addEventListener("click", function () { $("goal").value = b.dataset.goal; $("goal").dispatchEvent(new Event("input")); $("goal").focus(); });
+  });
+  $("form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var goal = $("goal").value.trim(), code = $("code").value.trim();
+    var level = (document.querySelector('input[name="level"]:checked') || {}).value || "standard";
+    if (goal.length < 10) { $("form-err").textContent = "Describe the goal in at least 10 characters."; $("goal").focus(); return; }
+    if (!code) { $("form-err").textContent = "Enter your access code. Ask us for one if you don't have it."; $("code").focus(); return; }
+    $("form-err").textContent = ""; $("send").disabled = true; $("send").textContent = "Sending…";
+    call("POST", "/requests", { goal: goal, code: code, rigor: level }).then(function (r) {
+      var list = remembered().filter(function (x) { return x.id !== r.id; });
+      list.unshift({ id: r.id, goal: goal, at: Date.now() });
+      remember(list); drawMine(); open(r.id);
+      $("goal").value = ""; $("goal").dispatchEvent(new Event("input"));
+    }).catch(function (e) {
+      if (e.offline) offline(true);
+      $("form-err").textContent = e.status === 403 ? "That access code isn't right." : e.message.charAt(0).toUpperCase() + e.message.slice(1) + ".";
+    }).then(function () { $("send").disabled = false; $("send").textContent = "Request a model"; });
+  });
+
+  // ---- this browser's requests ----
+  function drawMine() {
+    var list = remembered(), ul = $("mine");
+    ul.textContent = "";
+    $("track-empty").hidden = list.length > 0 || !!current;
+    list.forEach(function (x) {
+      var li = document.createElement("li"), b = document.createElement("button"), g = document.createElement("b"), s = document.createElement("span");
+      b.type = "button"; b.setAttribute("aria-current", String(x.id === current));
+      g.textContent = x.goal; s.textContent = "Asked " + when(x.at);
+      b.appendChild(g); b.appendChild(s); b.addEventListener("click", function () { open(x.id); });
+      li.appendChild(b); ul.appendChild(li);
+    });
+  }
+  function open(id) {
+    current = id;
+    var u = new URL(location.href); u.searchParams.set("request", id); history.replaceState(null, "", u);
+    $("view").hidden = false; $("result").hidden = true; $("chat").hidden = true; $("answer").hidden = true;
+    $("view-goal").textContent = ""; $("view-now").textContent = "Loading…"; $("log").textContent = "";
+    drawMine(); clearTimeout(poll); load();
+  }
+  function load() {
+    var id = current;
+    call("GET", "/requests/" + encodeURIComponent(id)).then(function (r) {
+      if (id !== current) return;
+      offline(false); draw(r);
+      if (r.status !== "done" && r.status !== "failed") poll = setTimeout(load, 5000);
+    }).catch(function (e) {
+      if (id !== current) return;
+      if (e.offline) offline(true);
+      $("view-now").textContent = e.status === 404 ? "That request isn't in the queue any more." : "Couldn't load it: " + e.message + ".";
+      if (e.status !== 404) poll = setTimeout(load, 15000);
+    });
+  }
+  function draw(r) {
+    $("track-h").textContent = "Your request";
+    $("view-goal").textContent = "“" + r.goal + "”" + (r.rigor ? " · " + r.rigor : "");
+    $("track-when").textContent = r.created ? "asked " + when(r.created) : "";
+    var at = STAGES.indexOf(r.status);
+    document.querySelectorAll("#stages li").forEach(function (li) {
+      var i = STAGES.indexOf(li.dataset.s);
+      li.className = r.status === "failed" ? (i === 0 ? "fail" : "") : i < at ? "past" : i === at ? "now" : "";
+      if (r.status === "failed" && i === 0) li.textContent = "Stopped";
+      else li.textContent = li.dataset.s.charAt(0).toUpperCase() + li.dataset.s.slice(1);
+    });
+    var log = r.log || [], last = log[log.length - 1];
+    $("view-now").textContent = r.status === "queued"
+      ? (r.ahead ? r.ahead + " ahead of it in the queue." : "Next in line.") + (r.online ? "" : " The GPU is offline; it starts when it's back.")
+      : r.status === "failed" ? "It stopped: " + (last ? last.message : "no reason given") + "."
+      : r.status === "done" ? "Finished." : (last ? last.message : "Working on it…");
+    var ul = $("log"); ul.textContent = "";
+    log.slice(-12).reverse().forEach(function (e) {
+      var li = document.createElement("li"), t = document.createElement("time"), s = document.createElement("span");
+      t.textContent = clock(e.at); s.textContent = e.message; li.appendChild(t); li.appendChild(s); ul.appendChild(li);
+    });
+    if (r.status === "done" && r.run) result(r);
+  }
+  function result(r) {
+    var run = r.run, j = run.judge || {}, told = j.vs_prompted || j;
+    var n = j.prompts || 0, w = told.tuned_wins || 0, t = told.ties || 0, l = told.base_wins || 0;
+    $("result").hidden = false;
+    $("result-title").textContent = run.title || "Your model";
+    $("result-line").textContent = n
+      ? "Against the base model told your goal: won " + w + " of " + n + ", " + t + (t === 1 ? " tie, " : " ties, ") + l + " lost" +
+        (run.rigor && run.rigor.met != null ? (run.rigor.met ? ". It reached the bar." : ". Short of the bar; the scores are as they came out.") : ".")
+      : "Judged; open the results for every answer.";
+    var bar = $("result-bar").children, total = Math.max(1, w + t + l);
+    bar[0].style.width = (100 * w / total) + "%"; bar[1].style.width = (100 * t / total) + "%"; bar[2].style.width = (100 * l / total) + "%";
+    $("result-caveat").textContent = run.caveat || "";
+    $("result-link").href = RESULTS + "/?request=" + encodeURIComponent(r.id);
+    $("chat").hidden = false;
+  }
+
+  // ---- the blind chat ----
+  $("ask").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var msg = $("message").value.trim();
+    if (!msg || !current) return;
+    $("chat-err").textContent = ""; $("ask-go").disabled = true;
+    call("POST", "/requests/" + encodeURIComponent(current) + "/chat", { message: msg }).then(function (c) {
+      chatId = c.id; $("message").value = "";
+      $("answer").hidden = false; $("answer-q").textContent = "You asked: " + msg;
+      $("txt-a").textContent = "Waiting for the GPU…"; $("txt-b").textContent = "Waiting for the GPU…";
+      $("reply-a").className = "reply"; $("reply-b").className = "reply"; $("tally").textContent = "";
+      setVoting(false); clearTimeout(chatPoll); hear(Date.now());
+    }).catch(function (e) { $("chat-err").textContent = e.message.charAt(0).toUpperCase() + e.message.slice(1) + "."; })
+      .then(function () { $("ask-go").disabled = false; });
+  });
+  function hear(started) {
+    var id = chatId;
+    call("GET", "/chats/" + encodeURIComponent(id)).then(function (c) {
+      if (id !== chatId) return;
+      if (c.status === "answered") { $("txt-a").textContent = c.a || ""; $("txt-b").textContent = c.b || ""; setVoting(true); return; }
+      if (c.status === "failed") { $("txt-a").textContent = ""; $("txt-b").textContent = ""; $("chat-err").textContent = "No answer: " + (c.error || "the GPU couldn't reply") + "."; return; }
+      if (Date.now() - started < 16 * 60000) chatPoll = setTimeout(function () { hear(started); }, 2500);
+    }).catch(function () { if (id === chatId) chatPoll = setTimeout(function () { hear(started); }, 5000); });
+  }
+  function setVoting(on) { document.querySelectorAll("#votes button").forEach(function (b) { b.disabled = !on; }); }
+  document.querySelectorAll("#votes button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!chatId) return;
+      setVoting(false);
+      call("POST", "/chats/" + encodeURIComponent(chatId) + "/vote", { pick: b.dataset.pick }).then(function (v) {
+        var tunedSide = v.a === "tuned" ? "a" : "b";
+        $("reply-" + tunedSide).className = "reply tuned";
+        $("reply-a").querySelector(".who").textContent = "A · " + (v.a === "tuned" ? "your model" : "base model told the goal");
+        $("reply-b").querySelector(".who").textContent = "B · " + (v.a === "tuned" ? "base model told the goal" : "your model");
+        $("tally").textContent = "Votes on this model so far: " + v.tuned + " for it, " + v.rival + " for the base model, " + v.tie + " about the same.";
+      }).catch(function (e) { $("chat-err").textContent = e.message.charAt(0).toUpperCase() + e.message.slice(1) + "."; setVoting(true); });
+    });
+  });
+
+  // ---- start ----
+  var asked = new URLSearchParams(location.search).get("request");
+  drawMine();
+  if (asked && /^[0-9a-f-]{36}$/i.test(asked)) open(asked);
+  else if (remembered().length) open(remembered()[0].id);
+  queue(); setInterval(queue, 30000);
+})();
+</script>
+</body>
+</html>
