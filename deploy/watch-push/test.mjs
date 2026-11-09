@@ -159,6 +159,15 @@ await it("subscribing is rate-limited per caller", async () => {
   assert.equal((await call("POST", "/api/subscribe", { subscription: sub(200), addresses: [C] }, { ip: "8.8.8.8" })).status, 200, "another caller isn't");
 });
 
+await it("a test alert reaches every phone, only with the token", async () => {
+  assert.equal((await call("POST", "/api/test", {})).status, 401);
+  const before = pushes.length;
+  const r = await call("POST", "/api/test", {}, { Authorization: "Bearer stats-secret" });
+  const phones = env.DB.raw.prepare("SELECT COUNT(*) n FROM subs").get().n;
+  assert.equal(r.body.phones, phones); assert.equal(r.body.delivered, phones); assert.equal(pushes.length - before, phones);
+  assert.deepEqual(await take(sub(1).endpoint), ["Alerts work"]);
+});
+
 await it("unsubscribe forgets the phone", async () => {
   await call("POST", "/api/unsubscribe", { endpoint: sub(1).endpoint });
   assert.equal(env.DB.raw.prepare("SELECT COUNT(*) n FROM subs WHERE endpoint = ?").get(sub(1).endpoint).n, 0);

@@ -43,6 +43,16 @@ curl -H "Authorization: Bearer <STATS_TOKEN>" https://watch-api.vibehash.org/api
 - `browser_visitors_7d`: people who used it in a browser tab
 - `alert_phones`, `watched_addresses`: alerts turned on
 
+## Check alerts reach phones
+
+With alerts turned on in the app (from the Home Screen), send every such phone a test:
+
+```
+curl -X POST -H "Authorization: Bearer <STATS_TOKEN>" https://watch-api.vibehash.org/api/test
+```
+
+It answers how many phones it tried and how many the push services took; the phone shows "Alerts work".
+
 ## Test
 
 ```

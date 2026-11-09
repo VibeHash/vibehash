@@ -54,7 +54,27 @@ async function route(request, env, url) {
   if (p === "/api/messages" && m === "GET") return messages(env, url.searchParams.get("sub"), request);
   if (p === "/api/hello" && m === "POST") return hello(env, await body(request), request);
   if (p === "/api/stats" && m === "GET") return stats(env, request);
+  if (p === "/api/test" && m === "POST") return testAlert(env, request);
   throw fail(404, "not found");
+}
+
+// The operators' check that alerts reach phones: "Alerts work" to every phone with alerts on (STATS_TOKEN).
+async function testAlert(env, request) {
+  const token = (request.headers.get("Authorization") ?? "").replace(/^Bearer /, "");
+  if (!env.STATS_TOKEN || !(await same(token, env.STATS_TOKEN))) throw fail(401, "the stats token is missing or wrong");
+  const subs = (await env.DB.prepare("SELECT id, endpoint FROM subs").all()).results;
+  const now = Date.now();
+  if (subs.length) {
+    await env.DB.batch(subs.map((s) => env.DB.prepare("INSERT INTO messages (sub, at, title, body, tag) VALUES (?, ?, ?, ?, ?)")
+      .bind(s.id, now, "Alerts work", "This is a test from Vibe Hash. Real alerts look like this.", "test")));
+  }
+  const results = [];
+  for (const s of subs) {
+    const status = await push(env, s.endpoint);
+    if (status === 404 || status === 410) await unsubscribe(env, { endpoint: s.endpoint });
+    results.push(status);
+  }
+  return json({ phones: subs.length, delivered: results.filter((r) => r >= 200 && r < 300).length, gone: results.filter((r) => r === 404 || r === 410).length });
 }
 
 // ---- alerts on and off ----
