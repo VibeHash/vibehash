@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import ssl
 from urllib.parse import urlsplit
 
 TOR_PORT, TOR_BROWSER_PORT = 9050, 9150
@@ -60,6 +61,24 @@ def _listening(port: int) -> bool:
         return False
 
 
+_tor_found: str | None = None
+
+
+def _tor_default() -> str:
+    """Tor's proxy URL, found by the port probe once a process (a node makes a client per gossip message, and each would
+    otherwise probe, up to 0.5 s a port): 9050, or Tor Browser's 9150 if only that one listens. `forget_tor` re-probes."""
+    global _tor_found
+    if _tor_found is None:
+        port = TOR_BROWSER_PORT if not _listening(TOR_PORT) and _listening(TOR_BROWSER_PORT) else TOR_PORT
+        _tor_found = f"socks5h://127.0.0.1:{port}"
+    return _tor_found
+
+
+def forget_tor() -> None:
+    global _tor_found
+    _tor_found = None
+
+
 def resolve(args=None, cfg: dict | None = None) -> str | None:
     """The proxy to use: --proxy, else --tor (Tor on 9050, or Tor Browser's 9150 if only that one listens), else the
     saved "proxy" setting; None when none is set. Raises ValueError for a proxy URL that would leak (check)."""
@@ -67,9 +86,7 @@ def resolve(args=None, cfg: dict | None = None) -> str | None:
     if flag:
         return check(flag)
     if getattr(args, "tor", False):
-        if not _listening(TOR_PORT) and _listening(TOR_BROWSER_PORT):
-            return f"socks5h://127.0.0.1:{TOR_BROWSER_PORT}"
-        return f"socks5h://127.0.0.1:{TOR_PORT}"
+        return _tor_default()
     saved = (cfg or {}).get("proxy")
     return check(saved) if saved else None
 
@@ -112,6 +129,16 @@ def onion_hint(status) -> str | None:
     return f"reach this node at {onion} to avoid exit-node blocks"
 
 
+def check_pin(sock, pin: str) -> None:
+    """SSLCertVerificationError unless the certificate `sock` was given has SHA-256 fingerprint `pin` (as tls._PinnedConnection)."""
+    from . import tls
+
+    got = tls.fingerprint(sock.getpeercert(binary_form=True) or b"")
+    if got != pin:
+        raise ssl.SSLCertVerificationError(1, f"the node's certificate isn't the pinned one (it has sha256 {got}, "
+                                              f"expected {pin}); refusing to talk to it")
+
+
 def handler(proxy_url: str, context=None, pin: str | None = None):
     """The urllib handler that opens http and https URLs through `proxy_url`, giving the proxy the host name to resolve
     (rdns). For https, `context` verifies the server and `pin` (a SHA-256 fingerprint, tls.py) must match its
@@ -126,15 +153,11 @@ def handler(proxy_url: str, context=None, pin: str | None = None):
         def connect(self):
             super().connect()
             if pin:
-                from . import tls
-
-                got = tls.fingerprint(self.sock.getpeercert(binary_form=True) or b"")
-                if got != pin:
+                try:
+                    check_pin(self.sock, pin)
+                except ssl.SSLCertVerificationError:
                     self.close()
-                    import ssl
-
-                    raise ssl.SSLCertVerificationError(1, f"the node's certificate isn't the pinned one (it has sha256 "
-                                                          f"{got}, expected {pin}); refusing to talk to it")
+                    raise
 
     class _Handler(sockshandler.SocksiPyHandler):
         def https_open(self, req):

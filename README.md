@@ -453,7 +453,9 @@ one GPU: for more, see "Several GPUs" above.
 To hide your address from the node, run Tor (the Tor daemon on port 9050, or Tor
 Browser, which listens on 9150) and add `--tor` to a command: `vibehash worker
 --tor`, `vibehash send --tor ...`. It works on every command that takes `--node`,
-and on `node` and `admin`. `--proxy socks5h://HOST:PORT` uses another SOCKS
+and on `node` and `admin`; for posting a job that is the top-level `post-job`.
+The offline `wallet create|restore|mfa|show` commands take no `--tor`: they
+never touch a node, so there is nothing to route. `--proxy socks5h://HOST:PORT` uses another SOCKS
 proxy, and `vibehash setup --tor` remembers the choice (the `proxy` and
 `tor_mode` settings), so later commands and the menu use it without the flag.
 

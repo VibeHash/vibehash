@@ -2433,34 +2433,51 @@ def version() -> str:
     return __version__
 
 
-TOR_FLAGS = argparse.ArgumentParser(add_help=False)  # the one set of proxy flags every node-facing command shares
-TOR_FLAGS.add_argument("--tor", action="store_true", help="send this command's node traffic through Tor (a local Tor "
-                       "on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor")
-TOR_FLAGS.add_argument("--proxy", metavar="URL", help="send it through this SOCKS proxy instead: socks5h://HOST:PORT "
-                       "(socks5:// would resolve the node's name on this computer, so it is refused)")
-TOR_FLAGS.add_argument("--tor-mode", choices=proxy.MODES, help="control-only: JSON through the proxy, transfers of "
-                       "over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused "
-                       "(default: strict for wallet, send, stake, unstake and job posting, else control-only)")
+# The proxy flags every node-facing command shares: (option strings, add_argument keywords), added by _add_tor_flags.
+TOR_FLAGS = [
+    (("--tor",), dict(action="store_true", help="send this command's node traffic through Tor (a local Tor on 9050, or "
+                      "Tor Browser's on 9150), resolving the node's name inside Tor")),
+    (("--proxy",), dict(metavar="URL", help="send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// "
+                        "would resolve the node's name on this computer, so it is refused)")),
+    (("--tor-mode",), dict(choices=proxy.MODES, help="control-only: JSON through the proxy, transfers of over 50 MB "
+                           "(checkpoints) direct; strict: everything through it, big transfers refused (default: strict "
+                           "for wallet, send, stake, unstake and job posting, else control-only)")),
+]
 NODE_COMMANDS = frozenset({"node", "admin", "worker", "app", "setup"})  # (besides any command with --node)
 
 
-def _add_tor_flags(ap: argparse.ArgumentParser) -> None:
-    """Give TOR_FLAGS to every command that talks to a node: one with a --node option, or one of NODE_COMMANDS."""
-    def walk(parser, name, covered):
-        # (not again on a command's own subcommands: their defaults would overwrite what was typed before them)
-        mine = not covered and (name in NODE_COMMANDS or any("--node" in a.option_strings for a in parser._actions))  # noqa: SLF001
-        if mine:
-            for flag in TOR_FLAGS._actions:  # noqa: SLF001
-                parser._add_action(flag)  # noqa: SLF001
-        for sub in (a for a in parser._actions if isinstance(a, argparse._SubParsersAction)):  # noqa: SLF001
-            for child_name, child in sub.choices.items():
-                walk(child, name or child_name, covered or mine)
+class _Parser(argparse.ArgumentParser):
+    """An ArgumentParser that remembers it was made, and whether it was given --node, so _add_tor_flags can find the
+    commands that talk to a node without reaching into argparse's internals."""
+    made: list = []
 
-    walk(ap, None, False)
+    def __init__(self, *args, **kwargs):
+        self.takes_node = False
+        super().__init__(*args, **kwargs)
+        _Parser.made.append(self)
+
+    def add_argument(self, *names, **kwargs):
+        self.takes_node = self.takes_node or "--node" in names
+        return super().add_argument(*names, **kwargs)
+
+
+def _add_tor_flags() -> None:
+    """Give TOR_FLAGS to every command made since parser() began that talks to a node: one with a --node option, or one
+    of NODE_COMMANDS. Not again to a command's own subcommands: their defaults would overwrite what was typed before them."""
+    covered: list[str] = []
+    for p in sorted(_Parser.made, key=lambda q: len(q.prog)):
+        words = p.prog.split()
+        if len(words) < 2 or any(p.prog.startswith(c + " ") for c in covered):
+            continue
+        if p.takes_node or words[1] in NODE_COMMANDS:
+            covered.append(p.prog)
+            for names, kwargs in TOR_FLAGS:
+                p.add_argument(*names, **kwargs)
 
 
 def parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="vibehash", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    _Parser.made = []
+    ap = _Parser(prog="vibehash", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-v", "--verbose", action="store_true", help="log every detail (DEBUG), not just what happens (INFO)")
     ap.add_argument("--version", action="version", version=f"vibehash {version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2911,7 +2928,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--receipts", action="append", metavar="FILE",
                    help="a worker's receipts.jsonl to check (default: every worker's on this computer)")
     p.set_defaults(fn=cmd_chain_verify)
-    _add_tor_flags(ap)
+    _add_tor_flags()
     return ap
 
 

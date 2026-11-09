@@ -40,6 +40,10 @@ class CheckTests(unittest.TestCase):
 
 
 class ResolveTests(unittest.TestCase):
+    def setUp(self):
+        proxy.forget_tor()
+        self.addCleanup(proxy.forget_tor)
+
     def test_tor_takes_9050_when_it_listens(self):
         with mock.patch.object(proxy, "_listening", lambda port: port in (9050, 9150)):
             self.assertEqual(proxy.resolve(args(tor=True)), TOR)
@@ -120,6 +124,17 @@ class OpenerTests(unittest.TestCase):
         self.assertFalse([h for h in op.handlers if isinstance(h, tls._PinnedHandler)])  # (it would bypass the proxy)
 
 
+class PinTests(unittest.TestCase):
+    def test_a_certificate_that_is_not_the_pinned_one_is_refused(self):
+        import ssl
+        cert = b"not the pinned certificate"
+        sock = mock.Mock()
+        sock.getpeercert.return_value = cert
+        proxy.check_pin(sock, tls.fingerprint(cert))  # the right one passes
+        with self.assertRaisesRegex(ssl.SSLCertVerificationError, "isn't the pinned one"):
+            proxy.check_pin(sock, "aa" * 32)
+
+
 class FakeSocks:
     """A SOCKS5 server on loopback that records what it is asked to connect to, then says no."""
 
@@ -179,8 +194,30 @@ class LeakTests(unittest.TestCase):
         self.assertNotIn("secret-node.example", resolved)
         self.assertFalse([a for a in connected if a[0] == "secret-node.example"])
 
+    def test_the_tor_port_probe_runs_once_however_many_onion_clients(self):
+        proxy.activate(None, None)
+        proxy.forget_tor()
+        self.addCleanup(proxy.forget_tor)
+        probes = []
+
+        def cc(addr, *a, **k):
+            probes.append(addr)
+            return mock.Mock()
+
+        with mock.patch("socket.create_connection", cc):
+            clients = [NodeClient("http://abcdefghijklmnop.onion:8545") for _ in range(2)]
+        self.assertEqual([c.proxy for c in clients], [TOR, TOR])
+        self.assertEqual(probes, [("127.0.0.1", 9050)])
+
+    def test_an_explicit_proxy_never_probes(self):
+        proxy.forget_tor()
+        with mock.patch.object(proxy, "_listening", side_effect=AssertionError("probed")):
+            self.assertEqual(proxy.resolve(args(proxy="socks5h://h:1", tor=True)), "socks5h://h:1")
+
     def test_an_onion_routes_through_the_proxy_without_being_told_to(self):
         proxy.activate(None, None)
+        proxy.forget_tor()
+        self.addCleanup(proxy.forget_tor)
         with mock.patch.object(proxy, "_listening", lambda port: port == 9050):
             client = NodeClient("http://abcdefghijklmnop.onion:8545")
         self.assertEqual(client.proxy, TOR)
