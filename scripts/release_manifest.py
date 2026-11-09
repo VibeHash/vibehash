@@ -50,10 +50,11 @@ FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha2
 MIN_LAUNCHER = "1.2"  # the first launcher that verifies this manifest
 # How the requirements are compiled (`compile` adds -o). --universal so Windows-only and macOS-only packages
 # (pywebview's) are in; torch left out, so installing a file never touches the GPU build `vibehash install-gpu` chose.
+# --python-version is the resolution's floor, so it is requires-python's (3.10): a 3.10 or 3.11 install verifies too.
 COMPILE_BASE = ("uv pip compile pyproject.toml --extra finetune --extra app --generate-hashes --universal "
-                "--no-emit-package torch --python-version 3.12").split()
+                "--no-emit-package torch --python-version 3.10").split()
 COMPILE_EVO = ("uv pip compile pyproject.toml --extra finetune --extra app --extra evo --generate-hashes --universal "
-               "--no-emit-package torch --python-version 3.12").split()
+               "--no-emit-package torch --python-version 3.10").split()
 
 
 class NoKey(Exception):

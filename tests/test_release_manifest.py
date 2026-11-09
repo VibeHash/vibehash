@@ -210,10 +210,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertRegex(text, r"^uv==\d+\.\d+\.\d+ \\\n    --hash=sha256:[0-9a-f]{64}\n$")
 
     def test_the_two_compiles_are_the_ones_the_script_names(self):
-        for flag in ("--generate-hashes", "--universal", "--no-emit-package torch", "--python-version 3.12",
+        for flag in ("--generate-hashes", "--universal", "--no-emit-package torch", "--python-version 3.10",
                      "--extra finetune", "--extra app"):
             for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
                 self.assertIn(flag, " ".join(cmd))
+
+    def test_the_compiles_resolve_for_the_oldest_python_the_project_supports(self):
+        """--python-version is uv's resolution floor: compiled for 3.12, `vibehash update` on 3.10 or 3.11 would meet
+        pins with no wheel for it and fail --require-hashes. It is requires-python's own floor."""
+        import re
+        import tomllib
+        floor = re.fullmatch(r">=\s*(\d+\.\d+)", tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+                             ["project"]["requires-python"].strip()).group(1)
+        for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
+            self.assertEqual(cmd[cmd.index("--python-version") + 1], floor)
 
     def test_a_tag_build_of_the_launcher_needs_a_release_key_and_a_release_race_is_tolerated(self):
         step = self.launcher.split("Refuse to release a launcher that has no release key", 1)[1].split("- name:", 1)[0]
