@@ -292,7 +292,7 @@ class TrainBaseTests(CatalogTestCase):
         self.fake.add_commit("acme/qwen", {**single_files(), "config.json": json.dumps(config).encode()})
         code, out, _ = self.run_cli("train", "--base", "acme/qwen")
         self.assertEqual(code, 1, out)
-        self.assertIn("Ready: `python -m vibehash train chats.jsonl --base acme/qwen` fine-tunes it", out)
+        self.assertIn(f"Ready: `{cli.prog()} train chats.jsonl --base acme/qwen` fine-tunes it", out)  # python3 on Linux
         self.assertIn("Nothing was posted and nothing was spent.", out)
 
     def test_a_gated_model(self):
