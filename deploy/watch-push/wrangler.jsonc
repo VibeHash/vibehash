@@ -9,10 +9,10 @@
     "NODE": "https://node.vibehash.org",
     "VAPID_SUBJECT": "mailto:hello@vibehash.org",
     // the public half of the push key pair keys.mjs makes (not a secret: every page that subscribes gets it)
-    "VAPID_PUBLIC": "REPLACE_WITH_THE_PUBLIC_KEY_FROM_keys.mjs"
+    "VAPID_PUBLIC": "BGSqdUYfzBC9ds6_Tw_3eRX1C2au9MW4taMRE9YenpkGURgMkcY6-8IuQxnhaakdkiHDRGLc1MuM_FAG3DJqATE"
   },
   "d1_databases": [
     // the id from: npx wrangler d1 create vibehash-watch
-    { "binding": "DB", "database_name": "vibehash-watch", "database_id": "REPLACE_WITH_THE_DATABASE_ID" }
+    { "binding": "DB", "database_name": "vibehash-watch", "database_id": "1aa78503-c6e3-499c-971b-daec501007c9" }
   ]
 }

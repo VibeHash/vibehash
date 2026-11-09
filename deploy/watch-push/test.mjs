@@ -159,6 +159,22 @@ await it("subscribing is rate-limited per caller", async () => {
   assert.equal((await call("POST", "/api/subscribe", { subscription: sub(200), addresses: [C] }, { ip: "8.8.8.8" })).status, 200, "another caller isn't");
 });
 
+await it("a nickname goes into its alerts, cleaned and cut to 24 characters", async () => {
+  const D = "vibe1" + "d".repeat(36);
+  const r = await call("POST", "/api/subscribe", { subscription: sub(300), addresses: [D], names: { [D]: "  Gaming\nPC   upstairs, the one with the long name  " } }, { ip: "7.7.7.7" });
+  assert.equal(r.status, 200);
+  const name = env.DB.raw.prepare("SELECT name FROM watches WHERE address = ?").get(D).name;
+  assert.equal(name, "Gaming PC upstairs, the");
+  const t = 200000;
+  block(chain.tip + 1, t - 60, { work: [B] }); await check(env, t - 60);
+  block(chain.tip + 1, t, { slashes: [[D, B, "a segment didn't match"]] }); await check(env, t);
+  const id = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sub(300).endpoint))).toString("hex");
+  const msgs = (await call("GET", "/api/messages?sub=" + id, null, { ip: "7.7.7.7" })).body.messages;
+  assert.equal(msgs[0].title, "Slashed"); assert.ok(msgs[0].body.startsWith("Gaming PC upstairs, the was slashed"), msgs[0].body);
+  await call("POST", "/api/subscribe", { subscription: sub(300), addresses: [D], names: {} }, { ip: "7.7.7.7" });  // the name taken away
+  assert.equal(env.DB.raw.prepare("SELECT name FROM watches WHERE address = ?").get(D).name, null);
+});
+
 await it("a test alert reaches every phone, only with the token", async () => {
   assert.equal((await call("POST", "/api/test", {})).status, 401);
   await take(sub(1).endpoint);  // what it hadn't collected from the steps above (stopped, back, a slash)

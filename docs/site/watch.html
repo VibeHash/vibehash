@@ -103,6 +103,16 @@ button { font: inherit; color: inherit; }
 .rep i { display: block; height: 100%; width: 0; background: var(--good); }
 dl { margin: 0; }
 
+/* the wallet's nickname, and the pencil that changes it */
+.named { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; margin: -6px 0 -4px; }
+.named b { font-size: 1.05rem; overflow-wrap: anywhere; min-width: 0; }
+.named b.unnamed { color: var(--ink-2); font-weight: 500; }
+.named .icon { width: 44px; height: 44px; margin-right: -10px; }
+.named .icon svg { width: 19px; height: 19px; }
+#rename-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; }
+#rename-form input { min-height: 44px; font-family: var(--sys); }
+#rename-form .go, #rename-form .plain { min-height: 44px; padding: 0 12px; }
+
 /* earnings */
 .earned { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .earned b { font-size: 1.5rem; font-weight: 700; color: var(--gold); }
@@ -198,6 +208,17 @@ input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid 
 
       <section class="card" aria-labelledby="bal-h">
         <h2 id="bal-h">Balance</h2>
+        <div class="named" id="named">
+          <b id="wname"></b>
+          <button class="icon" type="button" id="rename" aria-label="Name this wallet">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>
+          </button>
+        </div>
+        <form id="rename-form" hidden novalidate>
+          <input type="text" id="name-in" maxlength="24" autocomplete="off" autocapitalize="words" spellcheck="false" placeholder="Gaming PC" aria-label="Wallet nickname">
+          <button class="go" type="submit">Save</button>
+          <button class="plain" type="button" id="rename-cancel">Cancel</button>
+        </form>
         <div class="balance"><div class="big num" id="balance">–</div><span class="small quiet num" id="address"></span></div>
         <dl class="grid3">
           <div class="stat"><dt>Staked</dt><dd class="num" id="stake">–</dd></div>
@@ -264,8 +285,12 @@ input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid 
   var saved = load(), blocks = [], tip = null, timer = null, busy = false, lastOk = 0;
 
   function load() {
-    try { var s = JSON.parse(localStorage.getItem(KEY) || "{}"); return { addresses: (s.addresses || []).filter(function (a) { return ADDRESS.test(a); }), current: s.current || null }; }
-    catch (e) { return { addresses: [], current: null }; }
+    try {
+      var s = JSON.parse(localStorage.getItem(KEY) || "{}"), names = {};
+      Object.keys(s.names || {}).forEach(function (a) { if (ADDRESS.test(a) && typeof s.names[a] === "string") names[a] = s.names[a].slice(0, 24); });
+      return { addresses: (s.addresses || []).filter(function (a) { return ADDRESS.test(a); }), current: s.current || null, names: names };
+    }
+    catch (e) { return { addresses: [], current: null, names: {} }; }
   }
   function store() { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {} }
   function get(path) {
@@ -294,7 +319,8 @@ input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid 
     var nav = $("addrs"); nav.textContent = "";
     saved.addresses.forEach(function (a) {
       var b = document.createElement("button");
-      b.type = "button"; b.className = "addr"; b.textContent = short(a);
+      b.type = "button"; b.className = "addr"; b.textContent = saved.names[a] || short(a);
+      if (saved.names[a]) b.style.fontFamily = "var(--sys)";
       b.setAttribute("aria-pressed", String(a === saved.current)); b.setAttribute("aria-label", "Watch " + a);
       b.addEventListener("click", function () { if (a !== saved.current) { saved.current = a; store(); switchTo(); } });
       nav.appendChild(b);
@@ -325,6 +351,7 @@ input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid 
     if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Tap again to stop watching " + short(a); setTimeout(function () { b.dataset.sure = ""; b.textContent = "Stop watching this address"; }, 4000); return; }
     b.dataset.sure = ""; b.textContent = "Stop watching this address";
     saved.addresses = saved.addresses.filter(function (x) { return x !== a; });
+    delete saved.names[a];
     saved.current = saved.addresses[0] || null; store(); switchTo(); resync();
   });
   function switchTo() {
@@ -332,10 +359,31 @@ input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid 
     if (!saved.current) { showAdd(true); return; }
     showAdd(false);
     set("address", saved.current);
+    drawName(); $("rename-form").hidden = true; $("named").hidden = false;
     set("state", "Loading…"); set("state-why", ""); $("state-dot").className = "dot";
     drawRounds();
     refresh();
   }
+
+  // ---- nicknames: kept in this browser, and sent with the alerts so they say "Gaming PC", not an address ----
+  function drawName() {
+    var n = saved.names[saved.current], el = $("wname");
+    el.textContent = n || "Name this wallet"; el.className = n ? "" : "unnamed";
+    $("rename").setAttribute("aria-label", n ? "Rename " + n : "Name this wallet");
+  }
+  $("rename").addEventListener("click", function () {
+    $("named").hidden = true; $("rename-form").hidden = false;
+    $("name-in").value = saved.names[saved.current] || ""; $("name-in").focus();
+  });
+  $("rename-cancel").addEventListener("click", function () { $("rename-form").hidden = true; $("named").hidden = false; });
+  $("rename-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var n = $("name-in").value.replace(/\s+/g, " ").trim().slice(0, 24).trim();
+    if (n) saved.names[saved.current] = n; else delete saved.names[saved.current];
+    store(); $("name-in").blur();
+    $("rename-form").hidden = true; $("named").hidden = false;
+    drawName(); drawAddrs(); resync();
+  });
 
   // ---- what the node says ----
   function refresh() {
@@ -482,7 +530,9 @@ input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid 
         });
       });
     }).then(function (sub) {
-      return post("/api/subscribe", { subscription: sub.toJSON(), addresses: saved.addresses.slice(0, 5), payments: payments });
+      var list = saved.addresses.slice(0, 5), names = {};
+      list.forEach(function (a) { if (saved.names[a]) names[a] = saved.names[a]; });
+      return post("/api/subscribe", { subscription: sub.toJSON(), addresses: list, payments: payments, names: names });
     });
   }
   // The addresses changed (added or removed) while alerts are on: the Worker's list follows.
