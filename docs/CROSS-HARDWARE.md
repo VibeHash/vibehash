@@ -118,3 +118,18 @@ One step's log-probabilities are now 0.047 off float32 (OpenVINO's Intel GPU in 
 with itself: its own answers teacher-forced on it have gaps of exactly 0. So step 3's condition (worst gap under half
 the cross margin) holds on this sample. The sample is small, though: a larger round, a CUDA bf16 checker (copy the
 answers dump to a CUDA machine and run `check`), and the NPU as checker of others' work are still to measure.
+
+A larger round turned it around. Same setup, 4 pairs (8 members) x 16 problems, up to 256 tokens:
+
+| | worst honest gap | p99 (answer) | false rejections at 0.1 / 0.375 / 0.5 / 0.75 / 1 | smallest cheat gap | false acceptances |
+|---|---|---|---|---|---|
+| 8 x 16, 256 tokens | 0.522 | 0.313 | 4 / 1 / 1 / 0 / 0 | 4.26 | 0 |
+
+The gaps sit in the long answers. Two problems ran to the 256-token cap for every member, and they hold every gap over
+0.05 (0.52, 0.34, 0.23, 0.14, 0.14). Of the other 14 problems (2 to 19 tokens), all but one answer have gaps of 0,
+and that one has 0.10. The error grows with the answer's length, which points at
+the recurrent state: 18 DeltaNet layers carry it from token to token, and on the NPU it is updated in fp16. That
+is a guess, not yet tested. So step 3's condition fails: an honest NPU worker would be rejected at the template's
+`cross_margin` 0.5. The next things to try are keeping the state update in float32 on the host (the NPU computes
+the step's inputs to it), or splitting the step so the state's part runs on the CPU, then measuring 256-token
+answers again.
