@@ -531,7 +531,10 @@ class ProtocolTests(unittest.TestCase):
         hw = [RELIABLE(LOW_END_LAPTOP), RELIABLE(OFFICE_DESKTOP), RELIABLE(RTX_3060)]
         proto, workers, job = network([("honest",)] * 3, hardware=hw, canaries_per_round=0)
         flops = {w.address: 0 for w in workers}
-        for _ in range(4):
+        # Each round's units are drawn from the last block's hash, which the commitments' random salts make different
+        # every run, and the big rig's capacity only doubles a round (RAMP): after 4 rounds it had done 3x or less of
+        # the laptop's work in about 1 run in 20; after 6, never in 300 (3.8x at the least).
+        for _ in range(6):
             r = proto.run_round()
             rates = [r.worker_pay[a] / f for a, f in r.worker_flops.items()]
             self.assertLess(max(rates) / min(rates), 1.0001)  # same pay per FLOP within every round
