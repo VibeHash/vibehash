@@ -1,4 +1,4 @@
-"""The admin app: `vibehash admin`, a window for the people who run the network (Cole and Caleb): a globe of where
+"""The admin app: `vibehash admin`, a window for the people who run the network (the two operators): a globe of where
 devices connect from, with arcs to the nodes they report to; the jobs, to confirm, deny (hold), cancel or post; the
 ledger as blocks land; the devices online; the validators and peers.
 

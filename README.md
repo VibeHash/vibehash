@@ -616,7 +616,7 @@ Releases publish themselves from GitHub. `.github/workflows/publish.yml` runs
 when a version tag is pushed: it checks the tag matches `pyproject.toml`, runs
 the fast tests, builds the wheel and source archive, and uploads them to PyPI
 through a **trusted publisher**, so no API token is stored anywhere. PyPI's
-trusted publisher for `vibehash` names owner `AlphaChad5000`, repository
+trusted publisher for `vibehash` names the owner recorded in PyPI's trusted-publisher settings, repository
 `vibehash`, workflow `publish.yml` and environment `pypi`.
 
 1. Bump `version` in `pyproject.toml` (PyPI never accepts the same version

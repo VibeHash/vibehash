@@ -28,7 +28,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://vibehash.org"
-Source = "https://github.com/AlphaChad5000/vibehash"
+Source = "https://github.com/VibeHash/vibehash"
 
 [project.scripts]
 vibehash = "vibehash.cli:main"

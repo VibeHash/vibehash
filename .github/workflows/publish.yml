@@ -1,7 +1,7 @@
 # Publishes vibehash to PyPI when a version tag is pushed, e.g.:
 #   git tag v0.4.0 && git push origin v0.4.0
 # PyPI trusts this workflow through a "trusted publisher" (no API token is stored anywhere):
-# project vibehash, owner AlphaChad5000, repository vibehash, workflow publish.yml, environment pypi.
+# project vibehash, owner as recorded in PyPI's trusted-publisher settings, repository vibehash, workflow publish.yml, environment pypi.
 name: Publish to PyPI
 
 on:
