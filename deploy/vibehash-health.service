@@ -1,0 +1,19 @@
+# Installed by setup-node.sh (see vibehash-backup.service for the @...@ names, and for why it runs as the node's user).
+[Unit]
+Description=Check the Vibe Hash node (@URL@) answers and its chain moves
+After=network-online.target
+Wants=network-online.target
+OnFailure=@ALERT@%n.service
+
+[Service]
+Type=oneshot
+User=vibehash
+Group=vibehash
+Environment=URL=@URL@
+ExecStart=/usr/local/lib/vibehash/healthcheck.sh @NAMEARG@
+TimeoutStartSec=2min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=@DATA@

@@ -169,9 +169,7 @@ class _PinnedHandler(urllib.request.HTTPSHandler):
         return conn
 
 
-def opener(ca_file: str | None = None, pin: str | None = None) -> urllib.request.OpenerDirector:
-    """An opener for https URLs that trusts `ca_file` (with hostname checks) and/or exactly the certificate with
-    SHA-256 fingerprint `pin`. A pin alone needs no CA: the fingerprint is the trust."""
+def _context(ca_file: str | None, pin: str | None) -> ssl.SSLContext:
     if ca_file:
         try:
             ctx = ssl.create_default_context(cafile=str(ca_file))
@@ -179,20 +177,46 @@ def opener(ca_file: str | None = None, pin: str | None = None) -> urllib.request
             raise TLSError(f"can't load the CA file {ca_file}: {e}") from e
     else:
         ctx = ssl.create_default_context()
+    if pin and not ca_file:
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # (the pin is the trust)
+    return ctx
+
+
+def opener(ca_file: str | None = None, pin: str | None = None) -> urllib.request.OpenerDirector:
+    """An opener for https URLs that trusts `ca_file` (with hostname checks) and/or exactly the certificate with
+    SHA-256 fingerprint `pin`. A pin alone needs no CA: the fingerprint is the trust."""
+    ctx = _context(ca_file, pin)
     if not pin:
         return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-    if not ca_file:
-        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
     return urllib.request.build_opener(_PinnedHandler(ctx, normalize_fingerprint(pin)))
 
 
-def opener_for(url: str, ca_file: str | None = None, pin: str | None = None) -> urllib.request.OpenerDirector | None:
+def transport_ok(url: str) -> bool:
+    """Whether `url` is safe to talk to over the open internet: https, or a Tor onion address, which needs no TLS (a v3
+    onion address is the service's public key, so the circuit to it is authenticated and encrypted end to end)."""
+    from . import proxy
+
+    return url.lower().startswith("https://") or proxy.is_onion(url)
+
+
+def opener_for(url: str, ca_file: str | None = None, pin: str | None = None,
+               proxy: str | None = None) -> urllib.request.OpenerDirector | None:
     """What NodeClient opens `url` with: None (plain urllib) for http and for https checked against the system's
-    CAs; otherwise an opener for the given trust, or the one saved for this node by `setup`."""
-    if not url.lower().startswith("https://"):
-        return None
-    if ca_file is None and pin is None:
+    CAs; otherwise an opener for the given trust, or the one saved for this node by `setup`. With `proxy`
+    (socks5h://host:port, proxy.py) always an opener, and the one place a proxy enters one: the node's name goes to the
+    proxy to resolve, and an https node's CA or pin is checked inside the tunnel."""
+    secure = url.lower().startswith("https://")
+    if secure and ca_file is None and pin is None:
         from . import settings
 
         ca_file, pin = settings.tls_trust(url)
+    if proxy:
+        from . import proxy as proxies
+
+        if not secure:  # http: an onion needs no TLS (transport_ok); anything else was the caller's choice
+            return urllib.request.build_opener(proxies.handler(proxy))
+        pin = normalize_fingerprint(pin) if pin else None
+        return urllib.request.build_opener(proxies.handler(proxy, _context(ca_file, pin), pin))
+    if not secure:
+        return None
     return opener(ca_file, pin) if ca_file or pin else None

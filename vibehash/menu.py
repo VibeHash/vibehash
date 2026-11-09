@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -18,7 +17,7 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import settings, termui
+from . import settings, termui, update
 from .crypto import AddressError, checksummed, parse_address
 
 GUIDE = "https://vibehash.org/guide/"
@@ -125,11 +124,9 @@ def _evo_ready() -> bool:
         print("Evo Hash needs PyTorch for your graphics card first: More commands > Install GPU support, then come back.")
         return False
     if find_spec("transformers") is None or find_spec("huggingface_hub") is None:
-        if not _yes('Evo Hash needs transformers (pip install "vibehash[evo]"). Install it now?'):
+        if not _yes("Evo Hash needs transformers and datasets (a few hundred MB more). Install them now, from the signed release, checked by hash?"):
             return False
-        code = subprocess.call([sys.executable, "-m", "pip", "install", "--upgrade", "vibehash[evo]"])
-        if code != 0:
-            print(f"pip stopped with exit code {code}.")
+        if update.update(reinstall=True, variant="evo") != 0:  # the release's Evo requirements file
             return False
     return True
 
@@ -139,9 +136,8 @@ def _cancel() -> list[list[str]] | None:
 
 
 def _update() -> None:
-    print(f"> {sys.executable} -m pip install --upgrade vibehash")
-    code = subprocess.call([sys.executable, "-m", "pip", "install", "--upgrade", "vibehash"])
-    print("Updated. Quit and start `vibehash` again to use it." if code == 0 else f"pip stopped with exit code {code}.")
+    """The same as `vibehash update`: only a release whose signature checks out, installed by hash."""
+    update.update()
 
 
 MORE = (
@@ -196,7 +192,7 @@ SECTIONS = [
         Item("Set up again", "network, wallet, graphics card, stake", ("setup",)),
         Item("My wallet", "its address and where its file is", ("wallet", "show")),
         Item("Model files", "what big models take on this PC; clear them", ("cache",)),
-        Item("Update Vibe Hash", "install the latest release", action=_update),
+        Item("Update Vibe Hash", "install the latest signed release", action=_update),
         Item("Open the guide", "vibehash.org/guide, in your browser", action=lambda: webbrowser.open(GUIDE)),
         Item("More commands", "send, stake, predict, validators and the rest", submenu=MORE),
     ]),
@@ -219,6 +215,7 @@ class Status:
         except (OSError, ValueError, KeyError):
             self.address = None
         self.account: dict | None = None
+        self.onion: str | None = None  # how to reach the node over Tor, when it has an address and a proxy is on
         self.failed = False
         if self.address:
             threading.Thread(target=self._fetch, daemon=True).start()
@@ -226,7 +223,11 @@ class Status:
     def _fetch(self) -> None:
         from .client import NodeClient
         try:
-            self.account = NodeClient(self.node).account(self.address)
+            from . import proxy
+            node = NodeClient(self.node)
+            self.account = node.account(self.address)
+            if proxy.active()[0]:
+                self.onion = proxy.onion_hint(node.status())
         except Exception:  # offline, or a node that won't say: the menu works anyway
             self.failed = True
 
@@ -353,6 +354,8 @@ def frame(choice: int, status: Status, prog: str, width: int, glyphs: dict, sect
     termui.header(lambda *segs: top.append(line(*segs)), glyphs, termui.ASCII,
                   ["mining that trains real AI models", f"{_version()} · {urlsplit(status.node).hostname or status.node}"])
     top += ["", line(("  " + _clip(status.line(), width - 3, more), termui.TEXT))]
+    if status.onion:
+        top += [line(("  " + _clip(status.onion, width - 3, more), termui.DIM))]
     same = f"{prog} {' '.join(chosen.argv) or chosen.usage}" if chosen.argv or chosen.usage else ""
     leave = "q quit" if last is QUIT else "q back"
     keys = (f"  ↑↓ move · Enter choose · 1-9 jump · {leave}" if glyphs is not termui.ASCII else

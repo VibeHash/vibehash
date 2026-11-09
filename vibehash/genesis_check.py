@@ -22,7 +22,7 @@ from fractions import Fraction
 from urllib.parse import urlsplit
 
 from . import economics as econ
-from . import mnemonic
+from . import mnemonic, tls
 from .crypto import checksummed
 from .ledger import Chain
 from .tasks import SYN_PER_VIBE
@@ -157,7 +157,7 @@ def check(genesis: dict) -> list[Finding]:
             problem = _host_problem(url)
             if problem:
                 add("fail", "validator address", f"{checksummed(addr)}'s {url} {problem}")
-            elif urlsplit(url).scheme != "https":
+            elif not tls.transport_ok(url):
                 add("warn", "validator address", f"{checksummed(addr)}'s {url} isn't HTTPS")
         for host, addrs in sorted(hosts.items()):
             if len(addrs) > 1:

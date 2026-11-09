@@ -87,6 +87,16 @@ class WindowTests(Home):
         self.assertTrue(wv.started["http_server"])  # an http origin, which the feed's CORS allows
         self.assertTrue(window.Lock(7000).acquire())  # the lock was let go when the window closed
 
+    def test_a_changed_page_gets_a_new_address_and_the_old_file_goes(self):
+        """The web view caches by address: an updated app under the old name could go on showing the old page."""
+        first = window.page_file(7000)
+        self.assertEqual(window.page_file(7000), first)  # the same page, the same address
+        with mock.patch.object(window, "page", return_value="<html>changed</html>"):
+            second = window.page_file(7000)
+        self.assertNotEqual(second, first)
+        self.assertFalse(first.exists())
+        self.assertEqual(os.listdir(second.parent), [second.name])
+
     def test_without_pywebview_the_browser_gets_the_feeds_page(self):
         opened, said = [], []
         with mock.patch.dict(sys.modules, {"webview": None}):  # import webview -> ImportError
@@ -147,6 +157,43 @@ class ApiTests(Home):
         self.assertEqual(s["setup"]["step"], "mining")
         self.assertNotIn("pid", s)
 
+    def test_mfa_status_reflects_the_credential_store_for_the_apps_wallet(self):
+        try:
+            import keyring
+            import keyring.backend
+        except ImportError:
+            self.skipTest("keyring is not installed")
+
+        class Memory(keyring.backend.KeyringBackend):
+            priority = 1
+            data: dict = {}
+
+            def set_password(self, service, username, password):
+                self.data[(service, username)] = password
+
+            def get_password(self, service, username):
+                return self.data.get((service, username))
+
+            def delete_password(self, service, username):
+                self.data.pop((service, username), None)
+
+        old = keyring.get_keyring()
+        Memory.data = {}
+        keyring.set_keyring(Memory())
+        self.addCleanup(keyring.set_keyring, old)
+        self.assertEqual(self.api.mfa_status(), {"on": False})  # no app, no wallet
+        self.alive(wallet={"address": "vibe1" + "ab" * 18})
+        self.assertEqual(self.api.mfa_status(), {"on": False})
+        keyring.set_password("vibehash-totp", "vibe1" + "ab" * 18, "KEY")
+        self.assertEqual(self.api.mfa_status(), {"on": True})
+        with mock.patch("vibehash.credstore.get", return_value=None):
+            self.assertEqual(self.api.mfa_status(), {"on": False})
+        from vibehash import credstore
+        with mock.patch("vibehash.credstore.get", side_effect=credstore.Unavailable("locked")):
+            out = self.api.mfa_status()
+        self.assertIsNone(out["on"])  # unknown, not off
+        self.assertIn("locked", out["why"])
+
     def test_orders_go_to_the_running_app_only(self):
         self.assertEqual(self.api.order("pause")["ok"], False)  # not running
         self.alive()
@@ -168,6 +215,84 @@ class ApiTests(Home):
         w = self.api.wallet()
         self.assertEqual((w["words"], w["words_file"]), ([], None))
 
+    def test_new_words_come_from_the_apps_listener_and_words_seen_clears_them(self):
+        words = " ".join(f"w{i}" for i in range(1, 25))
+        seen = []
+        port = app.serve_words(words, "secret-token", on_seen=lambda: seen.append(1))
+        self.addCleanup(app.stop_words)
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port,
+                           "words_token": "wrong"})
+        self.assertEqual(self.api.wallet()["words"], [])  # the token in the state is what the app checks
+        self.assertFalse(self.api.words_seen()["ok"])
+        self.assertEqual(seen, [])
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port,
+                           "words_token": "secret-token"})
+        w = self.api.wallet()
+        self.assertEqual(w["words"], words.split())
+        self.assertEqual(self.api.wallet()["words"], words.split())  # a restarted window still gets them
+        self.assertNotIn("w1 ", Path(app.state_path()).read_text())  # (the state holds the port, not the words)
+        with mock.patch.object(app, "_winreg", return_value=None):
+            self.assertTrue(self.api.settings()["words_pending"])
+        self.assertEqual(self.api.words_seen(), {"ok": True})
+        self.assertEqual(seen, [1])
+        self.assertEqual(self.api.wallet()["words"], [])  # the app answers 404 now
+
+    def test_words_held_in_the_store_reach_the_window_and_seen_deletes_them_there(self):
+        """A new wallet's words wait in the credential store until the tick (app.hold_words): a restarted app's
+        listener serves them from there, and words_seen() removes the store entry."""
+        from tests.test_wallet import use_memory_keyring
+        from vibehash import credstore
+        store = use_memory_keyring(self)
+        words = " ".join(f"w{i}" for i in range(1, 25))
+        self.assertTrue(app.hold_words("vibe1abc", words))
+        self.assertEqual(store.data[(credstore.WALLET_WORDS, "vibe1abc")], words)
+        seen = []
+        for _ in range(2):  # the app quit before the tick and started again: a new listener, the same words
+            port = app.serve_words(None, "secret-token", on_seen=lambda: seen.append(1), address="vibe1abc")
+            self.addCleanup(app.stop_words)
+            self.alive(wallet={"address": "vibe1abc", "path": "w.json", "words_pending": True, "words_port": port,
+                               "words_token": "secret-token"})
+            self.assertEqual(self.api.wallet()["words"], words.split())
+            self.assertNotIn("w7", Path(app.state_path()).read_text())
+            app.stop_words()
+        port = app.serve_words(None, "secret-token", on_seen=lambda: seen.append(1), address="vibe1abc")
+        self.alive(wallet={"address": "vibe1abc", "path": "w.json", "words_pending": True, "words_port": port,
+                           "words_token": "secret-token"})
+        self.assertEqual(self.api.words_seen(), {"ok": True})
+        self.assertEqual(seen, [1])
+        self.assertNotIn((credstore.WALLET_WORDS, "vibe1abc"), store.data)
+        self.assertEqual(self.api.wallet()["words"], [])
+
+    def test_words_pending_with_nobody_listening_is_no_words_not_an_error(self):
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.alive(wallet={"address": "0xabc", "path": "w.json", "words_pending": True, "words_port": port})
+        self.assertEqual(self.api.wallet()["words"], [])
+        self.assertFalse(self.api.words_seen()["ok"])
+        self.alive(wallet={"address": "0xabc", "path": "w.json"})
+        self.assertFalse(self.api.words_seen()["ok"])  # nothing was waiting
+
+    def test_the_window_only_asks_this_computer_whatever_the_state_says(self):
+        self.alive(wallet={"address": "0xabc", "words_pending": True, "words_port": "80@attacker.example"})
+        with mock.patch("urllib.request.urlopen") as opened:
+            self.assertEqual(self.api.wallet()["words"], [])
+            self.assertFalse(self.api.words_seen()["ok"])
+        opened.assert_not_called()
+
+    def test_deepseek_is_remembered_and_a_running_app_restarts_its_worker(self):
+        with mock.patch.object(app, "_winreg", return_value=None):
+            self.assertEqual(self.api.settings()["deepseek"], "no")
+            self.assertEqual(self.api.set_deepseek(True), {"ok": True, "deepseek": "yes"})
+            self.assertEqual(settings.load()["deepseek"], "yes")  # what `vibehash worker` reads as it starts
+            self.assertIsNone(app.take_order())  # no app running: the setting is enough
+            self.alive()
+            self.api.set_deepseek(False)
+            self.assertEqual(self.api.settings()["deepseek"], "no")
+            self.assertEqual(app.take_order(), "restart")
+            self.assertFalse(self.api.set_deepseek("yes")["ok"])
+
     def test_settings_the_avatar_and_the_welcome(self):
         with mock.patch.object(app, "_winreg", return_value=None):
             c = self.api.settings()
@@ -183,6 +308,19 @@ class ApiTests(Home):
             self.assertTrue(self.api.settings()["welcomed"])
             self.api.welcome_again()
             self.assertFalse(self.api.settings()["welcomed"])
+
+    def test_an_old_launcher_is_told_to_download_the_signed_one(self):
+        def settings_with(**env):
+            base = {k: v for k, v in os.environ.items() if k not in ("VIBEHASH_LAUNCHER", "VIBEHASH_LAUNCHER_VERSION")}
+            with mock.patch.dict(os.environ, base | env, clear=True):
+                c = self.api.settings()
+            return c["launcher_version"], c["launcher_outdated"]
+        self.assertEqual(settings_with(), (None, False))  # not under the launcher (pip, a script): nothing to update
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe"), (None, True))  # a 1.1 launcher says no version
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="1.1"), ("1.1", True))
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="1.2"), ("1.2", False))
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="1.10"), ("1.10", False))  # numbers, not text
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="garbage"), ("garbage", True))
 
     def test_start_at_login_through_the_window(self):
         calls = []
@@ -210,6 +348,12 @@ class ApiTests(Home):
             for bad in (7, True, "5", -1):
                 self.assertFalse(self.api.set_option("idle_minutes", bad)["ok"], bad)
             self.assertEqual(self.api.settings()["idle_minutes"], 10)
+
+    def test_the_docs_are_a_named_link(self):
+        self.assertEqual(window.LINKS["docs"], "https://docs.vibehash.org")
+        page = window.DASHBOARD.read_text(encoding="utf-8")
+        self.assertIn('data-link="docs"', page)
+        self.assertIn('data-link="help"', page)
 
     def test_links_open_by_name_only_in_the_browser(self):
         opened = []
@@ -342,6 +486,15 @@ class PageTests(unittest.TestCase):
         self.assertIn("z-index: 30", self.page)
         self.assertTrue(all(o > 0 for o in order))
         self.assertIn("!welcomeOffered", self.script)  # a settings reload mid-tour doesn't restart it
+        # words not yet written down are offered on every start until the tick, even after the tour was done or skipped
+        self.assertIn("(!c.welcomed || c.words_pending) && !welcomeOffered", self.script)
+
+    def test_the_old_launcher_banner_is_one_time_and_dismissible(self):
+        self.assertIn('id="launcher-banner"', self.page)
+        self.assertIn("A newer, signed Vibe Hash installer is available", self.page)
+        self.assertIn("c.launcher_outdated", self.script)
+        self.assertIn('$("launcher-later")', self.script)
+        self.assertIn('"vh-launcher-banner"', self.script)  # remembered once dismissed
 
     def test_nothing_from_the_wider_web_and_no_markup_from_data(self):
         self.assertNotIn("https://", self.page.replace("https://vibehash.org", ""))

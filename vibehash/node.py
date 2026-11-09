@@ -14,7 +14,7 @@ Public (read-only) endpoints let anyone audit the chain:
     GET  /account/<address>      balance, stake, unbonding, nonce, reputation
     GET  /validators             each validator's address, stake, and whether it has a vote
     GET  /job/<id>               job spec, remaining escrow, validation score after each round, model size
-    GET  /job/<id>/model?offset=N   one chunk of the job's latest trained weights (what its poster downloads)
+    GET  /job/<id>/model?offset=N   one chunk of the job's latest trained weights (what its poster downloads; to its owner and the validators alone under --model-access owner)
     GET  /round/params           the current round's starting weights (as a blob id)
     GET  /round/<height>/record  the signed messages and check results a block's round was decided from (replay.py)
     GET  /round/games            a fine-tune round's disputes: whose move, and what's been posted (dispute.py)
@@ -57,14 +57,14 @@ import numpy as np
 
 from . import deepseek_graph as dsg
 from . import economics as econ
-from . import __version__, advice, filelock, hardware, netstats, nodeadmin, receipts, supply, tasks
+from . import __version__, advice, filelock, hardware, netstats, nodeadmin, proxy, receipts, supply, tasks
 from .blobs import CHUNK, MAX_DATASET, STALE_PART_S, BlobError, BlobStore, check_id
 from .client import MIN_CLIENT, OLD_CLIENT, NodeError, agent_version, parse_version  # the oldest releases it takes
 from .consensus import Engine, Timeouts, check_certificate, evidence_memo
 from .coordinator import (ES_RECORD_VERSION, FINETUNE_RECORD_VERSION, RECORD_VERSION, SHARDED_RECORD_VERSION, Coordinator,
                           CoordinatorConfig, Phase, ProtocolError, valid_gap)
 from .crypto import AddressError, KeyPair, address_of, checksummed, parse_address, verify
-from .ledger import EVIDENCE_WINDOW, VERSION, Block, InvalidBlock, Tx, apply_block, canonical
+from .ledger import EVIDENCE_WINDOW, SYSTEM, VERSION, Block, InvalidBlock, Tx, apply_block, canonical
 from .model import params_hash
 from .p2p import Peers
 from .ratelimit import GuardedHandler, GuardedServer, Limits, path_parts
@@ -75,6 +75,11 @@ from .verification import FINETUNE_CHECK
 from .wire import MAX_CLOCK_SKEW_S, WireError, blob_openings_in, blob_openings_out, commitment_in, commitment_out, open_envelope
 
 log = logging.getLogger("vibehash.node")
+MODEL_ACCESS = ("public", "owner")
+
+
+class ModelPrivate(WireError):
+    """A job's model asked for by someone it is not served to (HTTP 403, where a WireError is a 400)."""
 MAX_JSON = 4 * 2**20  # every JSON message is small now; weights travel as blobs
 # ...except a proposal: a block and its round record, about 4 KB a unit at the default 8 segments, so this takes
 # ~16,000 units (a job may ask for 10,000 a round, plus replicas) unless they have thousands of segments each. Only
@@ -198,7 +203,8 @@ class Node:
                  limits: Limits | None = None, tls: ssl.SSLContext | None = None,
                  peers: list[str] = (), announce: str | None = None, timeouts: Timeouts | None = None,
                  max_job_bytes: int = MAX_JOB_BYTES, bucket: dsg.Signer | None = None, min_client: str = MIN_CLIENT,
-                 admin_token: str | None = None, admin_mfa: str | None = None):
+                 admin_token: str | None = None, admin_mfa: str | None = None, onion: str | None = None,
+                 model_access: str = "public"):
         """`peers`: other nodes to connect to (validators find each other from the chain without them).
         `announce`: the address other nodes reach this one at, if it isn't the one it listens on.
         `max_job_bytes`: the biggest model (one checkpoint) a job may have for this node to relay its post_job.
@@ -207,10 +213,19 @@ class Node:
         reads one from the environment).
         `min_client`: the oldest release whose workers may register (MIN_CLIENT); older ones are told to upgrade.
         `admin_token`: what the admin app sends to reach /admin/* (nodeadmin.py); None: those routes don't exist.
-        `admin_mfa`: an authenticator app's key, so the token also needs that app's code (a sign-in, nodeadmin.py)."""
+        `admin_mfa`: an authenticator app's key, so the token also needs that app's code (a sign-in, nodeadmin.py).
+        `onion`: this node's Tor hidden-service address (ADDR.onion), which /status shows when it is set.
+        `model_access`: who may download a job's weights (GET /job/<id>/model): "public" (anyone, as always) or "owner"
+        (the job's owner, validators, and anyone for a starter job or one whose spec says public; job_model). A policy
+        of this node's alone: nothing on the chain depends on it."""
+        if model_access not in MODEL_ACCESS:
+            raise ValueError(f"model_access is one of {', '.join(MODEL_ACCESS)}, not {model_access!r}")
+        self.model_access = model_access
+        self._would_refuse: set[tuple[str, str | None]] = set()  # (job, address) already logged under "public"
         if not parse_version(min_client):
             raise ValueError(f"min_client is a release such as {MIN_CLIENT}, not {min_client!r}")
         self.min_client = min_client
+        self.onion = onion
         self.times = times or PhaseTimes()
         self.keep_rounds = keep_rounds  # rounds whose checkpoints stay available to re-check (the challenge window)
         self.max_job_bytes = max_job_bytes
@@ -263,7 +278,8 @@ class Node:
             raise
         self.threads: list[threading.Thread] = []
         self.announce = (announce or self.chain.state.validators.get(keys.address) or self.url).rstrip("/")
-        self.peers = Peers(self.announce, keys.address, list(peers), lambda: self.chain.state.validators)
+        self.peers = Peers(self.announce, keys.address, list(peers), lambda: self.chain.state.validators,
+                           proxy=proxy.active()[0], tor_mode=proxy.active()[1])
         # A leader runs a whole training round before it can propose, so the others wait that long for it, and more.
         self.engine = Engine(self.chain.chain_id, keys, timeouts or Timeouts(propose=1.5 * self.times.round_s + 5),
                              validators=lambda: self.chain.state.validator_set(), validate=self._validate,
@@ -820,7 +836,7 @@ class Node:
             return True
         for url in self.peers.urls():
             try:  # (the size is our job's; a peer that hasn't trained it has nothing we lack)
-                _, raw = self.peers.client(url, timeout=60).download_model(job_id, job, untrained=False)
+                _, raw = self.peers.client(url, timeout=60).download_model(job_id, job, untrained=False, keys=self.keys)
             except NodeError:
                 continue
             weights = np.frombuffer(raw, dtype=job.wire_dtype).astype(np.float64)
@@ -931,11 +947,13 @@ class Node:
                 # chain's tip, and the oldest release whose workers it takes. A client that knows fewer block versions
                 # than the tip's, or is older than min_client, is told to upgrade (client.too_old).
                 "version": __version__, "block_version": VERSION, "tip_version": self.chain.tip.version,
-                "min_client": self.min_client,
+                "min_client": self.min_client, "model_access": self.model_access,
                 # Rounds that paid for work so far: the halving clock, on chains whose schedule counts them.
                 "paid_rounds": (self.chain.state.paid_rounds if self.chain.state.economics.count == econ.PAID_ROUNDS
                                 else None),
             }
+        if self.onion:
+            out["onion"] = self.onion  # only when set: clients and tests that don't know it see no change
         if consensus is not None:
             # Workers do the round with its leader, the validator whose turn it is to propose: None means this node.
             leader = consensus["proposer"]
@@ -1093,9 +1111,36 @@ class Node:
                 del self._census_cache[h]
         return out
 
-    def job_model(self, job_id: str, offset: int) -> bytes:
+    def _model_allowed(self, job_id: str, reader: str | None) -> bool:
+        """Whether `reader` (the address that signed the request, or None) may have the job's model under "owner": a
+        starter job's (SYSTEM's), one whose spec says public, its owner, or a validator (peers sync models)."""
+        st = self.chain.state
+        owner = st.job_owner.get(job_id)
+        if owner == SYSTEM or reader is not None and (reader == owner or reader in st.validator_set()):
+            return True
+        try:
+            return json.loads(st.jobs[job_id]).get("public") is True
+        except (ValueError, AttributeError):
+            return False
+
+    def job_model(self, job_id: str, offset: int, headers) -> bytes:
         if job_id not in self.chain.state.jobs:
             raise KeyError(job_id)
+        try:
+            reader = self._model_reader(job_id, headers)
+        except WireError as e:
+            if self.model_access == "owner":
+                raise
+            reader = None  # served as ever under "public": a peer whose clock is off must not lose the model for signing it
+            if (job_id, "bad signature") not in self._would_refuse and len(self._would_refuse) < 10_000:
+                self._would_refuse.add((job_id, "bad signature"))
+                log.info("model_access=owner would refuse a request for job %s: %s", job_id, e)
+        if not self._model_allowed(job_id, reader):
+            if self.model_access == "owner":
+                raise ModelPrivate("this job's model is private to its owner")
+            if (job_id, reader) not in self._would_refuse and len(self._would_refuse) < 10_000:
+                self._would_refuse.add((job_id, reader))
+                log.info("model_access=owner would refuse %s the model of job %s", reader or "an unsigned request", job_id)
         _, data, _ = self._model_bytes(job_id)
         return data[offset:offset + CHUNK]
 
@@ -1288,17 +1333,33 @@ class Node:
 
     # --- binary uploads -------------------------------------------------------------------
 
-    def _uploader(self, kind: str, blob_id: str, total: int, headers) -> str:
+    def _signed_by(self, kind: str, *parts, headers) -> str | None:
+        """The address that signed a request for (kind, *parts): the X-VibeHash-* headers (client._auth), checked
+        against the chain and the clock. None if the request carries none of the three; WireError if it is malformed,
+        stale or badly signed."""
+        names = ("X-VibeHash-Pubkey", "X-VibeHash-Sig", "X-VibeHash-Ts")
+        if not any(headers.get(h) for h in names):
+            return None
         try:
             pub, sig = bytes.fromhex(headers.get("X-VibeHash-Pubkey", "")), bytes.fromhex(headers.get("X-VibeHash-Sig", ""))
             ts = int(headers.get("X-VibeHash-Ts", "0"))
         except ValueError as e:
-            raise WireError("missing or malformed upload signature") from e
+            raise WireError("missing or malformed request signature") from e
         if abs(time.time() - ts) > MAX_CLOCK_SKEW_S:
-            raise WireError("upload timestamp too far from node clock")
-        if not verify(pub, canonical([self.chain.chain_id, kind, blob_id, total, ts]), sig):
-            raise WireError("bad upload signature")
+            raise WireError("request timestamp too far from node clock")
+        if not verify(pub, canonical([self.chain.chain_id, kind, *parts, ts]), sig):
+            raise WireError("bad request signature")
         return address_of(pub)
+
+    def _uploader(self, kind: str, blob_id: str, total: int, headers) -> str:
+        """Who is uploading: the signer of the chunk, which an upload must have."""
+        addr = self._signed_by(kind, blob_id, total, headers=headers)
+        if addr is None:
+            raise WireError("missing or malformed request signature")
+        return addr
+
+    def _model_reader(self, job_id: str, headers) -> str | None:
+        return self._signed_by("model", job_id, 0, headers=headers)
 
     def authorize_blob(self, blob_id: str, total: int, headers) -> str:
         """Only this round's workers may upload checkpoints, of exactly this job's size, within a quota.
@@ -1506,9 +1567,12 @@ def _handler(node: Node):
             """Where the request came from (behind a proxy on this computer, the client it forwarded for)."""
             return nodeadmin.client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
 
-        def _admin(self) -> None:
-            """The admin routes' gate (nodeadmin.Admin.check): the token, a sign-in if the node wants a code."""
-            node.admin.check(self.headers.get("Authorization"), self.headers.get(nodeadmin.LOGIN_HEADER), self._ip())
+        def _admin(self, fresh: bool = False) -> None:
+            """The admin routes' gate (nodeadmin.Admin.check): the token, a sign-in if the node wants a code. `fresh`:
+            an order that does something (hold, release, review), which on a node with a key also takes a code of its
+            own (X-Admin-Code); a node with no key has none to ask for, and the token is all it has."""
+            node.admin.check(self.headers.get("Authorization"), self.headers.get(nodeadmin.LOGIN_HEADER), self._ip(),
+                             code=self.headers.get(nodeadmin.CODE_HEADER), fresh=fresh and node.admin.mfa is not None)
 
         def _guard(self, fn, raw: bool = False, content_type: str | None = None):
             try:
@@ -1518,6 +1582,8 @@ def _handler(node: Node):
                 self._send(404, {"error": f"not found: {e}"})
             except nodeadmin.Forbidden as e:
                 self._send(401, {"error": str(e)}, headers={"WWW-Authenticate": "Bearer"})
+            except ModelPrivate as e:  # (before WireError, which it is, and which is a 400)
+                self._send(403, {"error": str(e)})
             except nodeadmin.TooMany as e:
                 self._send(403, {"error": str(e)}, headers={"Retry-After": str(e.retry_after)})
             except (ProtocolError, WireError, InvalidJob, BlobError, ValueError, TypeError, OverflowError) as e:
@@ -1542,7 +1608,7 @@ def _handler(node: Node):
                     self._guard(lambda: store.read_chunk(check_id(bid), _number(q.get("offset", ["0"])[0], "offset"), CHUNK), raw=True)
                 return
             if len(parts) == 3 and parts[0] == "job" and parts[2] == "model":
-                self._guard(lambda: node.job_model(parts[1], _number(q.get("offset", ["0"])[0], "offset")), raw=True)
+                self._guard(lambda: node.job_model(parts[1], _number(q.get("offset", ["0"])[0], "offset"), self.headers), raw=True)
                 return
             if parts in (["supply", "total"], ["supply", "circulating"]):  # a number alone, as listing sites read it
                 self._guard(lambda: node.supply()["vibe"][parts[1]].encode(), content_type="text/plain; charset=utf-8")
@@ -1645,7 +1711,8 @@ def _handler(node: Node):
                 if parts == ["admin", "login"]:  # the authenticator app's code for a sign-in (nodeadmin.py)
                     return node.admin.login(self.headers.get("Authorization"), body.get("code"), self._ip())
                 if parts[:1] == ["admin"]:  # the operators' orders (nodeadmin.py): 404 without a token, 401 with the wrong one
-                    self._admin()
+                    order = parts == ["admin", "review"] or (len(parts) == 4 and parts[1] == "jobs" and parts[3] in ("hold", "release"))
+                    self._admin(fresh=order)  # (an unknown route takes no code)
                     if parts == ["admin", "review"]:
                         return node.admin.set_review(bool(body.get("on")), list(node.chain.state.jobs))
                     if len(parts) == 4 and parts[1] == "jobs" and parts[3] in ("hold", "release"):

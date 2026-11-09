@@ -19,7 +19,7 @@ from vibehash.coordinator import (RECORD_VERSION, SHARDED_RECORD_VERSION, CellTa
 from vibehash.crypto import KeyPair, h256
 from vibehash.ledger import Block, Chain, canonical
 from vibehash.model import ModelSpec, params_hash, train_segment_numpy
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.replay import replay_block
 from vibehash.tasks import SYN_PER_VIBE, InvalidJob, TrainingJob, Verdict, WorkUnit
 from vibehash.verification import challenge_segments

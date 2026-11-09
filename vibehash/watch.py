@@ -129,12 +129,13 @@ class Watch:
 
     def _worker(self, name: str, client, now: float) -> dict:
         s = client.stats
-        job = s.job
+        job, skipped = s.job, getattr(s, "skipped", None)
         out = {
             "name": name, "address": client.keys.address, "device": client.backend.describe(),
             "hardware": getattr(client, "hardware_class", None),
             "round": s.round, "phase": s.phase, "phase_ends": s.phase_ends, "progress": list(s.progress) if s.progress else None,
             "height": s.height, "job": None if job is None else {"id": job.job_id, "kind": _kind(job)},
+            "skipped": None if skipped is None else {"id": skipped.job_id, "kind": _kind(skipped)},
             "activity": clean(s.activity), "busy": s.busy, "flops_per_sec": s.flops_per_sec,
             "this_round": {"assigned": s.assigned, "trained": s.trained, "committed": s.committed, "checked": s.checked},
             "session": {"rounds": s.rounds, "units": s.units, "checks": s.checks, "training_flops": s.training_flops},

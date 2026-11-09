@@ -36,7 +36,7 @@ import json
 from dataclasses import asdict, dataclass, field
 
 from . import economics as econ
-from .crypto import KeyPair, address_of, h256, is_canonical_address, merkle_root, verify
+from .crypto import KeyPair, address_of, canonical, h256, is_canonical_address, merkle_root, verify  # (canonical: crypto's, the one definition)
 from .tasks import InvalidJob, TrainingJob
 
 DEFAULT_CHAIN_ID = "vibehash-testnet-1"
@@ -107,10 +107,6 @@ MAX_TX_BYTES = 16 * 1024
 
 class InvalidBlock(Exception):
     pass
-
-
-def canonical(obj) -> bytes:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
 
 
 def consensus_message(chain_id: str, kind: str, height: int, round_: int, block_id: str | None,

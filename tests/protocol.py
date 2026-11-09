@@ -1,0 +1,246 @@
+"""In-process network driver for simulations and tests.
+
+Runs the same Coordinator a real node runs, but with simulated workers called
+directly and a simulated clock, so hundreds of rounds take seconds. It also
+runs sharded jobs' teams (shards.py), whose members hand each other edge
+tensors in this one process, which nodes' workers can't do yet.
+"""
+from __future__ import annotations
+
+from collections import defaultdict
+
+import numpy as np
+
+from vibehash import shards as sh
+from vibehash.coordinator import CellTask, Coordinator, CoordinatorConfig, RoundReport
+from vibehash.crypto import KeyPair
+from vibehash.ledger import SYSTEM, Chain, Tx
+from vibehash.blobs import array_id
+from vibehash.tasks import Reveal, TrainingJob
+from vibehash.wire import blob_openings_out, seal
+from vibehash.worker import Worker
+
+
+class Checkpoints:
+    """Every checkpoint revealed in simulated rounds, by blob id: what a node keeps for its challenge window,
+    so simulated rounds can be rechecked like a node's (replay.py)."""
+
+    def __init__(self):
+        self.arrays: dict[str, np.ndarray] = {}
+
+    def put(self, arr: np.ndarray, job: TrainingJob) -> str:
+        bid = array_id(arr, job.wire_dtype)
+        self.arrays[bid] = np.asarray(arr, dtype=np.float64)
+        return bid
+
+    def array(self, bid: str, job: TrainingJob) -> np.ndarray:
+        return self.arrays[bid]
+
+    def attach(self, job: TrainingJob) -> None:
+        pass  # simulated jobs use synthetic data, which every replay rebuilds from the job's seed
+
+
+class Protocol:
+    def __init__(self, chain: Chain, workers: list[Worker], config: CoordinatorConfig | None = None, seed: int = 0):
+        self.coord = Coordinator(chain, None, config)
+        self.coord.runs_teams = True  # run_round passes sharded units' tensors between teammates itself
+        self.workers = {w.address: w for w in workers}
+        self.rng = np.random.default_rng(seed + 1)  # simulated outages only; the coordinator draws from the chain
+        self.checkpoints = Checkpoints()
+
+    def _wire(self, rv: Reveal, job: TrainingJob) -> dict:
+        """A reveal as a node records it: checkpoints by blob id."""
+        put = lambda a: self.checkpoints.put(a, job)  # noqa: E731
+        return {"unit_id": rv.unit_id, "worker": rv.worker, "merkle_root": rv.merkle_root.hex(), "salt": rv.salt.hex(),
+                "final": put(rv.final_params), "openings": blob_openings_out({i: (put(a), pr) for i, (a, pr) in rv.openings.items()})}
+
+    def _signed(self, w: Worker, kind: str, body: dict) -> dict:
+        """The envelope a real worker would send, so simulated rounds replay like a node's."""
+        return seal(w.keys, kind, body, self.chain.chain_id, now=self.chain.tip.height + 1)
+
+    @property
+    def chain(self) -> Chain:
+        return self.coord.chain
+
+    @property
+    def config(self) -> CoordinatorConfig:
+        return self.coord.config
+
+    @property
+    def history(self) -> list[RoundReport]:
+        return self.coord.history
+
+    @property
+    def reputation(self) -> dict[str, float]:
+        return {a: self.chain.state.rep(a) for a in self.workers}
+
+    def eligible(self, addr: str) -> bool:
+        return self.coord.eligible(addr)
+
+    def _proposer(self, seed: bytes) -> KeyPair:
+        stakers = sorted(a for a in self.workers if self.chain.state.staked(a))  # not those still earning in
+        weights = np.array([self.chain.state.stake(a) for a in stakers], dtype=float)
+        pick = np.random.default_rng(int.from_bytes(seed[:8], "big")).choice(len(stakers), p=weights / weights.sum())
+        return self.workers[stakers[pick]].keys
+
+    def post_job(self, requester: KeyPair, job: TrainingJob) -> None:
+        """Submit the job and seal it into a block straight away."""
+        tx = Tx.signed(requester, "post_job", SYSTEM, job.budget, self.chain.next_nonce(requester.address),
+                       job.spec_json(), self.chain.chain_id)
+        self.coord.add_job(job)
+        self.coord.submit_tx(tx)
+        self.coord.keys = self._proposer(self.chain.tip.hash)
+        self.coord.seal_pending(timestamp=self.chain.tip.height + 1)
+        self.coord.keys = None
+
+    def submit(self, tx: Tx) -> None:
+        self.coord.submit_tx(tx)
+
+    def run_round(self, job_id: str | None = None) -> RoundReport:
+        c = self.coord
+        if not c.open_round():
+            raise RuntimeError("no active job with escrow")
+        r = c.r
+        job = c.job(r.job_id)
+        for addr, w in self.workers.items():
+            if self.eligible(addr):
+                body = {"round": r.round_no, "flops_per_sec": w.hardware.flops_per_sec, "memory_mb": w.hardware.memory_mb}
+                c.register(addr, w.hardware.flops_per_sec, w.hardware.memory_mb, envelope=self._signed(w, "register", body))
+
+        c.start_compute()
+        if job.sharded:
+            self._train_teams(job)
+        else:
+            for addr, unit_ids in list(r.assignments.items()):
+                w = self.workers[addr]
+                if self.rng.random() > w.hardware.reliability:
+                    continue  # dropped offline / ran out of time
+                for uid in unit_ids:
+                    c.commit(w.compute(r.units[uid], job, r.start))
+
+        beacon = c.start_reveal()
+        if job.sharded:
+            self._reveal_teams(job, beacon)
+        else:
+            published: dict[str, list[Reveal]] = defaultdict(list)
+            # Honest workers reveal first so a copycat has something to try copying.
+            keys = sorted(r.commitments, key=lambda k: self.workers[k[1]].behavior == "copycat")
+            for uid, addr in keys:
+                rv = self.workers[addr].reveal(r.units[uid], job, beacon, self.config.challenge_segments, published[uid])
+                if rv is not None:
+                    c.reveal(rv, wire=self._wire(rv, job))
+                    published[uid].append(rv)
+
+        c.start_verify()
+        self._answer_tasks(job)
+        if c.start_disputes():  # a fine-tune's disputes, played out move by move
+            self._play_disputes(job)
+
+        report = c.finalize(proposer_keys=self._proposer(beacon), timestamp=report_ts(self.chain))
+        for w in self.workers.values():
+            for uid in [*w._work, *w._shards]:
+                w.forget(uid)
+        return report
+
+    def _answer_tasks(self, job: TrainingJob) -> None:
+        """Every worker does the tasks it was given this phase: checks, cells, a fine-tune's scores."""
+        c, r = self.coord, self.coord.r
+        for addr, w in self.workers.items():
+            if w.verifier_behavior == "absent":
+                continue
+            for t in c.tasks_for(addr):
+                score = None
+                if isinstance(t, CellTask):
+                    ok, bad = w.check_cell(job, t)
+                elif t.kind == "score":
+                    (ok, bad), score = (True, None), list(w.score(job, r.start))
+                else:
+                    ok, bad = w.verify(job, t.unit, t.openings, t.segments)
+                body = {"round": r.round_no, "task_id": t.task_id, "ok": bool(ok), "bad_segment": bad}
+                if score is not None:
+                    body["score"] = score
+                c.submit_verdict(addr, t.task_id, ok, bad, envelope=self._signed(w, "verdict", body), score=score)
+
+    def _play_disputes(self, job: TrainingJob) -> None:
+        """Each dispute's parties make their moves (tracer.Party) until every dispute is over or waits on a party
+        that won't move (a "quitter" challenger); those it settles (Coordinator._settle_finetune)."""
+        from vibehash import finetune
+        from vibehash.program import Program
+        from vibehash.tracer import Party
+        from vibehash.worker import tamper
+
+        c = self.coord
+        remote = _Blobs(c)
+        rt = finetune.runtime(job.spec, job.data, finetune.device_of(None))
+        parties = {a: Party(rt, job.spec, job.data, remote, tamper if w.behavior == "tamper" else None)
+                   for a, w in self.workers.items()}
+        moved = True
+        while moved:
+            moved = False
+            for g in c.game_views():
+                if g["turn"] == "done":
+                    continue
+                who = g["challenger"] if g["turn"] == "pick" else g["defender"]
+                if g["turn"] == "pick" and self.workers[who].verifier_behavior == "quitter":
+                    continue
+                p, prog = parties[who], Program.of(job, int(g["seed"]))
+                move = (p.pick(prog, g) if g["turn"] == "pick" else {"split": p.split(prog, g)}
+                        if g["turn"] == "split" else {"evidence": remote.put(p.evidence(prog, g))})
+                body = {"round": c.r.round_no, "game": g["id"], "n": g["n"], "move": move}
+                c.submit_move(who, body, envelope=self._signed(self.workers[who], "move", body))
+                moved = True
+
+    def _train_teams(self, job: TrainingJob) -> None:
+        """Each team trains its units as a pipeline (shards.train_sharded), every tensor a member sends signed by it
+        and kept by the teammate it went to; then each member commits to its own trace. A member that drops offline
+        never commits: its teammates' units then can't be checked at that edge, and go unpaid but unblamed."""
+        c, r = self.coord, self.coord.r
+        parts = sh.split(job.spec, job.shards)
+        for team in r.teams:
+            members = [self.workers[a] for a in team.members]
+            gone = {w.address for w in members if self.rng.random() > w.hardware.reliability}
+            cheats = {k: w.shard_cheat for k, w in enumerate(members) if w.shard_cheat}
+            for uid in team.units:
+                unit = r.units[uid]
+                traces = sh.train_sharded(job.spec, parts, job.data, r.start, unit.seed, job.steps_per_unit,
+                                          job.checkpoint_every, job.lr, job.batch_size, cheats,
+                                          sign=[w.edge_signer(self.chain.chain_id, r.round_no, uid) for w in members])
+                for w, trace in zip(members, traces):
+                    if w.address not in gone:
+                        c.commit(w.commit_trace(unit, trace))
+
+    def _reveal_teams(self, job: TrainingJob, beacon: bytes) -> None:
+        """Members reveal what the beacon asks of their shards; then the receiver at each edge whose two commitments
+        disagree shows the message its neighbour signed for what it sent, which says who lied."""
+        c, r = self.coord, self.coord.r
+        put = lambda a: self.checkpoints.put(a, job)  # noqa: E731
+        for team in r.teams:
+            for uid in team.units:
+                for addr in team.members:
+                    if (uid, addr) in r.commitments:
+                        rv = self.workers[addr].reveal_cells(r.units[uid], job, beacon, self.config.challenge_segments, team.members)
+                        if rv is not None:
+                            c.reveal_shard(rv, wire=sh.reveal_out(rv, put))
+        for d in c.edge_disputes():
+            w = self.workers[d.receiver]
+            message = w.edge_evidence(d.unit_id, d.step, d.kind)
+            if message is not None:
+                body = {"round": r.round_no, "unit_id": d.unit_id, "step": d.step, "kind": d.kind, **message}
+                c.submit_edge_evidence(d.receiver, d.unit_id, d.step, d.kind, message, envelope=self._signed(w, "edge", body))
+
+
+def report_ts(chain: Chain) -> int:
+    return chain.tip.height + 1
+
+
+class _Blobs:
+    """A dispute's states and evidence, kept by the coordinator in memory (tracer.Party's `remote`)."""
+
+    def __init__(self, coord: Coordinator):
+        self.coord = coord
+
+    def put(self, raw: bytes) -> str:
+        return self.coord._put_trace(raw)
+
+    def get(self, blob_id: str) -> bytes:
+        return self.coord._get_trace(blob_id)

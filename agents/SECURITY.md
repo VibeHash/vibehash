@@ -1,5 +1,7 @@
 # Security
 
+`agents/` is part of VibeHash's B2B managed fine-tune pipeline, contributed by Luh Labs LLC, and licensed under the root repository's license (`LICENSE`). The standalone hackathon project lives in its own repository.
+
 How the Muse agents (`agents/`) and their site (`web/` in the hackathon repository, https://github.com/Luh-Labs-LLC/muse-finetune-agents) stand against the OWASP Top 10 for LLM Applications (2025) and the OWASP Top 10 for Agentic
 Applications. Each item says what covers it here, or why it doesn't apply, and what's still a limit.
 

@@ -22,12 +22,16 @@ sys.path.insert(0, str(ROOT))
 from vibehash import cli  # noqa: E402
 
 OUT = ROOT / "docs" / "CLI.md"
+BOOK = ROOT / "docs" / "book"  # the GitBook (docs/book/SUMMARY.md): one reference page per command, written here too
+SUMMARY = BOOK / "SUMMARY.md"
+START, END = "<!-- reference: written by scripts/cli_docs.py -->", "<!-- end of reference -->"
 PROG = "vibehash"
 
 # A command line or two per command, by its full name. Anything not here just gets its usage line.
 EXAMPLES: dict[str, list[str]] = {
     "setup": ["vibehash setup", "vibehash setup --node 192.168.1.20",
               "VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes --deepseek no > setup.log 2>&1"],
+    "update": ["vibehash update", "vibehash update --evo"],
     "install-gpu": ["vibehash install-gpu"],
     "testnet": ["vibehash testnet", "vibehash testnet --validators 4", "vibehash testnet --job none --workers 3 --device cuda",
                 "vibehash testnet --evo2"],
@@ -230,22 +234,93 @@ def render(ap: argparse.ArgumentParser | None = None) -> str:
     return portable("\n".join(lines).rstrip() + "\n")
 
 
+def book_pages(ap: argparse.ArgumentParser | None = None) -> dict[str, str]:
+    """The GitBook's command reference: reference/README.md, the list, and reference/<command>.md, one page per
+    command (a group's page has each of its subcommands), as {path under docs/book: text}."""
+    ap = ap or cli.parser()
+    top = subcommands(ap)
+    top_help = helps(top)
+    intro = [
+        "# Command reference",
+        "",
+        "Every `vibehash` command and flag, written from the command line's own parser by `scripts/cli_docs.py`, so it "
+        "always matches the release it was built from. `vibehash COMMAND --help` says the same on your computer.",
+        "",
+        f"`{PROG}` and `python -m vibehash` are the same program. With no arguments at a terminal it opens a menu. "
+        "`--node` and `--wallet` default to what `setup` saved. Wallet passwords are read from the terminal, or from "
+        "`$VIBEHASH_PASSWORD` on machines nobody is watching.",
+        "",
+        "## Global flags",
+        "",
+    ]
+    for a in ap._actions:
+        if a.option_strings and not isinstance(a, argparse._HelpAction):
+            intro.append(f"- `{flag_name(a)}`: {a.help or ('print the version' if a.dest == 'version' else '')}")
+    intro += ["", "## Commands", ""]
+    pages = {}
+    for name, child in top.choices.items():
+        sp = subcommands(child)
+        file = f"{name}.md"
+        intro.append(f"- [`{PROG} {name}`]({file}): {top_help[name]}")
+        if sp is None:
+            lines = command_section(name, child, top_help[name], 1)
+        else:
+            lines = [f"# {PROG} {name}", "", top_help[name][0].upper() + top_help[name][1:] + ".", ""]
+            for sub_name, sub_help in helps(sp).items():
+                lines.append(f"- [`{PROG} {name} {sub_name}`](#{anchor(f'{name} {sub_name}')}): {sub_help}")
+            lines.append("")
+            for sub_name, grandchild in sp.choices.items():
+                lines += command_section(f"{name} {sub_name}", grandchild, helps(sp)[sub_name], 2)
+        pages[f"reference/{file}"] = portable("\n".join(lines).rstrip() + "\n")
+    pages["reference/README.md"] = portable("\n".join(intro).rstrip() + "\n")
+    return pages
+
+
+def summary_part(ap: argparse.ArgumentParser | None = None) -> str:
+    """The reference's lines in SUMMARY.md (the book's table of contents), between START and END."""
+    ap = ap or cli.parser()
+    lines = [START, "* [Command reference](reference/README.md)"]
+    lines += [f"  * [{PROG} {name}](reference/{name}.md)" for name in subcommands(ap).choices]
+    return "\n".join(lines + [END])
+
+
+def with_summary(current: str, part: str) -> str:
+    """SUMMARY.md with its reference lines replaced (or added at the end)."""
+    if START in current and END in current:
+        head, rest = current.split(START, 1)
+        return head + part + rest.split(END, 1)[1]
+    return current.rstrip("\n") + "\n\n## Reference\n\n" + part + "\n"
+
+
+def outputs() -> dict[Path, str]:
+    """Every file this writes, and what it should hold."""
+    out = {OUT: render()}
+    if BOOK.exists():
+        out.update({BOOK / path: text for path, text in book_pages().items()})
+        current = SUMMARY.read_text(encoding="utf-8").replace("\r\n", "\n") if SUMMARY.exists() else "# Summary\n"
+        out[SUMMARY] = with_summary(current, summary_part())
+    return out
+
+
 def anchor(name: str) -> str:
     """GitHub's anchor for a heading "vibehash NAME"."""
     return f"{PROG}-{name}".replace(" ", "-")
 
 
 def main(argv: list[str]) -> int:
-    text = render()
+    files = outputs()
     if "--check" in argv:
-        current = OUT.read_text(encoding="utf-8").replace("\r\n", "\n") if OUT.exists() else ""
-        if current != text:
-            print(f"{OUT.relative_to(ROOT)} is out of date: run python scripts/cli_docs.py")
-            return 1
-        print(f"{OUT.relative_to(ROOT)} is up to date")
-        return 0
-    OUT.write_text(text, encoding="utf-8", newline="\n")
-    print(f"wrote {OUT.relative_to(ROOT)}: {sum(1 for _ in leaves(cli.parser()))} commands")
+        stale = [path for path, text in files.items()
+                 if (path.read_text(encoding="utf-8").replace("\r\n", "\n") if path.exists() else "") != text]
+        for path in stale:
+            print(f"{path.relative_to(ROOT)} is out of date: run python scripts/cli_docs.py")
+        if not stale:
+            print(f"{len(files)} files are up to date")
+        return 1 if stale else 0
+    for path, text in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+    print(f"wrote {len(files)} files: {sum(1 for _ in leaves(cli.parser()))} commands")
     return 0
 
 

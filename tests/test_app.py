@@ -90,6 +90,16 @@ class AppHome(unittest.TestCase):
         self.reg = mock.patch.object(app, "_winreg", return_value=None)
         self.reg.start()
         self.addCleanup(self.reg.stop)
+        self.store = None  # never this machine's own credential store: an in-memory one where keyring is installed
+        try:
+            import keyring
+        except ImportError:
+            return
+        from tests.test_wallet import memory_backend
+        old = keyring.get_keyring()
+        self.store = memory_backend()
+        keyring.set_keyring(self.store)
+        self.addCleanup(keyring.set_keyring, old)
 
 
 class SupervisorTests(AppHome):
@@ -131,6 +141,15 @@ class SupervisorTests(AppHome):
         self.assertFalse(app.running())
         self.assertEqual(app.read_state()["beat"], 0)
         self.assertFalse(app.control_path().exists())  # orders are taken, not left lying
+
+    def test_restart_starts_the_worker_again_to_read_new_settings(self):
+        s = app.Supervisor(child_command(), 7545, beat_s=0.05, grace_s=5)
+        self.start(s)
+        self.assertTrue(wait_for(lambda: s.worker_alive()))
+        first = s.child.pid
+        app.order("restart")
+        self.assertTrue(wait_for(lambda: s.worker_alive() and getattr(s.child, "pid", first) != first))
+        self.assertFalse(s.paused)
 
     def test_a_worker_that_stops_on_its_own_is_started_again_after_a_wait(self):
         s = app.Supervisor(child_command(exit_code=3), 7545, beat_s=0.05, backoff=(0.2, 0.2, 0.2), grace_s=5)
@@ -390,16 +409,42 @@ class PrepareTests(AppHome):
             app.prepare(SimpleNamespace(gpu="skip"))
         self.assertIn("VIBEHASH_PASSWORD", str(ctx.exception))  # a line that says what to do, not a traceback
 
-    def test_a_wallet_without_a_password_keeps_its_words_in_a_file_even_at_a_terminal(self):
+    def fake_store(self):
+        import keyring
+
+        from tests.test_wallet import memory_backend
+        old = keyring.get_keyring()
+        keyring.set_keyring(memory_backend())
+        self.addCleanup(keyring.set_keyring, old)
+
+    def test_a_wallet_without_a_password_keeps_its_key_in_the_store_and_no_words_file(self):
+        self.fake_store()
         env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
         with mock.patch.dict(os.environ, env, clear=True), mock.patch("vibehash.unattended.interactive", return_value=True), \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             url, path = app.prepare(SimpleNamespace(gpu="skip", no_password=True))
+        self.addCleanup(app.stop_words)
         from vibehash import wallet as wallets
-        self.assertFalse(wallets.is_encrypted(path))
+        self.assertEqual(wallets.kind(path), "store")
+        self.assertNotIn("secret", json.loads(path.read_text()))
+        self.assertEqual(list(Path(self.tmp.name).glob("recovery-words-*.txt")), [])
+        from vibehash import credstore
+        words = credstore.get(credstore.WALLET_WORDS, json.loads(path.read_text())["address"])  # held until seen
+        self.assertNotIn(" ".join(words.split()[:3]), out.getvalue())  # the words aren't printed either
+        self.assertNotRegex(out.getvalue(), r"\d+\. [a-z]+ ")
+        self.assertNotIn("VIBEHASH_PASSWORD", os.environ)
+
+    def test_without_a_store_the_words_still_go_to_a_file_for_the_logs_sake(self):
+        env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("vibehash.credstore.available", return_value=False), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            url, path = app.prepare(SimpleNamespace(gpu="skip", no_password=True))
+        from vibehash import wallet as wallets
+        self.assertEqual(wallets.kind(path), "plain")
         self.assertEqual(len(list(Path(self.tmp.name).glob("recovery-words-*.txt"))), 1)  # the app's log scrolls on
         self.assertIn("recovery words", out.getvalue().lower())
-        self.assertNotIn("VIBEHASH_PASSWORD", os.environ)
+        self.assertIn("no credential store", out.getvalue())
+        self.assertTrue(app.read_state() is None or not app.read_state()["wallet"].get("words_pending"))
 
 
 class StartupTests(AppHome):
@@ -525,6 +570,224 @@ class CommandTests(AppHome):
             app.main(SimpleNamespace(acmd=None, watch=7000))
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(call.call_args.args[0][-2:], ["--watch", "7000"])
+
+
+WORDS = " ".join(f"word{i}" for i in range(1, 25))
+TOKEN = "t" * 43
+
+
+class WordsOnceTests(AppHome):
+    """A new wallet's recovery words reach the window from the app's memory over a loopback listener of its own, and
+    never touch state.json, the log or any other file."""
+
+    def get(self, port, path="/wallet/words", method="GET", host=None, origin=None, token=TOKEN):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.putrequest(method, path, skip_host=True)
+        conn.putheader("Host", host or f"127.0.0.1:{port}")
+        if origin:
+            conn.putheader("Origin", origin)
+        if token is not None:
+            conn.putheader("X-Words-Token", token)
+        conn.putheader("Content-Length", "0")
+        conn.endheaders()
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp.status, body
+
+    def serve(self, on_seen=None):
+        port = app.serve_words(WORDS, TOKEN, on_seen=on_seen)
+        self.addCleanup(app.stop_words)
+        return port
+
+    def test_the_words_are_served_until_they_are_seen_then_404(self):
+        seen = []
+        port = self.serve(on_seen=lambda: seen.append(1))
+        for _ in range(2):  # a window that restarts before the tick can fetch them again
+            status, body = self.get(port)
+            self.assertEqual((status, json.loads(body)), (200, {"words": WORDS.split()}))
+        self.assertEqual(self.get(port, "/wallet/words/seen", "POST")[0], 200)
+        self.assertEqual(seen, [1])
+        self.assertEqual(self.get(port)[0], 404)
+        self.assertIsNone(app._words_once)
+
+    def test_other_routes_and_methods_are_404(self):
+        port = self.serve()
+        self.assertEqual(self.get(port, "/")[0], 404)
+        self.assertEqual(self.get(port, "/wallet/words/seen")[0], 404)  # GET doesn't clear them
+        self.assertEqual(self.get(port, "/wallet/words", "POST")[0], 404)
+        self.assertEqual(self.get(port)[0], 200)
+
+    def test_a_foreign_host_or_origin_gets_nothing_and_clears_nothing(self):
+        port = self.serve()
+        for host in ("attacker.example", "attacker.example:%d" % port, "127.0.0.1.attacker.example"):
+            self.assertEqual(self.get(port, host=host)[0], 403, host)
+            self.assertEqual(self.get(port, "/wallet/words/seen", "POST", host=host)[0], 403, host)
+        for origin in ("https://attacker.example", "http://localhost.attacker.example", "http://127.0.0.1.example.com"):
+            self.assertEqual(self.get(port, origin=origin)[0], 403, origin)
+            self.assertEqual(self.get(port, "/wallet/words/seen", "POST", origin=origin)[0], 403, origin)
+        self.assertEqual(self.get(port, origin="http://127.0.0.1:5173")[0], 200)  # a page from this computer
+        self.assertEqual(self.get(port, "/wallet/words/seen", "POST", host="localhost:%d" % port)[0], 200)
+
+    def test_both_routes_need_the_token(self):
+        """Another user of this computer can reach the loopback port; only this user can read state.json's token."""
+        seen = []
+        port = self.serve(on_seen=lambda: seen.append(1))
+        for token in (None, "", "wrong", TOKEN[:-1], TOKEN + "x"):
+            self.assertEqual(self.get(port, token=token)[0], 403, token)
+            self.assertEqual(self.get(port, "/wallet/words/seen", "POST", token=token)[0], 403, token)
+        self.assertEqual(seen, [])  # nothing was cleared by the refused ones
+        self.assertEqual(self.get(port)[0], 200)
+        self.assertEqual(self.get(port, "/wallet/words/seen", "POST")[0], 200)
+
+    def test_prepare_advertises_the_port_and_never_writes_the_words(self):
+        """Through a Supervisor, as `app` runs it: state.json says words_pending and where to ask, not the words; and
+        `seen` flips it."""
+        env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
+        s = app.Supervisor([], 7545, beat_s=0.05, grace_s=5)
+        self.addCleanup(app.stop_words)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("vibehash.credstore.available", return_value=True), \
+                mock.patch("vibehash.cli.ensure_wallet", return_value=("vibe1abc", None, WORDS)), \
+                mock.patch("vibehash.wallet.kind", return_value="store"), \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True), report=s.report, on_words_seen=s.words_seen)
+        raw = app.state_path().read_text(encoding="utf-8")
+        self.assertNotIn("word1", raw)
+        self.assertNotIn(WORDS.split()[0] + " ", raw)
+        wallet = json.loads(raw)["wallet"]
+        self.assertTrue(wallet["words_pending"])
+        self.assertGreaterEqual(len(wallet["words_token"]), 32)
+        self.assertNotIn(wallet["words_token"], WORDS)
+        self.assertIsNone(wallet.get("words_file"))
+        token = wallet["words_token"]
+        self.assertEqual(self.get(wallet["words_port"])[0], 403)  # without the state's token
+        status, body = self.get(wallet["words_port"], token=token)
+        self.assertEqual(json.loads(body)["words"], WORDS.split())
+        self.assertEqual(self.get(wallet["words_port"], "/wallet/words/seen", "POST", token=token)[0], 200)
+        wallet = json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]
+        self.assertFalse(wallet["words_pending"])
+        self.assertNotIn("words_port", wallet)
+        self.assertNotIn("words_token", wallet)
+        for f in Path(self.tmp.name).rglob("*"):  # nothing anywhere under the home holds the words
+            if f.is_file():
+                self.assertNotIn("word7", f.read_text(encoding="utf-8", errors="ignore"), f)
+
+    def start(self, **kw):
+        """`app` starting over the same home, as after a quit or a reboot: a new Supervisor, prepare(), the state."""
+        app.stop_words()  # (the old app's listener went with it)
+        s = app.Supervisor([], 7545, beat_s=0.05, grace_s=5)
+        env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True, **kw), report=s.report, on_words_seen=s.words_seen)
+        self.out = out.getvalue()
+        return json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]
+
+    def assert_no_words_in_files(self, words):
+        for f in Path(self.tmp.name).rglob("*"):  # nothing anywhere under the home holds the words
+            if f.is_file():
+                text = f.read_text(encoding="utf-8", errors="ignore")
+                self.assertNotIn(" ".join(words.split()[:3]), text, f)
+                self.assertNotIn(words.split()[5], text, f)
+        wallet = json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]
+        self.assertLessEqual(set(wallet), {"address", "path", "words_pending", "words_port", "words_token", "words_file"})
+
+    def test_pending_words_survive_a_restart_until_they_are_seen(self):
+        """The words wait in the credential store (the key's own trust boundary), not in app memory alone: a quit,
+        crash or reboot before the tick doesn't lose them. `seen` deletes them there."""
+        from vibehash import credstore
+        if self.store is None:
+            self.skipTest("keyring is not installed")
+        self.addCleanup(app.stop_words)
+        first = self.start()
+        address = first["address"]
+        words = credstore.get(credstore.WALLET_WORDS, address)
+        self.assertEqual(len(words.split()), 24)
+        self.assertTrue(first["words_pending"])
+        self.assertEqual(json.loads(self.get(first["words_port"], token=first["words_token"])[1])["words"], words.split())
+        self.assert_no_words_in_files(words)
+        for _ in range(2):  # quit before the tick, start again (twice): the words are offered each time
+            again = self.start()
+            self.assertEqual(again["address"], address)
+            self.assertTrue(again["words_pending"])
+            status, body = self.get(again["words_port"], token=again["words_token"])
+            self.assertEqual((status, json.loads(body)["words"]), (200, words.split()))
+            self.assert_no_words_in_files(words)
+        self.assertEqual(self.get(again["words_port"], "/wallet/words/seen", "POST", token=again["words_token"])[0], 200)
+        self.assertIsNone(credstore.get(credstore.WALLET_WORDS, address))  # gone from the store
+        self.assertEqual(self.get(again["words_port"], token=again["words_token"])[0], 404)
+        self.assertFalse(json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]["words_pending"])
+        after = self.start()  # and the next start has nothing to offer
+        self.assertFalse(after["words_pending"])
+        self.assertNotIn("words_port", after)
+        self.assertIsNone(app._words_server)
+        self.assert_no_words_in_files(words)
+
+    def test_a_start_with_no_window_leaves_pending_words_in_the_store_for_the_next_window(self):
+        from vibehash import credstore
+        if self.store is None:
+            self.skipTest("keyring is not installed")
+        self.addCleanup(app.stop_words)
+        address = self.start()["address"]
+        quiet = self.start(no_window=True)
+        self.assertNotIn("words_port", quiet)
+        self.assertIsNone(app._words_server)
+        self.assertIsNotNone(credstore.get(credstore.WALLET_WORDS, address))
+        self.assertTrue(self.start()["words_pending"])
+
+    def test_a_store_that_refuses_the_words_falls_back_to_memory_and_says_so(self):
+        from vibehash import credstore
+        if self.store is None:
+            self.skipTest("keyring is not installed")
+        self.addCleanup(app.stop_words)
+        real = credstore.put
+
+        def put(service, account, value):
+            if service == credstore.WALLET_WORDS:
+                raise credstore.Unavailable("the credential store refused it: full")
+            return real(service, account, value)
+
+        with mock.patch.object(credstore, "put", put):
+            wallet = self.start()
+        self.assertIn("lost if the app stops", self.out)
+        self.assertTrue(wallet["words_pending"])
+        status, body = self.get(wallet["words_port"], token=wallet["words_token"])
+        self.assertEqual((status, len(json.loads(body)["words"])), (200, 24))
+        self.assertEqual(self.get(wallet["words_port"], "/wallet/words/seen", "POST", token=wallet["words_token"])[0], 200)
+        self.assertEqual(self.get(wallet["words_port"], token=wallet["words_token"])[0], 404)
+
+    def test_no_listener_for_a_wallet_that_already_existed(self):
+        s = app.Supervisor([], 7545, beat_s=0.05, grace_s=5)
+        with mock.patch("vibehash.cli.ensure_wallet", return_value=("vibe1abc", None, None)), \
+                mock.patch("vibehash.wallet.kind", return_value="store"), mock.patch("sys.stdout", new_callable=io.StringIO):
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True), report=s.report, on_words_seen=s.words_seen)
+        wallet = app.read_state()["wallet"]
+        self.assertFalse(wallet["words_pending"])
+        self.assertNotIn("words_port", wallet)
+        self.assertIsNone(app._words_server)
+
+    def test_with_no_window_the_words_go_to_the_file_and_nothing_listens(self):
+        """`app --no-window` (a start at login): nobody would see the words, so they are kept as a headless setup
+        keeps them. With a window: a listener and no file."""
+        from tests.test_wallet import use_memory_keyring
+        use_memory_keyring(self)
+        self.addCleanup(app.stop_words)
+        env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO):
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True, no_window=True), report=lambda *a, **k: None)
+        self.assertEqual(len(list(Path(self.tmp.name).glob("recovery-words-*.txt"))), 1)
+        self.assertIsNone(app._words_server)
+        self.assertIsNone(app._words_once)
+        Path(self.tmp.name, "wallet.json").unlink()
+        for f in Path(self.tmp.name).glob("recovery-words-*.txt"):
+            f.unlink()
+        facts = []
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO):
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True, no_window=False),
+                        report=lambda step, fraction, **f: facts.append(f))
+        self.assertEqual(list(Path(self.tmp.name).glob("recovery-words-*.txt")), [])
+        self.assertIsNotNone(app._words_server)
+        self.assertTrue(any(f.get("wallet", {}).get("words_pending") for f in facts))
 
 
 if __name__ == "__main__":

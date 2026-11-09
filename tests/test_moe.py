@@ -1,11 +1,11 @@
-"""Mixture-of-experts (vibehash/moe.py, SHARDING.md §7): top-k routing flips under rounding noise, so workers commit to
+"""Mixture-of-experts (tests/reference/moe.py, SHARDING.md §7): top-k routing flips under rounding noise, so workers commit to
 their routing and checkers replay with it; and each expert is a cell a checker can check holding that expert alone."""
 import dataclasses
 import unittest
 
 import numpy as np
 
-from vibehash import moe
+from tests.reference import moe
 from vibehash.model import relative_distance
 
 TOL = 1e-4  # a float32 job's tolerance (DESIGN §8)

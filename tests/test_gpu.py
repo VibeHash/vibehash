@@ -18,7 +18,7 @@ from vibehash.coordinator import CoordinatorConfig
 from vibehash.crypto import KeyPair
 from vibehash.ledger import Chain
 from vibehash.model import ModelSpec, params_hash, relative_distance, train_segment
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.tasks import SYN_PER_VIBE, InvalidJob, TrainingJob, Verdict, WorkUnit
 from vibehash.verification import UPDATE_TOLERANCE, replay_openings
 from vibehash.worker import HardwareProfile, Worker

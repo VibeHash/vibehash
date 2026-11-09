@@ -1,0 +1,121 @@
+# Secret and personal-detail scan, run in CI by the "gitleaks" job in .github/workflows/tests.yml
+# (the job points GITLEAKS_CONFIG at this file). It extends gitleaks' default rules (API keys, tokens,
+# private-key blocks such as BEGIN RSA/EC/OPENSSH/PGP PRIVATE KEY) with rules for the operational and
+# personal detail docs/OPERATIONS.md says never goes in the repository.
+title = "VibeHash"
+
+[extend]
+useDefault = true
+
+# Real hostnames, droplet addresses and SSH targets show up first as a bare IPv4 literal.
+[[rules]]
+id = "vibehash-public-ipv4"
+description = "An IPv4 literal that is not documentation (RFC 5737), private (RFC 1918), loopback, 0.0.0.0 or a well-known public resolver: a real server's address"
+regex = '''(?:^|[^0-9.])((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9]))(?:$|[^0-9.]|\.(?:[^0-9]|$))'''
+secretGroup = 1
+keywords = ["."]
+
+[[rules.allowlists]]
+description = "RFC 5737 documentation ranges, RFC 1918 private ranges, loopback, link-local, 0.0.0.0, broadcast, the resolvers used in tests, and GitHub Pages' published A records"
+regexTarget = "match"
+regexes = [
+  '''(?:^|[^0-9.])192\.0\.2\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])198\.51\.100\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])203\.0\.113\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])169\.254\.[0-9]{1,3}\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])0\.0\.0\.0(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])255\.255\.255\.255(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])8\.8\.8\.8(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])8\.8\.4\.4(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])1\.1\.1\.1(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])9\.9\.9\.9(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])93\.184\.216\.34(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])185\.199\.10[89]\.153(?:$|[^0-9])''',
+  '''(?:^|[^0-9.])185\.199\.11[01]\.153(?:$|[^0-9])''',
+]
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/); JS/TS test files and test directories anywhere hold fake client IPs too"
+paths = ['''^tests/''', '''(^|/)test\.(mjs|js|ts)$''', '''(^|/)tests?/''']
+
+[[rules]]
+id = "vibehash-windows-user-path"
+description = "A Windows user-profile path (C:\\Users\\name): a person's username and machine layout"
+regex = '''[A-Za-z]:\\{1,2}Users\\{1,2}[^\\\s"'<>*%$(){}\[\]]+'''
+keywords = ["users"]
+
+[[rules.allowlists]]
+description = "Generic placeholders and the shared profile folders, not a person"
+regexTarget = "match"
+regexes = [
+  '''(?i)Users\\{1,2}(?:you[a-z_-]*|name|user(?:name)?|me|public|default|all users|example|someone|<.*)$''',
+]
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
+[[rules]]
+id = "vibehash-macos-user-path"
+description = "A macOS home path (/Users/name/): a person's username"
+regex = '''/Users/([a-z0-9_-]+)/'''
+secretGroup = 1
+keywords = ["/users/"]
+
+[[rules.allowlists]]
+description = "Generic placeholders, not a person"
+regexTarget = "secret"
+regexes = ['''^(?:you|your|name|user|username|me|shared|example|someone)$''']
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
+[[rules]]
+id = "vibehash-consumer-email"
+description = "An email address at a consumer mail provider: a person's private address"
+regex = '''[A-Za-z0-9._%+-]+@(?:gmail|outlook|hotmail|icloud)\.com'''
+keywords = ["@gmail", "@outlook", "@hotmail", "@icloud"]
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
+[[rules]]
+id = "vibehash-otpauth-uri"
+description = "A literal otpauth:// URI with a base32 secret in a doc: a live authenticator seed (the code that builds the URI is not matched)"
+regex = '''otpauth://[a-z]+/[^\s"'<>]*[?&]secret=[A-Za-z2-7]{16,}'''
+path = '''(?i)\.(?:md|html)$'''
+keywords = ["otpauth://"]
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
+[[rules]]
+id = "vibehash-wallet-address-in-docs"
+description = "A vibe1... wallet address in a doc: addresses of real people are personal data (code and tests keep fixtures)"
+regex = '''\bvibe1[0-9a-z]{38}\b'''
+path = '''(?i)\.(?:md|html)$'''
+keywords = ["vibe1"]
+
+[[rules.allowlists]]
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
+paths = ['''^tests/''']
+
+[[allowlists]]
+description = "Agent/plan scratch space and the whitepaper PDFs (tests/ is allowed per custom rule above, not here, so the default secret rules still cover it)"
+paths = [
+  '''^\.superpowers/''',
+  '''^\.claude/''',
+  '''^docs/[^/]*\.pdf$''',
+]
+
+[[allowlists]]
+description = "A key named public (VAPID_PUBLIC, RELEASE_PUBKEYS, publicKey) is not a secret; matched against the whole line so the key name is visible"
+regexTarget = "line"
+regexes = ['''(?i)"?[A-Z0-9_]*PUBLIC[A-Z0-9_]*"?\s*[:=]''']

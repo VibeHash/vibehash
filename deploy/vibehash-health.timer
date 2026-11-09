@@ -1,0 +1,10 @@
+# Installed by setup-node.sh (see vibehash-backup.service).
+[Unit]
+Description=Check the Vibe Hash node (@URL@) every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

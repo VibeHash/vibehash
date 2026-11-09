@@ -118,6 +118,27 @@ class BlobStoreTests(unittest.TestCase):
         self.assertFalse(self.store.has(bid))
 
 
+class OnionStatusTest(unittest.TestCase):
+    """/status names the node's .onion address only when the operator gave one (`vibehash node --onion`)."""
+
+    def make_node(self, **kw):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)  # Windows keeps memory-mapped files locked
+        self.addCleanup(tmp.cleanup)
+        keys = KeyPair.generate(b"onion-node")
+        genesis = {"chain_id": "vibehash-localtest", "timestamp": 0, "allocations": {},
+                   "stakes": {keys.address: 10 * VIBE}}
+        node = Node(Path(tmp.name) / "node", genesis, keys, port=0, **kw)
+        self.addCleanup(node.close)  # made but never started
+        return node
+
+    def test_absent_by_default(self):
+        self.assertNotIn("onion", self.make_node().status())
+
+    def test_present_when_configured(self):
+        addr = "a" * 56 + ".onion"
+        self.assertEqual(self.make_node(onion=addr).status()["onion"], addr)
+
+
 def start_network(test, n_workers, behaviors=None, times=None, config=None, keep_rounds=10):
     tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)  # Windows keeps memory-mapped files locked
     test.addCleanup(tmp.cleanup)

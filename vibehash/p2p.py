@@ -27,12 +27,14 @@ BACKOFF_S = 5.0  # a peer that didn't answer isn't tried again for this long
 
 
 class Peers:
-    def __init__(self, own_url: str, own_address: str, static: list[str], validators):
+    def __init__(self, own_url: str, own_address: str, static: list[str], validators, *, proxy: str | None = None,
+                 tor_mode: str | None = None):
         """`validators()` returns the chain's {address: announced url}. Neither our own url nor the one the chain
         lists for our address is a peer."""
         self.own, self.address = own_url.rstrip("/"), own_address
         self.static = [u.rstrip("/") for u in static]
         self._validators = validators
+        self.proxy, self.tor_mode = proxy, tor_mode  # (None: the process's, proxy.activate)
         self.pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="gossip")
         self.lock = threading.Lock()
         self.dead_until: dict[str, float] = {}
@@ -45,7 +47,7 @@ class Peers:
             return [u for u in found if u != self.own and (include_dead or self.dead_until.get(u, 0) <= now)]
 
     def client(self, url: str, timeout: float = 10) -> NodeClient:
-        return NodeClient(url, timeout=timeout)
+        return NodeClient(url, timeout=timeout, proxy=self.proxy, tor_mode=self.tor_mode)
 
     def broadcast(self, path: str, body: dict) -> None:
         """Send to every live peer in the background; failures only mark the peer as down for a while."""
