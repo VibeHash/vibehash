@@ -97,9 +97,9 @@ Nothing below is committed, pasted into an issue or a pull request, or left in a
 Such notes belong in a private operations repository, or in this page in role form. The `gitleaks` job in
 `.github/workflows/tests.yml` scans every push and pull request with the rules in `.gitleaks.toml`
 (documentation-range and private IPs, user paths, consumer email addresses, `otpauth://` seeds and wallet
-addresses in docs, plus gitleaks' own secret rules; `tests/` is exempt for fixtures). Because the repository
-belongs to an organisation, the job needs a `GITLEAKS_LICENSE` repository secret (a free key from
-gitleaks.io).
+addresses in docs, plus gitleaks' own secret rules; `tests/` is exempt for fixtures). The scanner is a pinned, checksum-verified binary (no license key): to
+bump it, change `GITLEAKS_VERSION` and `GITLEAKS_SHA256` in that job together, taking the checksum from the
+release's `checksums.txt`.
 
 ## Hand-off items
 
