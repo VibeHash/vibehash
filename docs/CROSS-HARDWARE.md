@@ -133,3 +133,16 @@ is a guess, not yet tested. So step 3's condition fails: an honest NPU worker wo
 `cross_margin` 0.5. The next things to try are keeping the state update in float32 on the host (the NPU computes
 the step's inputs to it), or splitting the step so the state's part runs on the CPU, then measuring 256-token
 answers again.
+
+The NPU updated each DeltaNet layer's recurrent state itself and rounded it back to fp16 every token, so a 256-token
+answer carried 256 roundings. The conv window and attention cache are only copied, so they don't add up. Now the step
+outputs the update (k, delta, the decay d) and the host applies `S = S * d + k^T delta` in float32 (`es_npu`'s
+default; `--npu-device-state` keeps the old path). The same round again:
+
+| | worst honest gap | p99 (answer) | false rejections at 0.1 / 0.375 / 0.5 / 0.75 / 1 | smallest cheat gap | false acceptances |
+|---|---|---|---|---|---|
+| state in fp16 on the NPU | 0.522 | 0.313 | 4 / 1 / 1 / 0 / 0 | 4.26 | 0 |
+| state in float32 on the host | 0.193 | 0.093 | 1 / 0 / 0 / 0 / 0 | 4.07 | 0 |
+
+The worst gap is under half the cross margin (0.25), so step 3's condition holds again on this round. It still sits
+mostly in the 256-token answers (0.19, 0.07, 0.06), but much lower. The host update adds a little time per step.
