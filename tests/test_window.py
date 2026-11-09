@@ -211,6 +211,12 @@ class ApiTests(Home):
                 self.assertFalse(self.api.set_option("idle_minutes", bad)["ok"], bad)
             self.assertEqual(self.api.settings()["idle_minutes"], 10)
 
+    def test_the_docs_are_a_named_link(self):
+        self.assertEqual(window.LINKS["docs"], "https://docs.vibehash.org")
+        page = window.DASHBOARD.read_text(encoding="utf-8")
+        self.assertIn('data-link="docs"', page)
+        self.assertIn('data-link="help"', page)
+
     def test_links_open_by_name_only_in_the_browser(self):
         opened = []
         with mock.patch.object(window, "OPEN", side_effect=opened.append):
