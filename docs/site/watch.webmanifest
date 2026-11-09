@@ -1,0 +1,14 @@
+{
+  "name": "Vibe Hash Watch",
+  "short_name": "VH Watch",
+  "description": "Watch a Vibe Hash wallet: balance, stake, reputation and what each round paid.",
+  "start_url": "/watch/",
+  "scope": "/watch/",
+  "display": "standalone",
+  "background_color": "#0b0a09",
+  "theme_color": "#0b0a09",
+  "icons": [
+    { "src": "/watch-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "/watch-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
