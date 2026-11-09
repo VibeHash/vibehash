@@ -10,19 +10,20 @@ useDefault = true
 # Real hostnames, droplet addresses and SSH targets show up first as a bare IPv4 literal.
 [[rules]]
 id = "vibehash-public-ipv4"
-description = "An IPv4 literal that is not documentation (RFC 5737), private (RFC 1918), loopback, 0.0.0.0 or a well-known public resolver: a real server's address"
+description = "An IPv4 literal that is not documentation (RFC 5737), private (RFC 1918), shared address space (RFC 6598, Tailscale's range), loopback, 0.0.0.0 or a well-known public resolver: a real server's address"
 regex = '''(?:^|[^0-9.])((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9]))(?:$|[^0-9.]|\.(?:[^0-9]|$))'''
 secretGroup = 1
 keywords = ["."]
 
 [[rules.allowlists]]
-description = "RFC 5737 documentation ranges, RFC 1918 private ranges, loopback, link-local, 0.0.0.0, broadcast, the resolvers used in tests, and GitHub Pages' published A records"
+description = "RFC 5737 documentation ranges, RFC 1918 private ranges, RFC 6598 shared address space (100.64.0.0/10, what Tailscale hands out), loopback, link-local, 0.0.0.0, broadcast, the resolvers used in tests, and GitHub Pages' published A records"
 regexTarget = "match"
 regexes = [
   '''(?:^|[^0-9.])192\.0\.2\.[0-9]{1,3}''',
   '''(?:^|[^0-9.])198\.51\.100\.[0-9]{1,3}''',
   '''(?:^|[^0-9.])203\.0\.113\.[0-9]{1,3}''',
   '''(?:^|[^0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}''',
+  '''(?:^|[^0-9.])100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}''',
   '''(?:^|[^0-9.])172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}''',
   '''(?:^|[^0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}''',
   '''(?:^|[^0-9.])127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}''',
