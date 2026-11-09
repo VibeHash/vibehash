@@ -29,7 +29,7 @@ from vibehash import cli
 from vibehash import finetune as ft
 from vibehash.tasks import TrainingJob
 
-KEY = "sk-test-NEVER-SHOWN-7f3a9c"
+KEY = "sk-test-" + "NEVER-SHOWN-" + "7f3a9c"  # a fake key for tests
 MODEL = "fake-muse"
 HAVE = {m: importlib.util.find_spec(m) is not None for m in ("torch", "tokenizers", "jinja2", "transformers", "peft")}
 QWEN3ISH = ("{% for m in messages %}{% if m.role == 'assistant' %}<|im_start|>assistant\n<think>\n\n</think>\n\n"

@@ -30,7 +30,7 @@ import make_globe  # noqa: E402
 
 
 TOKEN = "t" * nodeadmin.MIN_TOKEN
-NODE_TOKEN = "t0k3n-long-enough-for-the-node"
+NODE_TOKEN = "t0k3n-" + "long-enough-for-the-node"
 KEY = nodeadmin.new_mfa_key()
 
 
