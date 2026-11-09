@@ -51,3 +51,5 @@ dist/release.sig
 dist/requirements-*.txt
 # The node health check's last result (deploy/healthcheck.sh)
 health.json
+# Onion-service hostname copies: a hidden service's address is operational detail
+*.onion

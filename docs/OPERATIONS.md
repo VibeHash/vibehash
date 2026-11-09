@@ -78,3 +78,33 @@ Secrets live in `/etc/vibehash/env` on the server. After changing one, restart t
   file, restart, and take a fresh backup so the backup and the password match.
 
 After any rotation, check `journalctl -u vibehash-node -n 50` and the health check's `health.json`.
+
+## What never goes in the repository
+
+Nothing below is committed, pasted into an issue or a pull request, or left in a doc, a test or a comment:
+
+- Secrets, by the name of the environment variable that holds them: `VIBEHASH_PASSWORD`,
+  `VIBEHASH_ADMIN_TOKEN`, `VIBEHASH_ADMIN_MFA`, `RELEASE_SIGNING_KEY`, `HF_TOKEN`, `VIBEHASH_GEO_TOKEN`,
+  `ALERT_WEBHOOK`, the credentials in `BACKUP_RCLONE_REMOTE`, and for `agents/` `MODEL_API_KEY` and
+  `DISPATCH_TOKEN`.
+- Wallet files, chain databases and their backups, `.onion` private keys and hostname copies, and
+  recovery words.
+- Real hostnames, IP addresses and SSH users of the servers; say "the public validator" instead.
+- Personal paths (a Windows or macOS user folder), people's handles and email addresses, and wallet
+  addresses of real people.
+- Operational diaries: who did what on which machine, and when.
+
+Such notes belong in a private operations repository, or in this page in role form. The `gitleaks` job in
+`.github/workflows/tests.yml` scans every push and pull request with the rules in `.gitleaks.toml`
+(documentation-range and private IPs, user paths, consumer email addresses, `otpauth://` seeds and wallet
+addresses in docs, plus gitleaks' own secret rules; `tests/` is exempt for fixtures). Because the repository
+belongs to an organisation, the job needs a `GITLEAKS_LICENSE` repository secret (a free key from
+gitleaks.io).
+
+## Hand-off items
+
+- The website's Pages repository (`vibehash.org`, built by `scripts/build_site.py`) still sits under the
+  founder's personal GitHub account. Transfer it to the VibeHash organisation, then update the URL in
+  `scripts/build_site.py` and the Pages and DNS settings.
+- Check that PyPI's trusted-publisher entry for `vibehash` names the organisation's repository
+  (`VibeHash/vibehash`, workflow `publish.yml`, environment `pypi`).
