@@ -54,6 +54,21 @@ class NpuEngineOnCpuTests(unittest.TestCase):
         _, ref = es_hybrid.forced(rt, rt.linears, fac, members, rows, want, spec.max_tokens, spec.sigma, spec.rank)
         self.assertLess(float((lps - ref).abs().max()), 1e-4)
 
+    def test_the_state_updated_on_the_device_gives_the_same(self):
+        from vibehash import es_npu
+
+        rt, rows, fac, spec, members = self.rt, self.rows, self.fac, self.spec, self.members
+        dev = es_npu.Engine(rt, rt.linears, spec.pairs * spec.rank, es_npu.cache_slots(rows, spec.max_tokens), n=3,
+                            device="CPU", precision="f32", host_state=False, log=lambda *_: None)
+        self.assertFalse(dev.host_state)
+        self.assertTrue(self.eng.host_state)
+        want = es_npu.answer(self.eng, rt, fac, members, rows, spec.max_tokens, spec.sigma, spec.rank)
+        got = es_npu.answer(dev, rt, fac, members, rows, spec.max_tokens, spec.sigma, spec.rank)
+        self.assertEqual(got, want)
+        _, a = es_npu.forced(self.eng, rt, fac, members, rows, want, spec.max_tokens, spec.sigma, spec.rank)
+        _, b = es_npu.forced(dev, rt, fac, members, rows, want, spec.max_tokens, spec.sigma, spec.rank)
+        self.assertLess(float((a - b).abs().max()), 1e-5)
+
     def test_a_twin_swap_is_caught(self):
         from vibehash import es_npu
 

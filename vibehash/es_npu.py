@@ -9,7 +9,12 @@ es_hybrid's (_Hybrid._pass) written as one pure function, every state an input a
   (one-hot), its twist (sel: the member's coef in its pair's column) and, teacher forcing, the token it must read;
   every layer's state (Gated DeltaNet's conv window and recurrent state, full attention's keys and values); and every
   twisted linear's factors (Bt [in, PR], Aa [PR, out]), so one compiled model serves every round;
-* outputs: the greedy token, the highest logit, the forced token's logit, the log-sum-exp, and every state moved on.
+* outputs: the greedy token, the highest logit, the forced token's logit, the log-sum-exp, and every state moved on;
+  except, by default (host_state), Gated DeltaNet's recurrent state: the step outputs its update (k, delta and the
+  decay d) and the host applies it in float32, S = S * d + k^T delta. An NPU computes the state in fp16, and an
+  update made there is rounded back to fp16 every token: 256 of those roundings put honest 256-token answers up to
+  0.52 below a float32 checker's greedy choice (docs/CROSS-HARDWARE.md). The conv window and the attention cache are
+  only copied, never recomputed, so rounding them again changes nothing.
 
 The host loop is es_hybrid's (_Hybrid.decode and _step): a pass of `n` rows, rows replaced as they finish. The shared
 reading of every prompt but its last token is transformers' own forward on the CPU in float32 (es_hybrid._shared),
@@ -85,10 +90,10 @@ def _rope(x, cos, sin):
 class _Step(torch.nn.Module):
     """_Hybrid._pass as a pure function of its inputs (the module docstring), for OpenVINO to trace."""
 
-    def __init__(self, model, linears, n: int, L: int):
+    def __init__(self, model, linears, n: int, L: int, host_state: bool = True):
         super().__init__()
         cfg = model.config
-        self.model, self.n, self.L = model, n, L
+        self.model, self.n, self.L, self.host_state = model, n, L, host_state
         self.kinds = list(cfg.layer_types)
         self.H, self.KVH, self.D = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
         self.G = self.H // self.KVH
@@ -130,9 +135,12 @@ class _Step(torch.nn.Module):
         kq = torch.matmul(torch.cat([k, q], 1), Sv) * d
         delta = (v.reshape(B, 1, Dv) - kq[:, :1]) * beta
         o = (kq[:, 1:] + torch.matmul(q, k.transpose(1, 2)) * delta).reshape(B, Dv)
-        S2 = Sv * d + torch.matmul(k.transpose(1, 2), delta)
         o = _gated_norm(la.norm, o, zg.reshape(B, Dv), QSCALE * Dk ** 0.5).reshape(n, Hv * Dv)
-        return self._lin(la.out_proj, o, tw, sel), win[:, :, 1:], S2.reshape(n, Hv, Dk, Dv)
+        y = self._lin(la.out_proj, o, tw, sel)
+        if self.host_state:  # the update, for the host to apply in float32 (the module docstring)
+            return y, win[:, :, 1:], (k.reshape(n, Hv, Dk), delta.reshape(n, Hv, Dv), d.reshape(n, Hv))
+        S2 = Sv * d + torch.matmul(k.transpose(1, 2), delta)
+        return y, win[:, :, 1:], (S2.reshape(n, Hv, Dk, Dv),)
 
     def _full_attn(self, at, x, cos, sin, kc, vc, bias, oh, tw, sel):
         n, H, KVH, D, G = self.n, self.H, self.KVH, self.D, self.G
@@ -161,7 +169,7 @@ class _Step(torch.nn.Module):
             if kind == "linear_attention":
                 y, c2, s2 = self._linear_attn(layer.linear_attn, x, conv[ia], rec[ia], tw, sel)
                 new_conv.append(c2)
-                new_rec.append(s2)
+                new_rec.extend(s2)
                 ia += 1
             else:
                 y, k2, v2 = self._full_attn(layer.self_attn, x, cos, sin, kc[ifa], vc[ifa], bias, oh, tw, sel)
@@ -183,10 +191,13 @@ class _Step(torch.nn.Module):
 class Engine:
     """One compiled step for n resident rows, L cache slots and PR factor columns (pairs x rank), on an OpenVINO
     device ("NPU", "GPU", "CPU"). precision: the device's inference precision ("f16" on an NPU, which has nothing
-    else; "f32" on the CPU makes this the CPU's own float32 engine, the test's reference)."""
+    else; "f32" on the CPU makes this the CPU's own float32 engine, the test's reference). host_state: Gated
+    DeltaNet's recurrent state updated on the host in float32 (the default; the module docstring), or on the
+    device."""
 
     def __init__(self, rt, linears, PR: int, L: int, n: int = 16, device: str = "NPU", precision: str | None = None,
-                 cache_dir: str | Path | None = None, options: dict | None = None, log=print):
+                 cache_dir: str | Path | None = None, options: dict | None = None, host_state: bool = True,
+                 log=print):
         import openvino as ov
 
         model = rt.model
@@ -198,7 +209,8 @@ class Engine:
         cfg = model.config
         self.rt, self.n, self.L, self.PR, self.device = rt, n, L, PR, device
         self.linears = list(linears)
-        self.step = _Step(model, self.linears, n, L)
+        self.host_state = host_state
+        self.step = _Step(model, self.linears, n, L, host_state)
         st = self.step
         self.C = 2 * st.Hk * st.Dk + st.Hv * st.Dv
         self.kinds = st.kinds
@@ -328,15 +340,21 @@ class Engine:
             for i, x in enumerate(ins):
                 self.req.set_input_tensor(i, _tensor(np.ascontiguousarray(x)))
             self.req.infer()
-            o = [self.req.get_output_tensor(i).data for i in range(4 + 2 * nla + 2 * nfa)]
+            per = 3 if self.host_state else 1  # outputs per recurrent state: (k, delta, d), or the state
+            o = [self.req.get_output_tensor(i).data for i in range(4 + (1 + per) * nla + 2 * nfa)]
             arg, top, got, lse = (np.asarray(x) for x in o[:4])
             states = o[4:]
             for i in range(nla):
                 np.copyto(conv[i], states[i])
-                np.copyto(rec[i], states[nla + i])
+                if self.host_state:
+                    k_, dl, d_ = (states[nla + 3 * i + j] for j in range(3))
+                    _update(rec[i], k_, dl, d_)
+                else:
+                    np.copyto(rec[i], states[nla + i])
+            at_kv = (1 + per) * nla
             for i in range(nfa):
-                np.copyto(kc[i], states[2 * nla + i])
-                np.copyto(vc[i], states[2 * nla + nfa + i])
+                np.copyto(kc[i], states[at_kv + i])
+                np.copyto(vc[i], states[at_kv + nfa + i])
             steps += 1
             if forced:
                 nxt = want
@@ -356,6 +374,13 @@ class Engine:
             rowid[done] = R
         self.steps = steps
         return out, gap, lp
+
+
+def _update(S, k, delta, d):
+    """S = S * d + k^T delta in float32, in place: S [n, H, Dk, Dv], k [n, H, Dk], delta [n, H, Dv], d [n, H]."""
+    St = torch.from_numpy(S)
+    k, delta, d = (torch.from_numpy(np.asarray(x, np.float32)) for x in (k, delta, d))
+    St.mul_(d[..., None, None]).add_(k[..., :, None] * delta[..., None, :])
 
 
 def _tensor(x):
