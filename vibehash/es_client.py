@@ -290,6 +290,44 @@ def _minutes(s: float) -> str:
     return f"{s:.0f} s" if s < 90 else f"{s / 60:.0f} min"
 
 
+class _Laps:
+    """Seconds each part of a round's Evo work took, in order: the worker's log line and its rounds.jsonl (evo_s,
+    evo_check_s) show them. An offline profile can't see a live round's node, network or shared GPU; in vibe-08b-2's
+    rounds on 11-07 the 4070's answering took ~20 s more than the same work offline, and nothing said where."""
+    WORDS = {"catch_up": "catching up", "fetch": "fetching answers", "prompts": "prompts", "noise": "noise",
+             "validate": "reading answers", "gpu_wait": "waiting for the GPU", "load": "loading weights",
+             "answer": "answering", "gaps": "teacher forcing", "replay": "replay", "texts": "scoring texts",
+             "upload": "uploads"}
+
+    def __init__(self):
+        self.s: dict[str, float] = {}
+        self.t = time.perf_counter()
+
+    def __call__(self, part: str) -> None:
+        now = time.perf_counter()
+        self.s[part] = self.s.get(part, 0.0) + now - self.t
+        self.t = now
+
+    def rounded(self) -> dict[str, float]:
+        return {k: round(v, 2) for k, v in self.s.items()}
+
+    def words(self) -> str:
+        return ", ".join(f"{self.WORDS.get(k, k)} {v:.1f} s" for k, v in self.s.items() if v >= 0.05)
+
+    def said(self) -> str:
+        """': catching up 1.8 s, answering 20.7 s, …' for the end of a log line, or nothing if every part was tiny."""
+        w = self.words()
+        return f": {w}" if w else ""
+
+
+class _NoRecord:
+    """Where a client without a round log (tests' stand-ins) notes a round's laps: nowhere."""
+
+    @staticmethod
+    def note(*args, **kwargs) -> None:
+        return None
+
+
 rebuild = _Rebuild()
 
 
@@ -686,14 +724,18 @@ class Es2Work:
 
         spec, keys, st, work = job.spec, self.client.keys, self.client.stats, self.work
         t0 = time.perf_counter()
+        lap = _Laps()
         rt, ln = self.at(job, units[0].start_hash)
+        lap("catch_up")
         seed = units[0].seed
         step = int(es2.ctrl_of(ln.state)[2])  # the round's step: its task (es2.task_at)
         ps = es2_rounds.items(spec, seed, step)
         rows = prompt_rows(rt, ps)
         want_lps = bool(spec.replay) and es2.ctrl_of(ln.state)[3] > 0
         replay = self.replay_items(rt, ln) if want_lps else []
+        lap("prompts")
         fac = round_factors(rt, spec, seed)
+        lap("noise")
         members = [(j, sign) for u in units for j, _, sign in es.unit_members(spec, seed, u.index)]
         work.claims[rnd] = []
         st.activity = (f"answering {len(units)} Evo unit{'s' * (len(units) > 1)} ({len(members)} twisted models x "
@@ -705,16 +747,21 @@ class Es2Work:
         # still end up in one slot one after the other), 1,334 against member by member's 1,332.
         expect = expected_lengths(work.task_len, tasks, caps) if caps else None
         with rt.busy, torch.no_grad():
+            lap("gpu_wait")  # (the last round's checks, if they ran on past their phase)
             self.load(rt, ln)
+            lap("load")
             got = es_fast.answer_members(rt, rt.linears, fac, members, rows, spec.max_tokens, spec.sigma, spec.rank,
                                          max(work.max_rows, len(rows)), loop=spec.loop_stop, caps=caps, expect=expect)
             learn_lengths(work.task_len, tasks, got)
+            lap("answer")
             lp = None
             if replay:
                 st.activity = f"scoring {len(members)} twisted models on {len(replay)} earlier right answers"
                 lp = es_fast.score_items(rt, rt.linears, fac, members, replay, spec.sigma, spec.rank).mean(1).tolist()
+                lap("replay")
         M = spec.members
         for n, u in enumerate(units):
+            lap("upload")  # (the last unit's upload and commit, and what the worker did meanwhile with what it yielded)
             mine = got[n * M:(n + 1) * M]
             answers = [[{"ids": list(a), "text": es.text_of(rt, a)} for a in member] for member in mine]
             if work.cheat == "forger":  # the right answers, which the twisted models didn't give
@@ -740,6 +787,7 @@ class Es2Work:
             digest = commit_digest(u.unit_id, keys.public, root, salt)
             unsigned = Commitment(u.unit_id, keys.address, keys.public, digest, b"")
             cm = Commitment(u.unit_id, keys.address, keys.public, digest, keys.sign(unsigned.message()))
+            lap("texts")
             if self.client._try(lambda: self.client.node.put_blob(keys, raw, bid) or True) is None:
                 continue  # not uploaded: committing would only get it called unchecked
             if self.client._try(self.client._signed, "commit", {"round": rnd, "commitment": commitment_out(cm)},
@@ -747,9 +795,12 @@ class Es2Work:
                 work.claims[rnd].append({"unit_id": u.unit_id, "worker": keys.address, "merkle_root": root.hex(),
                                          "salt": salt.hex(), "es": {"answers": bid, "rewards": rewards, "lps": lps}})
                 yield u
+        lap("upload")
         took = time.perf_counter() - t0
         work.timings.setdefault(rnd, {})["answer_s"] = took
-        log.info("round %d: answered %d Evo units (%d members) in %.1f s", rnd, len(units), len(members), took)
+        getattr(self.client, "record", _NoRecord).note(rnd, evo_s=lap.rounded())
+        log.info("round %d: answered %d Evo units (%d members) in %.1f s%s", rnd, len(units), len(members), took,
+                 lap.said())
 
     # --- verify ---
 
@@ -776,6 +827,7 @@ class Es2Work:
         if len({u.seed for _, u in claims}) > 1 or len({u.start_hash for _, u in claims}) > 1:
             return [v for t, u in claims for v in self.check_many(rnd, job, [(t, u)])]  # (never: one round's claims)
         t0 = time.perf_counter()
+        lap = _Laps()
         spec = job.spec
         verdicts: list = [None] * len(claims)
         parsed = []  # (claim, chosen members, their answers' ids, their texts, the claim's replay log-probabilities)
@@ -793,15 +845,19 @@ class Es2Work:
                 verdicts[c] = (False, chosen[0])
                 continue
             parsed.append((c, chosen, got, texts, task.get("lps")))
+        lap("fetch")
         if parsed:
             unit0 = claims[parsed[0][0]][1]
             rt, ln = self.at(job, unit0.start_hash)
+            lap("catch_up")
             seed = unit0.seed
             step = int(es2.ctrl_of(ln.state)[2])
             rows = prompt_rows(rt, es2_rounds.items(spec, seed, step))
             caps = es2_rounds.caps(spec, step)
             replay = self.replay_items(rt, ln) if any(p[4] is not None for p in parsed) else []
+            lap("prompts")
             fac = round_factors(rt, spec, seed)
+            lap("noise")
             why: dict = {}  # (claim, member) -> what's wrong before any teacher forcing
             todo = []  # (claim, member, (pair, sign), its answers): every member that gets that far
             n_vocab = rt.model.get_input_embeddings().num_embeddings
@@ -825,20 +881,25 @@ class Es2Work:
                         todo.append((c, k, (j, sign), got[k]))
             worst, mine = {}, {}
             lps_of = {p[0]: p[4] for p in parsed}
+            lap("validate")
             with rt.busy, torch.no_grad():
+                lap("gpu_wait")
                 self.load(rt, ln)
+                lap("load")
                 if todo:
                     gaps = es_fast.gaps_members(rt, rt.linears, fac, [m for _, _, m, _ in todo], rows,
                                                 [a for _, _, _, a in todo], spec.sigma, spec.rank,
                                                 max_tokens=spec.max_tokens)
                     for (c, k, _, _), g in zip(todo, gaps):
                         worst[(c, k)] = float(g.max()) if g.numel() else 0.0
+                    lap("gaps")
                     lp_todo = [(c, k, m) for c, k, m, _ in todo if lps_of[c] is not None]
                     if lp_todo and replay:
                         lps = es_fast.score_items(rt, rt.linears, fac, [m for _, _, m in lp_todo], replay, spec.sigma,
                                                   spec.rank).mean(1)
                         for (c, k, _), v in zip(lp_todo, lps):
                             mine[(c, k)] = float(v)
+                        lap("replay")
             def lp_wrong(c, k, lps) -> str:
                 """Why member k's replay log-probability is off ("" when it isn't, or the claim has none)."""
                 if lps is None:
@@ -880,6 +941,13 @@ class Es2Work:
                                     bad, reason)
                         break
                 verdicts[c] = (ok, bad)
+        took = time.perf_counter() - t0
         timings = self.work.timings.setdefault(rnd, {})
-        timings["check_s"] = timings.get("check_s", 0.0) + time.perf_counter() - t0
+        timings["check_s"] = timings.get("check_s", 0.0) + took
+        parts = timings.setdefault("check_parts", {})  # a round's groups of claims (client.ES_CHECK_BATCH) together
+        for k, v in lap.s.items():
+            parts[k] = parts.get(k, 0.0) + v
+        getattr(self.client, "record", _NoRecord).note(rnd, evo_check_s={k: round(v, 2) for k, v in parts.items()})
+        log.info("round %d: checked %d Evo claim%s in %.1f s%s", rnd, len(claims), "s" * (len(claims) != 1), took,
+                 lap.said())
         return verdicts
