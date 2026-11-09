@@ -161,6 +161,7 @@ await it("subscribing is rate-limited per caller", async () => {
 
 await it("a test alert reaches every phone, only with the token", async () => {
   assert.equal((await call("POST", "/api/test", {})).status, 401);
+  await take(sub(1).endpoint);  // what it hadn't collected from the steps above (stopped, back, a slash)
   const before = pushes.length;
   const r = await call("POST", "/api/test", {}, { Authorization: "Bearer stats-secret" });
   const phones = env.DB.raw.prepare("SELECT COUNT(*) n FROM subs").get().n;
