@@ -1,2 +1,3 @@
 numpy>=1.26
 cryptography>=42
+PySocks>=1.7.1

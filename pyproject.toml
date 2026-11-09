@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.26", "cryptography>=42"]
+dependencies = ["numpy>=1.26", "cryptography>=42", "PySocks>=1.7.1"]
 # Posting a fine-tune reads chats with the model's own tokenizer and chat template. Workers don't need these; they
 # need PyTorch, whose right build `vibehash install-gpu` picks for the GPU.
 # Evo mode (`testnet --evo`, `testnet --evo2`) runs the model with transformers (and PyTorch, which `vibehash

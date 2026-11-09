@@ -38,7 +38,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import advice, credstore, crypto, filelock, hardware, mnemonic, modelstore, nodeadmin, settings, tls, unattended
+from . import advice, credstore, crypto, filelock, hardware, mnemonic, modelstore, nodeadmin, proxy, settings, tls, unattended
 from . import economics as econ
 from . import fees
 from . import wallet as wallets
@@ -796,6 +796,11 @@ def cmd_setup(a):
     if url:
         url = normalise_url(url, https=bool(a.tls_fingerprint or a.tls_ca))
         settings.save(node=url)
+        if a.tor or a.proxy:  # remembered: every later command goes through it (tor_mode only if chosen)
+            settings.save(**{settings.PROXY_KEY: proxy.active()[0]})
+            print(f"   node traffic goes through {proxy.active()[0]} from now on")
+        if a.tor_mode:
+            settings.save(**{settings.TOR_MODE_KEY: a.tor_mode})
         if a.tls_fingerprint or a.tls_ca:
             settings.save_tls_trust(url, a.tls_ca and str(Path(a.tls_ca).resolve()),
                                     a.tls_fingerprint and tls.normalize_fingerprint(a.tls_fingerprint))
@@ -803,6 +808,9 @@ def cmd_setup(a):
         try:
             status = NodeClient(url, timeout=30).status()
             print(f"   connected to {url}: network {status['chain_id']}, block {status['height']}")
+            hint = proxy.onion_hint(status)
+            if hint:
+                print(f"   {hint}")
         except NodeError as e:
             hint = (advice.explain(e, url) or str(e)).replace("\n", "\n   ")
             print(f"   saved {url}, but {hint}\n   Run setup again once it answers (`{prog()} selftest` checks it).")
@@ -2425,6 +2433,32 @@ def version() -> str:
     return __version__
 
 
+TOR_FLAGS = argparse.ArgumentParser(add_help=False)  # the one set of proxy flags every node-facing command shares
+TOR_FLAGS.add_argument("--tor", action="store_true", help="send this command's node traffic through Tor (a local Tor "
+                       "on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor")
+TOR_FLAGS.add_argument("--proxy", metavar="URL", help="send it through this SOCKS proxy instead: socks5h://HOST:PORT "
+                       "(socks5:// would resolve the node's name on this computer, so it is refused)")
+TOR_FLAGS.add_argument("--tor-mode", choices=proxy.MODES, help="control-only: JSON through the proxy, transfers of "
+                       "over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused "
+                       "(default: strict for wallet, send, stake, unstake and job posting, else control-only)")
+NODE_COMMANDS = frozenset({"node", "admin", "worker", "app", "setup"})  # (besides any command with --node)
+
+
+def _add_tor_flags(ap: argparse.ArgumentParser) -> None:
+    """Give TOR_FLAGS to every command that talks to a node: one with a --node option, or one of NODE_COMMANDS."""
+    def walk(parser, name, covered):
+        # (not again on a command's own subcommands: their defaults would overwrite what was typed before them)
+        mine = not covered and (name in NODE_COMMANDS or any("--node" in a.option_strings for a in parser._actions))  # noqa: SLF001
+        if mine:
+            for flag in TOR_FLAGS._actions:  # noqa: SLF001
+                parser._add_action(flag)  # noqa: SLF001
+        for sub in (a for a in parser._actions if isinstance(a, argparse._SubParsersAction)):  # noqa: SLF001
+            for child_name, child in sub.choices.items():
+                walk(child, name or child_name, covered or mine)
+
+    walk(ap, None, False)
+
+
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="vibehash", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-v", "--verbose", action="store_true", help="log every detail (DEBUG), not just what happens (INFO)")
@@ -2877,6 +2911,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--receipts", action="append", metavar="FILE",
                    help="a worker's receipts.jsonl to check (default: every worker's on this computer)")
     p.set_defaults(fn=cmd_chain_verify)
+    _add_tor_flags(ap)
     return ap
 
 
@@ -2889,11 +2924,26 @@ def run_command(argv: list[str]) -> None:
             print(e.code if isinstance(e.code, str) else f"stopped with exit code {e.code}")
 
 
+def _activate_proxy(a) -> None:
+    """Set the process's proxy and tor mode (proxy.activate) from the flags and config.json, for the commands that take
+    the flags; any other (a local testnet) talks to its own nodes direct, whatever is saved."""
+    if not hasattr(a, "tor"):
+        return proxy.activate(None, None)
+    cfg = settings.load()
+    command = a.cmd if a.cmd != "job" else f"job {getattr(a, 'jcmd', '')}".strip()
+    try:
+        proxy.activate(proxy.resolve(a, cfg), proxy.tor_mode(a, cfg, command))
+    except ValueError as e:
+        sys.exit(f"error: {e}")
+
+
 def main(argv=None):
     if (sys.argv[1:] if argv is None else argv) == [] and sys.stdin.isatty() and sys.stdout.isatty():
         from . import menu  # plain `vibehash`, typed at a terminal: the menu
+        _activate_proxy(argparse.Namespace(cmd="menu", tor=False, proxy=None, tor_mode=None))  # (what config.json says)
         return menu.run(run_command, prog())
     a = parser().parse_args(argv)
+    _activate_proxy(a)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
     try:
         a.fn(a)

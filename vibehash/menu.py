@@ -215,6 +215,7 @@ class Status:
         except (OSError, ValueError, KeyError):
             self.address = None
         self.account: dict | None = None
+        self.onion: str | None = None  # how to reach the node over Tor, when it has an address and a proxy is on
         self.failed = False
         if self.address:
             threading.Thread(target=self._fetch, daemon=True).start()
@@ -222,7 +223,11 @@ class Status:
     def _fetch(self) -> None:
         from .client import NodeClient
         try:
-            self.account = NodeClient(self.node).account(self.address)
+            from . import proxy
+            node = NodeClient(self.node)
+            self.account = node.account(self.address)
+            if proxy.active()[0]:
+                self.onion = proxy.onion_hint(node.status())
         except Exception:  # offline, or a node that won't say: the menu works anyway
             self.failed = True
 
@@ -349,6 +354,8 @@ def frame(choice: int, status: Status, prog: str, width: int, glyphs: dict, sect
     termui.header(lambda *segs: top.append(line(*segs)), glyphs, termui.ASCII,
                   ["mining that trains real AI models", f"{_version()} · {urlsplit(status.node).hostname or status.node}"])
     top += ["", line(("  " + _clip(status.line(), width - 3, more), termui.TEXT))]
+    if status.onion:
+        top += [line(("  " + _clip(status.onion, width - 3, more), termui.DIM))]
     same = f"{prog} {' '.join(chosen.argv) or chosen.usage}" if chosen.argv or chosen.usage else ""
     leave = "q quit" if last is QUIT else "q back"
     keys = (f"  ↑↓ move · Enter choose · 1-9 jump · {leave}" if glyphs is not termui.ASCII else

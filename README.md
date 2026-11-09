@@ -448,6 +448,39 @@ self-tests it. `vibehash devices` shows what's usable. Workers use the first
 GPU they find; `--device cpu|cuda|cuda:1|xpu|mps` overrides it. One worker uses
 one GPU: for more, see "Several GPUs" above.
 
+### Using Tor
+
+To hide your address from the node, run Tor (the Tor daemon on port 9050, or Tor
+Browser, which listens on 9150) and add `--tor` to a command: `vibehash worker
+--tor`, `vibehash send --tor ...`. It works on every command that takes `--node`,
+and on `node` and `admin`. `--proxy socks5h://HOST:PORT` uses another SOCKS
+proxy, and `vibehash setup --tor` remembers the choice (the `proxy` and
+`tor_mode` settings), so later commands and the menu use it without the flag.
+
+- **`socks5h`, not `socks5`.** The `h` means the proxy looks up the node's name.
+  With plain `socks5://` (or `socks4://`) this computer asks its DNS resolver
+  first, which tells whoever runs it which node you use, so Vibe Hash refuses
+  those URLs and says why.
+- **Two modes (`--tor-mode`).** `control-only` sends every JSON request (status,
+  transactions, work units) through Tor but sends a checkpoint or dataset of
+  more than 50 MB straight to the node, with one warning in the log: through
+  Tor's speed a big file misses the round's deadline. `strict` sends everything
+  through Tor and refuses a transfer over 50 MB (use `control-only` for that).
+  The default is `strict` for `send`, `stake`, `unstake`, `post-job` and the
+  wallet commands, and `control-only` for `worker`, `app`, `node` and `admin`.
+  Public model files from the Hugging Face Hub follow the same split: direct
+  under `control-only`, through Tor under `strict`. Checking for an update
+  (`vibehash update`) is not node traffic and never goes through the proxy.
+- **Onion addresses.** A node run with `--onion ADDR.onion` shows the address in
+  `/status`; `setup` and the menu print it when a proxy is on ("reach this node
+  at ... to avoid exit-node blocks"). A `.onion` node is reached through the
+  local Tor even without `--tor` (it cannot be reached otherwise), always
+  through Tor whatever the size, and over plain `http://` is fine: a v3 onion
+  address is the service's public key, so the connection is authenticated and
+  encrypted end to end without a certificate.
+- **Operators.** `admin --tor` also turns the admin app's place lookups off, so
+  no address is sent outside the proxy.
+
 ## Evo mode: training by evolution, the chain is the model
 
 Evo jobs train a model by evolution strategies. Each round, miners answer puzzles with

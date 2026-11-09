@@ -55,6 +55,9 @@ def default_wallet() -> Path:
     return home() / "wallet.json"
 
 
+PROXY_KEY, TOR_MODE_KEY = "proxy", "tor_mode"  # config.json: the SOCKS proxy for node traffic (proxy.py), and its mode
+
+
 def load() -> dict:
     import time
 

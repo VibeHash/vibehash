@@ -57,7 +57,7 @@ import numpy as np
 
 from . import deepseek_graph as dsg
 from . import economics as econ
-from . import __version__, advice, filelock, hardware, netstats, nodeadmin, receipts, supply, tasks
+from . import __version__, advice, filelock, hardware, netstats, nodeadmin, proxy, receipts, supply, tasks
 from .blobs import CHUNK, MAX_DATASET, STALE_PART_S, BlobError, BlobStore, check_id
 from .client import MIN_CLIENT, OLD_CLIENT, NodeError, agent_version, parse_version  # the oldest releases it takes
 from .consensus import Engine, Timeouts, check_certificate, evidence_memo
@@ -278,7 +278,8 @@ class Node:
             raise
         self.threads: list[threading.Thread] = []
         self.announce = (announce or self.chain.state.validators.get(keys.address) or self.url).rstrip("/")
-        self.peers = Peers(self.announce, keys.address, list(peers), lambda: self.chain.state.validators)
+        self.peers = Peers(self.announce, keys.address, list(peers), lambda: self.chain.state.validators,
+                           proxy=proxy.active()[0], tor_mode=proxy.active()[1])
         # A leader runs a whole training round before it can propose, so the others wait that long for it, and more.
         self.engine = Engine(self.chain.chain_id, keys, timeouts or Timeouts(propose=1.5 * self.times.round_s + 5),
                              validators=lambda: self.chain.state.validator_set(), validate=self._validate,

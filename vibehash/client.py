@@ -13,6 +13,7 @@ import random
 import re
 import threading
 import time
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, advice, finetune, hardware, receipts, settings, termui, tls
+from . import proxy as proxy_mod
 from .blobs import CHUNK, MAX_DATASET, BlobStore, file_sha256
 from .compute import get_backend
 from .crypto import KeyPair, checksummed, parse_address
@@ -33,6 +35,7 @@ from .wire import WireError, blob_openings_in, blob_openings_out, commitment_out
 from .worker import HardwareProfile, Worker
 
 log = logging.getLogger("vibehash.worker")
+_UNBUILT = object()
 RETRIES = 4
 BUSY_RETRIES = 6  # for 429 (rate limited) and 503 (busy): the node turned the request away unprocessed
 PARALLEL_REQUESTS = 4  # in flight at once for a round's reveals or a unit's uploads: plenty, and gentle on a small node
@@ -48,6 +51,9 @@ DISPUTE_THREADS = 4  # games whose moves are worked out at once (re-runs take tu
 # a batch of blocks, each at most a proposal's size (node.MAX_PROPOSAL), and binary replies are one chunk.
 MAX_REPLY = 128 * 2**20
 MAX_ERROR = 2**16  # of an error reply
+# Over Tor (proxy.py) a transfer of more than this goes direct under tor mode control-only, and is refused under strict: a
+# checkpoint through Tor's few hundred kB/s misses the round's deadline, and JSON never gets near this size.
+BLOB_DIRECT_BYTES = 50 * 1024 * 1024
 MAX_JOBS = 64  # jobs with budget left that open_jobs lists: a node could name thousands
 OPEN_EVERY = 30.0  # seconds between a worker mining one job asking whether that job still has budget left
 # Sent with every request, so a node can tell a worker too old for it to upgrade (MIN_CLIENT below). Nodes from before
@@ -124,21 +130,53 @@ class NodeError(Exception):
 
 
 class NodeClient:
-    def __init__(self, url: str, timeout: float = 120, *, ca_file: str | None = None, fingerprint: str | None = None):
+    def __init__(self, url: str, timeout: float = 120, *, ca_file: str | None = None, fingerprint: str | None = None,
+                 proxy: str | None = None, tor_mode: str | None = None):
         """For an https node, `fingerprint` pins its certificate (SHA-256) and `ca_file` names a CA to verify it with.
-        Without either, the trust `setup` saved for this address applies, else the system's CAs (tls.py)."""
+        Without either, the trust `setup` saved for this address applies, else the system's CAs (tls.py).
+        `proxy` (socks5h://host:port) sends every request through it; `tor_mode` (control-only or strict, proxy.py) says
+        what happens to a large transfer. Both default to the process's (proxy.activate, set by the command line). A
+        .onion node can only be reached through Tor, so it uses the local Tor proxy even when none was asked for."""
         self.url = url.rstrip("/")
         self.timeout = timeout
         self._status: dict | None = None
-        self._opener = tls.opener_for(self.url, ca_file, fingerprint)
+        active_proxy, active_mode = proxy_mod.active()
+        self.proxy = proxy or (None if proxy_mod.is_local(self.url) else active_proxy)  # (Tor can't reach this computer)
+        self.tor_mode = tor_mode or active_mode
+        if not self.proxy and proxy_mod.is_onion(self.url):
+            self.proxy = proxy_mod.resolve(SimpleNamespace(tor=True))
+        if self.proxy and not self.tor_mode:
+            self.tor_mode = "control-only"
+        self._ca_file, self._fingerprint = ca_file, fingerprint
+        self._opener = tls.opener_for(self.url, ca_file, fingerprint, self.proxy)
+        self._direct = _UNBUILT  # the opener for a large transfer under control-only; built when first needed
 
-    def _req(self, method: str, path: str, data: bytes | None = None, headers: dict | None = None, limit: int | None = None) -> bytes:
+    def _direct_opener(self):
+        """The opener for a transfer that goes around the proxy: the same TLS trust, no proxy. Built once."""
+        if self._direct is _UNBUILT:
+            self._direct = tls.opener_for(self.url, self._ca_file, self._fingerprint)
+        return self._direct
+
+    def _plane(self, nbytes: int, verb: str) -> str:
+        """Which plane carries a transfer of `nbytes`: "proxy", or "direct" (control-only, over BLOB_DIRECT_BYTES, said
+        once in the log). Under strict, a large one is refused. A .onion node is only ever reached through the proxy."""
+        if not self.proxy or nbytes <= BLOB_DIRECT_BYTES:
+            return "proxy"
+        if self.tor_mode == "strict":
+            raise NodeError("this transfer is too large for strict Tor mode; use --tor-mode control-only")
+        if proxy_mod.is_onion(self.url):
+            return "proxy"
+        log.warning("%s %d MB directly, not through Tor: large transfers over Tor miss round deadlines", verb, nbytes // 2**20)
+        return "direct"
+
+    def _req(self, method: str, path: str, data: bytes | None = None, headers: dict | None = None, limit: int | None = None,
+             plane: str = "proxy") -> bytes:
         """The reply's body, if it's at most `limit` bytes (default MAX_REPLY; NodeError if it's more)."""
         req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers or {})
         stamp(req)
         limit = MAX_REPLY if limit is None else limit
         try:
-            with self._open(req) as resp:
+            with (self._open(req, plane) if plane != "proxy" else self._open(req)) as resp:  # (tests wrap _open(req))
                 body = resp.read(limit + 1)
                 if len(body) > limit:
                     raise NodeError(f"{method} {path}: the node's reply is larger than {limit:,} bytes", resp.status)
@@ -152,13 +190,14 @@ class NodeClient:
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             raise NodeError(f"can't reach node at {self.url}: {getattr(e, 'reason', e)}") from None
 
-    def _open(self, req):
+    def _open(self, req, plane: str = "proxy"):
         """urlopen, waiting and trying again while the node says it's busy: a 429 (rate limited) or 503 (at its
         connection limit) means it turned the request away before doing anything, so resending is safe."""
         stamp(req)  # (selftest builds its own requests and opens them here)
+        opener = self._direct_opener() if plane == "direct" else self._opener
         for attempt in range(BUSY_RETRIES + 1):
             try:
-                return (self._opener.open if self._opener else urllib.request.urlopen)(req, timeout=self.timeout)
+                return (opener.open if opener else urllib.request.urlopen)(req, timeout=self.timeout)
             except urllib.error.HTTPError as e:
                 if e.code not in (429, 503) or attempt == BUSY_RETRIES:
                     raise
@@ -228,6 +267,7 @@ class NodeClient:
     def upload(self, keys: KeyPair, kind: str, path: Path, blob_id: str) -> None:
         """Send a file in chunks, resuming from whatever the node already has. kind: 'blob' or 'dataset'."""
         total = path.stat().st_size
+        plane = self._plane(total, "sending")
         for attempt in range(RETRIES):
             try:
                 st = self.get(f"/{kind}/{blob_id}/status?from={keys.address}")  # resume our own upload, not another's
@@ -242,7 +282,7 @@ class NodeClient:
                         # MAX_CLOCK_SKEW_S), so one signature for the whole file ended any upload of over two minutes
                         # (a dataset, or a checkpoint on a slow link) with a 400 that isn't tried again.
                         auth = self._auth(keys, kind, blob_id, total)
-                        res = json.loads(self._req("PUT", f"/{kind}/{blob_id}", chunk, {**auth, "X-Offset": str(offset)}))
+                        res = json.loads(self._req("PUT", f"/{kind}/{blob_id}", chunk, {**auth, "X-Offset": str(offset)}, plane=plane))
                         offset = res["received"]
                 return
             except NodeError as e:
@@ -268,6 +308,7 @@ class NodeClient:
         the disk): it must be `size` if the caller knows it (a checkpoint's is its job's), and at most what a node
         would store otherwise."""
         limit = MAX_DATASET if kind == "dataset" else MAX_CHECKPOINT_BYTES
+        plane = None  # (decided once, when the size is known)
         for attempt in range(RETRIES):
             try:
                 if store.has(blob_id):
@@ -278,8 +319,9 @@ class NodeClient:
                 total, offset = st["size"], store.received(blob_id)
                 if type(total) is not int or not 0 < total <= limit or size not in (None, total):  # (asking again won't help)
                     raise NodeError(f"the node says {kind} {blob_id[:12]}… is {total!r} bytes, which it can't be", 200)
+                plane = plane or self._plane(total, "fetching")
                 while offset < total:
-                    chunk = self._req("GET", f"/{kind}/{blob_id}?offset={offset}", limit=min(CHUNK, total - offset))
+                    chunk = self._req("GET", f"/{kind}/{blob_id}?offset={offset}", limit=min(CHUNK, total - offset), plane=plane)
                     if not chunk:
                         raise NodeError("download ended early")
                     offset = store.write_chunk(blob_id, offset, chunk, total, check=check)
@@ -311,12 +353,14 @@ class NodeClient:
                     raise NodeError(f"the node says job {job_id}'s model is {want['bytes']!r} bytes; its spec makes it {size}")
             except (InvalidJob, KeyError, TypeError, AttributeError) as e:
                 raise NodeError(f"the node's description of job {job_id} is malformed: {e}") from None
+            plane = self._plane(size, "fetching")
             data = bytearray()
             while len(data) < size:
                 # (signed afresh for each chunk, as an upload's are: the node checks the timestamp against its clock;
                 # Content-Type and X-Total are an upload's alone)
                 auth = {k: v for k, v in self._auth(keys, "model", job_id, 0).items() if k.startswith("X-VibeHash-")} if keys else None
-                chunk = self._req("GET", f"/job/{job_id}/model?offset={len(data)}", headers=auth, limit=min(CHUNK, size - len(data)))
+                chunk = self._req("GET", f"/job/{job_id}/model?offset={len(data)}", headers=auth, limit=min(CHUNK, size - len(data)),
+                                  plane=plane)
                 if not chunk:
                     raise NodeError("the model download ended early")
                 data += chunk
