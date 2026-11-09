@@ -1,7 +1,8 @@
 // vibehash.org/watch's alerts and counts: a Cloudflare Worker with a D1 database (schema.sql) and a cron every minute.
 //
 //   GET  /api/key                       the VAPID public key a page subscribes to push with
-//   POST /api/subscribe   {subscription, addresses, payments}   alerts on for these addresses (at most MAX_WATCH)
+//   POST /api/subscribe   {subscription, addresses, payments, names}   alerts on for these addresses (at most
+//                                       MAX_WATCH); names: {address: nickname}, used in its alerts
 //   POST /api/unsubscribe {endpoint}    alerts off
 //   GET  /api/messages?sub=<id>         a phone's waiting alerts, taken (the service worker asks after each push)
 //   POST /api/hello       {id, standalone}   counted: an install, or a day's open (no address, no IP stored)
@@ -26,6 +27,7 @@ const MISSED_EVERY_S = 3600;         // missed-deadline alerts at most this ofte
 const KEEP_MESSAGES = 20;            // per phone
 const ADDRESS = /^vibe1[0-9a-f]{36}$/;
 const ID = /^[0-9a-f-]{36}$/;
+const MAX_NAME = 24;
 // Where a push endpoint may point: the browsers' own push services, never anywhere a caller chooses.
 const PUSH_HOSTS = [/^web\.push\.apple\.com$/, /^fcm\.googleapis\.com$/, /^updates\.push\.services\.mozilla\.com$/,
                     /\.notify\.windows\.com$/, /^android\.googleapis\.com$/];
@@ -79,7 +81,13 @@ async function testAlert(env, request) {
 
 // ---- alerts on and off ----
 
-async function subscribe(env, { subscription, addresses, payments = true }, request) {
+// A nickname as it goes into an alert: no control characters, at most MAX_NAME, or null.
+function cleanName(v) {
+  const s = String(v ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+  return s ? [...s].slice(0, MAX_NAME).join("").trim() : null;
+}
+
+async function subscribe(env, { subscription, addresses, payments = true, names = {} }, request) {
   await limit(env, request, "subscribe");
   const endpoint = String(subscription?.endpoint ?? "");
   let host;
@@ -107,7 +115,9 @@ async function subscribe(env, { subscription, addresses, payments = true }, requ
                    "ON CONFLICT(id) DO UPDATE SET payments = excluded.payments")
       .bind(id, endpoint, payments ? 1 : 0, now),
     env.DB.prepare(`DELETE FROM watches WHERE sub = ? AND address NOT IN (${list.map(() => "?").join(",")})`).bind(id, ...list),
-    ...list.map((a) => env.DB.prepare("INSERT OR IGNORE INTO watches (sub, address) VALUES (?, ?)").bind(id, a)),
+    ...list.map((a) => env.DB.prepare("INSERT INTO watches (sub, address, name) VALUES (?, ?, ?) " +
+                                      "ON CONFLICT(sub, address) DO UPDATE SET name = excluded.name")
+      .bind(id, a, cleanName(names && typeof names === "object" ? names[a] ?? names[a.toUpperCase()] : null))),
   ];
   await env.DB.batch(steps);
   return json({ ok: true, id, addresses: list, payments: !!payments });
@@ -186,12 +196,12 @@ export async function check(env, now = Date.now() / 1000) {
     for (const [a, , why] of s.slashes ?? []) touch(a).slashed.push(`block ${b.height}: ${why}`);
   }
   const rows = (await env.DB.prepare(
-    "SELECT w.sub, w.address, w.last_active, w.stopped, w.paid_unsent, w.last_paid, w.last_missed, s.payments, s.endpoint " +
+    "SELECT w.sub, w.address, w.name, w.last_active, w.stopped, w.paid_unsent, w.last_paid, w.last_missed, s.payments, s.endpoint " +
     "FROM watches w JOIN subs s ON s.id = w.sub").all()).results;
   const queued = new Map(), updates = [];
   const say = (sub, title, body, tag) => { if (!queued.has(sub)) queued.set(sub, []); queued.get(sub).push({ title, body, tag }); };
   for (const r of rows) {
-    const x = seen.get(r.address), short = r.address.slice(0, 9) + "…" + r.address.slice(-4);
+    const x = seen.get(r.address), short = r.name || r.address.slice(0, 9) + "…" + r.address.slice(-4);
     let { last_active, stopped, paid_unsent, last_paid, last_missed } = r;
     if (x?.slashed.length) say(r.sub, "Slashed", `${short} was slashed: ${x.slashed[0]}`, "slash");
     if (x?.missed && (!last_missed || now - last_missed >= MISSED_EVERY_S)) { say(r.sub, "Missed a deadline", `${short} registered for a round but didn't finish in time.`, "missed"); last_missed = now; }
