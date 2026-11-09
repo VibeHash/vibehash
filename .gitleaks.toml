@@ -39,8 +39,8 @@ regexes = [
 ]
 
 [[rules.allowlists]]
-description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/)"
-paths = ['''^tests/''']
+description = "Test fixtures (this rule only: gitleaks' default secret rules still scan tests/); JS/TS test files and test directories anywhere hold fake client IPs too"
+paths = ['''^tests/''', '''(^|/)test\.(mjs|js|ts)$''', '''(^|/)tests?/''']
 
 [[rules]]
 id = "vibehash-windows-user-path"
@@ -114,3 +114,8 @@ paths = [
   '''^\.claude/''',
   '''^docs/[^/]*\.pdf$''',
 ]
+
+[[allowlists]]
+description = "A key named public (VAPID_PUBLIC, RELEASE_PUBKEYS, publicKey) is not a secret; matched against the whole line so the key name is visible"
+regexTarget = "line"
+regexes = ['''(?i)"?[A-Z0-9_]*PUBLIC[A-Z0-9_]*"?\s*[:=]''']

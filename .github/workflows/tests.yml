@@ -116,10 +116,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/gitleaks" gitleaks
       - name: Scan a pull request's commits
         if: github.event_name == 'pull_request'
+        # On a pull_request event the checkout is the PR's merge commit, whose first parent is the current base tip,
+        # so HEAD^1..HEAD is exactly this PR's commits and never sweeps in commits merged to the base since the PR
+        # was opened (which base.sha, fixed at open time, would).
         run: >-
-          "$RUNNER_TEMP/gitleaks/gitleaks" detect --source . --config .gitleaks.toml --redact --no-banner
-          --log-opts="${{ github.event.pull_request.base.sha }}..HEAD"
+          "$RUNNER_TEMP/gitleaks/gitleaks" detect --source . --config .gitleaks.toml --redact --no-banner --verbose
+          --log-opts="HEAD^1..HEAD"
       - name: Scan the checked-out tree (history still holds details already removed, so it is not rescanned)
         if: github.event_name != 'pull_request'
         run: >-
-          "$RUNNER_TEMP/gitleaks/gitleaks" detect --no-git --source . --config .gitleaks.toml --redact --no-banner
+          "$RUNNER_TEMP/gitleaks/gitleaks" detect --no-git --source . --config .gitleaks.toml --redact --no-banner --verbose
