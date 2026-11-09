@@ -114,7 +114,6 @@ class WalletMfaTests(Store):
         clock = mock.patch.object(cli, "_now", lambda: self.now[0])
         clock.start()
         self.addCleanup(clock.stop)
-        cli._used_codes.clear()
 
     def code(self, step_offset=0):
         key = nodeadmin.mfa_key(credstore.get("vibehash-totp", self.keys.address))
@@ -238,6 +237,59 @@ class WalletMfaTests(Store):
         status, client = self.sends(code=self.code())
         self.assertIsNone(status)
         client.send_tx.assert_called_once()
+
+    def main_send(self, code):
+        """`vibehash stake` as its own process would run it: (exit status, the client). Nothing in this process's memory
+        carries over from an earlier run; only the credential store (here, the in-memory one) does."""
+        self.assertFalse(hasattr(cli, "_used_codes"))  # (no in-process memory of codes to clear)
+        client = mock.MagicMock()
+        client.min_fee.return_value = 0
+        client.send_tx.return_value = "ab" * 32
+        with mock.patch.object(cli, "NodeClient", return_value=client), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cli.main(["stake", "--amount", "5", "--wallet", self.wallet, "--node", "http://x", "--fee", "0",
+                          "--code", code])
+                status = None
+            except SystemExit as e:
+                status = 1 if isinstance(e.code, str) else e.code
+        return status, client
+
+    def test_a_code_is_good_once_across_separate_runs(self):
+        self.turn_on()
+        code = self.code()
+        status, client = self.main_send(code)
+        self.assertIsNone(status)
+        client.send_tx.assert_called_once()
+        status, client = self.main_send(code)  # a second `vibehash stake` with the same code
+        self.assertEqual(status, 1)
+        self.assertEqual(client.mock_calls, [])  # refused before the node was asked anything
+        status, client = self.main_send(self.code(-1))  # nor an earlier step's code, though inside the window
+        self.assertEqual(status, 1)
+        self.assertEqual(client.mock_calls, [])
+        self.now[0] += 30  # the next step's code is good
+        status, client = self.main_send(self.code())
+        self.assertIsNone(status)
+        client.send_tx.assert_called_once()
+
+    def test_a_store_that_cannot_record_the_step_does_not_take_the_code(self):
+        self.turn_on()
+        real = self.mem.set_password
+        self.mem.set_password = mock.Mock(side_effect=RuntimeError("read-only keychain"))
+        self.addCleanup(setattr, self.mem, "set_password", real)
+        status, client = self.sends(code=self.code())
+        self.assertEqual(status, 1)
+        client.send_tx.assert_not_called()
+
+    def test_off_forgets_the_last_step_too(self):
+        self.turn_on()
+        self.sends(code=self.code())
+        self.assertIsNotNone(credstore.get("vibehash-totp", f"{self.keys.address}:last"))
+        self.now[0] += 30
+        status, _, _ = self.run_cmd(cli.cmd_wallet_mfa, action="off", code=self.code())
+        self.assertIsNone(status)
+        self.assertIsNone(credstore.get("vibehash-totp", self.keys.address))
+        self.assertIsNone(credstore.get("vibehash-totp", f"{self.keys.address}:last"))
 
     def test_a_step_either_side_is_taken(self):
         self.turn_on()

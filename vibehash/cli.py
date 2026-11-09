@@ -949,23 +949,33 @@ MFA_SCOPE = ("With `wallet mfa on`, a send, stake or unstake from this wallet fi
              "shows (--code, else $VIBEHASH_CODE, else asked for). That stops casual use of an unlocked machine and "
              "mistaken or scripted sends; it does not stop malware that already reads this user's credential store. "
              "The worker never needs a code.")
-_used_codes: set[int] = set()  # the steps whose codes this process has taken: each is good once
 
 
 def _now() -> float:
     return time.time()
 
 
-def _take_wallet_code(key_text: str, code: str) -> bool:
-    """Whether `code` is the authenticator app's code of now (one step either side), not taken before in this process;
-    if so it is used up."""
+def _last_step_account(address: str) -> str:
+    """The credential-store account (under WALLET_TOTP) holding the last authenticator step this wallet's gate took."""
+    return f"{address}:last"
+
+
+def _take_wallet_code(address: str, key_text: str, code: str) -> bool:
+    """Whether `code` is the authenticator app's code of now (one step either side) and of a later step than any taken
+    before; if so that step is kept in the credential store, so each code is good once across every run of the CLI.
+    Unavailable when the store can't say or keep the last step (the code is then not taken)."""
     code = re.sub(r"\s", "", str(code or ""))
     if not (len(code) == nodeadmin.CODE_DIGITS and code.isdigit()):
         return False
+    last = credstore.get(credstore.WALLET_TOTP, _last_step_account(address))
+    try:
+        floor = int(last) if last is not None else None
+    except ValueError:  # (not something this writes: the store is the user's own, and holds the key itself)
+        floor = None
     key, step = nodeadmin.mfa_key(key_text), int(_now() // nodeadmin.CODE_STEP)
     for c in (step - 1, step, step + 1):
-        if c not in _used_codes and nodeadmin.totp(key, c) == code:
-            _used_codes.add(c)
+        if (floor is None or c > floor) and nodeadmin.totp(key, c) == code:
+            credstore.put(credstore.WALLET_TOTP, _last_step_account(address), str(c))
             return True
     return False
 
@@ -994,7 +1004,13 @@ def _gate(a, keys: KeyPair, what: str) -> None:
                  f"turn the gate off with `{prog()} wallet mfa off` from a session where it works. Nothing was sent")
     if key is None:
         return
-    if not _take_wallet_code(key, _ask_wallet_code(a, what)):
+    code = _ask_wallet_code(a, what)
+    try:
+        taken = _take_wallet_code(keys.address, key, code)
+    except credstore.Unavailable as e:
+        sys.exit(f"error: the credential store can't keep which code was used, so the code isn't taken; {e}. Nothing "
+                 f"was sent")
+    if not taken:
         sys.exit("error: that authenticator code is wrong, or was used already (each is good once: wait for the next); "
                  "nothing was sent")
 
@@ -1048,10 +1064,16 @@ def cmd_wallet_mfa(a):
         if key is None:
             print(f"already off for {shown}")
             return
-        if not _take_wallet_code(key, _ask_wallet_code(a, "turn this off")):
+        code = _ask_wallet_code(a, "turn this off")
+        try:
+            taken = _take_wallet_code(address, key, code)
+        except credstore.Unavailable as e:
+            sys.exit(f"error: {e}; it stays on")
+        if not taken:
             sys.exit("error: that authenticator code is wrong, or was used already; it stays on")
         try:
             credstore.delete(credstore.WALLET_TOTP, address)
+            credstore.delete(credstore.WALLET_TOTP, _last_step_account(address))
         except credstore.Unavailable as e:
             sys.exit(f"error: {e}; it stays on")
         print(f"off: sends from {shown} no longer ask for a code")
