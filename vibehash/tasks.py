@@ -158,7 +158,10 @@ class TrainingJob:
                 checkpoint_every=int(d["checkpoint_every"]), units_per_round=int(d["units_per_round"]),
                 memory_mb=int(d["memory_mb"]), tolerance=float(d["tolerance"]),
                 max_update_ratio=float(d["max_update_ratio"]), compute_s=float(d.get("compute_s", 0)),
-                shards=int(d.get("shards", 1)), public=d.get("public"),
+                shards=int(d.get("shards", 1)),
+                # Only a bool is a saying: nodes before 0.5.28 ignore unknown MLP fields, so "yes"/1/[] there is valid
+                # and refusing it would fork validators. Anything else reads as unsaid (not public, not re-emitted).
+                public=d["public"] if isinstance(d.get("public"), bool) else None,
             )
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError, json.JSONDecodeError) as e:
             # (OverflowError: int() of 1e999, JSON's Infinity; RecursionError: JSON nested too deep. Either escaped
@@ -200,7 +203,6 @@ class TrainingJob:
                 raise InvalidJob(msg)
 
         need(isinstance(self.job_id, str) and _JOB_ID.match(self.job_id), "job id must be 1-64 chars of a-z 0-9 . _ -")
-        need(self.public is None or isinstance(self.public, bool), "public is true or false")
         need(self.public is None or not (self.es or self.finetune or self.deepseek),
              "a fine-tune's or ES job's spec has no field 'public'")
         if self.es:

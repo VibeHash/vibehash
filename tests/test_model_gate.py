@@ -190,11 +190,17 @@ class SpecPublicTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidJob, "public"):
                 TrainingJob.from_spec_json(json.dumps(d), OWNER.address, 0)
 
-    def test_a_public_that_is_not_a_bool_is_refused(self):
+    def test_a_public_that_is_not_a_bool_is_accepted_as_unsaid(self):
+        # Nodes before 0.5.28 ignore unknown MLP fields, so a post_job with a non-bool `public` is valid there: refusing
+        # it here would split validators. It parses as unsaid (not public) and is not re-emitted.
         d = TrainingJob("j", OWNER.address, 0, 0, spec=ModelSpec(4, (4,), 2)).to_spec()
-        from vibehash.tasks import InvalidJob
-        with self.assertRaises(InvalidJob):
-            TrainingJob.from_spec_json(json.dumps({**d, "public": "yes"}), OWNER.address, 0)
+        for bad in ("yes", 1, 0, [], {}, None, "true"):
+            job = TrainingJob.from_spec_json(json.dumps({**d, "public": bad}), OWNER.address, 0)
+            self.assertIsNone(job.public, bad)
+            self.assertNotIn("public", json.loads(job.spec_json()), bad)
+            back = TrainingJob.from_spec_json(job.spec_json(), OWNER.address, 0)
+            self.assertIsNone(back.public)
+            self.assertEqual(back.spec_json(), job.spec_json())
 
 
 if __name__ == "__main__":
