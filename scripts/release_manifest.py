@@ -39,11 +39,27 @@ import re
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vibehash import crypto  # noqa: E402
+
+try:
+    import tomllib  # stdlib from Python 3.11; the project supports 3.10
+except ModuleNotFoundError:
+    tomllib = None
+
+
+def project_field(pyproject_text: str, key: str) -> str:
+    """A string field of pyproject.toml's [project] table: tomllib where there is one, else a regex over the table."""
+    if tomllib is not None:
+        return tomllib.loads(pyproject_text)["project"][key]
+    table = re.search(r"^\[project\]\s*$(.*?)(?=^\[|\Z)", pyproject_text, re.M | re.S)
+    found = re.search(rf'^{re.escape(key)}\s*=\s*"([^"]*)"', table.group(1) if table else "", re.M)
+    if not found:
+        raise KeyError(key)
+    return found.group(1)
+
 
 FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha256", "requirements_evo",
           "requirements_evo_sha256", "published", "min_launcher")
@@ -134,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--dist", default="dist", help="the folder with the built wheel")
             p.add_argument("--reqs", default="reqs", help="the folder with the requirements files; release.json and release.sig go here")
     a = ap.parse_args(argv)
-    version = a.version or tomllib.loads(Path(a.pyproject).read_text(encoding="utf-8"))["project"]["version"]
+    version = a.version or project_field(Path(a.pyproject).read_text(encoding="utf-8"), "version")
     if a.cmd == "compile":
         compile_requirements(Path(a.out), version)
         return 0

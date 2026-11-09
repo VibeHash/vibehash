@@ -61,6 +61,23 @@ class PinTests(unittest.TestCase):
         self.assertIn("evo", RM.COMPILE_EVO)
 
 
+class ProjectFieldTests(unittest.TestCase):
+    def test_the_regex_fallback_agrees_with_tomllib(self):
+        """Python 3.10 has no tomllib; both paths must read the same version and requires-python."""
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        for key in ("version", "requires-python"):
+            with_toml = RM.project_field(text, key)
+            with mock.patch.object(RM, "tomllib", None):
+                self.assertEqual(RM.project_field(text, key), with_toml, key)
+
+    def test_the_fallback_reads_only_the_project_table(self):
+        text = '[tool.x]\nversion = "9"\n[project]\nname = "a"\nversion = "1.2.3"\n[other]\nversion = "8"\n'
+        with mock.patch.object(RM, "tomllib", None):
+            self.assertEqual(RM.project_field(text, "version"), "1.2.3")
+            with self.assertRaises(KeyError):
+                RM.project_field(text, "requires-python")
+
+
 class CompileTests(unittest.TestCase):
     def test_compile_writes_both_files_by_running_uv_and_needs_no_key(self):
         calls = []
@@ -219,9 +236,8 @@ class WorkflowTests(unittest.TestCase):
         """--python-version is uv's resolution floor: compiled for 3.12, `vibehash update` on 3.10 or 3.11 would meet
         pins with no wheel for it and fail --require-hashes. It is requires-python's own floor."""
         import re
-        import tomllib
-        floor = re.fullmatch(r">=\s*(\d+\.\d+)", tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-                             ["project"]["requires-python"].strip()).group(1)
+        floor = re.fullmatch(r">=\s*(\d+\.\d+)", RM.project_field((ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+                                                                    "requires-python").strip()).group(1)
         for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
             self.assertEqual(cmd[cmd.index("--python-version") + 1], floor)
 
