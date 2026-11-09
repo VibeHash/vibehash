@@ -90,6 +90,16 @@ class AppHome(unittest.TestCase):
         self.reg = mock.patch.object(app, "_winreg", return_value=None)
         self.reg.start()
         self.addCleanup(self.reg.stop)
+        self.store = None  # never this machine's own credential store: an in-memory one where keyring is installed
+        try:
+            import keyring
+        except ImportError:
+            return
+        from tests.test_wallet import memory_backend
+        old = keyring.get_keyring()
+        self.store = memory_backend()
+        keyring.set_keyring(self.store)
+        self.addCleanup(keyring.set_keyring, old)
 
 
 class SupervisorTests(AppHome):
@@ -418,7 +428,9 @@ class PrepareTests(AppHome):
         self.assertEqual(wallets.kind(path), "store")
         self.assertNotIn("secret", json.loads(path.read_text()))
         self.assertEqual(list(Path(self.tmp.name).glob("recovery-words-*.txt")), [])
-        self.assertNotIn(" ".join(app._words_once.split()[:3]), out.getvalue())  # the words aren't printed either
+        from vibehash import credstore
+        words = credstore.get(credstore.WALLET_WORDS, json.loads(path.read_text())["address"])  # held until seen
+        self.assertNotIn(" ".join(words.split()[:3]), out.getvalue())  # the words aren't printed either
         self.assertNotRegex(out.getvalue(), r"\d+\. [a-z]+ ")
         self.assertNotIn("VIBEHASH_PASSWORD", os.environ)
 
@@ -660,6 +672,89 @@ class WordsOnceTests(AppHome):
         for f in Path(self.tmp.name).rglob("*"):  # nothing anywhere under the home holds the words
             if f.is_file():
                 self.assertNotIn("word7", f.read_text(encoding="utf-8", errors="ignore"), f)
+
+    def start(self, **kw):
+        """`app` starting over the same home, as after a quit or a reboot: a new Supervisor, prepare(), the state."""
+        app.stop_words()  # (the old app's listener went with it)
+        s = app.Supervisor([], 7545, beat_s=0.05, grace_s=5)
+        env = {k: v for k, v in os.environ.items() if k != "VIBEHASH_PASSWORD"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            app.prepare(SimpleNamespace(gpu="skip", no_password=True, **kw), report=s.report, on_words_seen=s.words_seen)
+        self.out = out.getvalue()
+        return json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]
+
+    def assert_no_words_in_files(self, words):
+        for f in Path(self.tmp.name).rglob("*"):  # nothing anywhere under the home holds the words
+            if f.is_file():
+                text = f.read_text(encoding="utf-8", errors="ignore")
+                self.assertNotIn(" ".join(words.split()[:3]), text, f)
+                self.assertNotIn(words.split()[5], text, f)
+        wallet = json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]
+        self.assertLessEqual(set(wallet), {"address", "path", "words_pending", "words_port", "words_token", "words_file"})
+
+    def test_pending_words_survive_a_restart_until_they_are_seen(self):
+        """The words wait in the credential store (the key's own trust boundary), not in app memory alone: a quit,
+        crash or reboot before the tick doesn't lose them. `seen` deletes them there."""
+        from vibehash import credstore
+        if self.store is None:
+            self.skipTest("keyring is not installed")
+        self.addCleanup(app.stop_words)
+        first = self.start()
+        address = first["address"]
+        words = credstore.get(credstore.WALLET_WORDS, address)
+        self.assertEqual(len(words.split()), 24)
+        self.assertTrue(first["words_pending"])
+        self.assertEqual(json.loads(self.get(first["words_port"], token=first["words_token"])[1])["words"], words.split())
+        self.assert_no_words_in_files(words)
+        for _ in range(2):  # quit before the tick, start again (twice): the words are offered each time
+            again = self.start()
+            self.assertEqual(again["address"], address)
+            self.assertTrue(again["words_pending"])
+            status, body = self.get(again["words_port"], token=again["words_token"])
+            self.assertEqual((status, json.loads(body)["words"]), (200, words.split()))
+            self.assert_no_words_in_files(words)
+        self.assertEqual(self.get(again["words_port"], "/wallet/words/seen", "POST", token=again["words_token"])[0], 200)
+        self.assertIsNone(credstore.get(credstore.WALLET_WORDS, address))  # gone from the store
+        self.assertEqual(self.get(again["words_port"], token=again["words_token"])[0], 404)
+        self.assertFalse(json.loads(app.state_path().read_text(encoding="utf-8"))["wallet"]["words_pending"])
+        after = self.start()  # and the next start has nothing to offer
+        self.assertFalse(after["words_pending"])
+        self.assertNotIn("words_port", after)
+        self.assertIsNone(app._words_server)
+        self.assert_no_words_in_files(words)
+
+    def test_a_start_with_no_window_leaves_pending_words_in_the_store_for_the_next_window(self):
+        from vibehash import credstore
+        if self.store is None:
+            self.skipTest("keyring is not installed")
+        self.addCleanup(app.stop_words)
+        address = self.start()["address"]
+        quiet = self.start(no_window=True)
+        self.assertNotIn("words_port", quiet)
+        self.assertIsNone(app._words_server)
+        self.assertIsNotNone(credstore.get(credstore.WALLET_WORDS, address))
+        self.assertTrue(self.start()["words_pending"])
+
+    def test_a_store_that_refuses_the_words_falls_back_to_memory_and_says_so(self):
+        from vibehash import credstore
+        if self.store is None:
+            self.skipTest("keyring is not installed")
+        self.addCleanup(app.stop_words)
+        real = credstore.put
+
+        def put(service, account, value):
+            if service == credstore.WALLET_WORDS:
+                raise credstore.Unavailable("the credential store refused it: full")
+            return real(service, account, value)
+
+        with mock.patch.object(credstore, "put", put):
+            wallet = self.start()
+        self.assertIn("lost if the app stops", self.out)
+        self.assertTrue(wallet["words_pending"])
+        status, body = self.get(wallet["words_port"], token=wallet["words_token"])
+        self.assertEqual((status, len(json.loads(body)["words"])), (200, 24))
+        self.assertEqual(self.get(wallet["words_port"], "/wallet/words/seen", "POST", token=wallet["words_token"])[0], 200)
+        self.assertEqual(self.get(wallet["words_port"], token=wallet["words_token"])[0], 404)
 
     def test_no_listener_for_a_wallet_that_already_existed(self):
         s = app.Supervisor([], 7545, beat_s=0.05, grace_s=5)

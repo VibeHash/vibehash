@@ -237,6 +237,32 @@ class ApiTests(Home):
         self.assertEqual(seen, [1])
         self.assertEqual(self.api.wallet()["words"], [])  # the app answers 404 now
 
+    def test_words_held_in_the_store_reach_the_window_and_seen_deletes_them_there(self):
+        """A new wallet's words wait in the credential store until the tick (app.hold_words): a restarted app's
+        listener serves them from there, and words_seen() removes the store entry."""
+        from tests.test_wallet import use_memory_keyring
+        from vibehash import credstore
+        store = use_memory_keyring(self)
+        words = " ".join(f"w{i}" for i in range(1, 25))
+        self.assertTrue(app.hold_words("vibe1abc", words))
+        self.assertEqual(store.data[(credstore.WALLET_WORDS, "vibe1abc")], words)
+        seen = []
+        for _ in range(2):  # the app quit before the tick and started again: a new listener, the same words
+            port = app.serve_words(None, "secret-token", on_seen=lambda: seen.append(1), address="vibe1abc")
+            self.addCleanup(app.stop_words)
+            self.alive(wallet={"address": "vibe1abc", "path": "w.json", "words_pending": True, "words_port": port,
+                               "words_token": "secret-token"})
+            self.assertEqual(self.api.wallet()["words"], words.split())
+            self.assertNotIn("w7", Path(app.state_path()).read_text())
+            app.stop_words()
+        port = app.serve_words(None, "secret-token", on_seen=lambda: seen.append(1), address="vibe1abc")
+        self.alive(wallet={"address": "vibe1abc", "path": "w.json", "words_pending": True, "words_port": port,
+                           "words_token": "secret-token"})
+        self.assertEqual(self.api.words_seen(), {"ok": True})
+        self.assertEqual(seen, [1])
+        self.assertNotIn((credstore.WALLET_WORDS, "vibe1abc"), store.data)
+        self.assertEqual(self.api.wallet()["words"], [])
+
     def test_words_pending_with_nobody_listening_is_no_words_not_an_error(self):
         import socket
         with socket.socket() as s:
@@ -454,6 +480,8 @@ class PageTests(unittest.TestCase):
         self.assertIn("z-index: 30", self.page)
         self.assertTrue(all(o > 0 for o in order))
         self.assertIn("!welcomeOffered", self.script)  # a settings reload mid-tour doesn't restart it
+        # words not yet written down are offered on every start until the tick, even after the tour was done or skipped
+        self.assertIn("(!c.welcomed || c.words_pending) && !welcomeOffered", self.script)
 
     def test_the_old_launcher_banner_is_one_time_and_dismissible(self):
         self.assertIn('id="launcher-banner"', self.page)

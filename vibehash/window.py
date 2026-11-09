@@ -128,10 +128,10 @@ class Api:
 
     def wallet(self) -> dict:
         """The wallet the app runs with: its address and file (from the app's state, which setup writes), and its
-        recovery words. A new wallet whose key is in the credential store has its words only in the app's memory:
-        the state says `words_pending` and the port of the app's listener (app.serve_words), and they are fetched from
-        there each time until `words_seen()`. An older or headless setup saved them to a file only this user can read,
-        which is parsed here while it is still there; the page shows them once and says to keep them somewhere safe."""
+        recovery words. A new wallet whose key is in the credential store has its words there too (app.hold_words), or
+        in the app's memory when the store refused them: the state says `words_pending` and the port of the app's
+        listener (app.serve_words), and they are fetched from there each time, on every start, until `words_seen()`.
+        An older or headless setup saved them to a file only this user can read, which is parsed here while it is still there; the page shows them once and says to keep them somewhere safe."""
         info = dict((app_module.read_state() or {}).get("wallet") or {})
         words_file = info.get("words_file")
         words: list[str] = []
@@ -426,7 +426,7 @@ def _words_port(wallet: dict) -> int | None:
 
 
 def _words_pending() -> bool:
-    """Whether a new wallet's recovery words are waiting in the app's memory to be written down (words_seen)."""
+    """Whether a new wallet's recovery words are waiting to be written down (words_seen), and the app serves them."""
     wallet = (app_module.read_state() or {}).get("wallet") or {}
     return bool(wallet.get("words_pending")) and _words_port(wallet) is not None
 

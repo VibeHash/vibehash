@@ -11,6 +11,7 @@ What this is not: a defence against malware that already runs as this user, whic
 from __future__ import annotations
 
 WALLET_TOTP = "vibehash-totp"  # the service a wallet's authenticator key is kept under, by its address (`wallet mfa`)
+WALLET_WORDS = "vibehash-words"  # a new wallet's recovery words, by its address, until the app's window sees them written down
 PROBE_SERVICE = "vibehash-probe"
 PROBE_ACCOUNT = "probe"
 

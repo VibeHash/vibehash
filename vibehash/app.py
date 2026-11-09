@@ -104,7 +104,7 @@ def prepare(a, report=None, on_words_seen=None) -> tuple[str, Path]:
     """Node, wallet and GPU support, without a question that can't be answered: -> (node url, wallet path).
     The same steps as `setup`, kept: a second run changes nothing. `report(step, fraction, **facts)`, if given,
     hears each step as it starts (the window shows it): node, wallet (with the wallet's address, file and words
-    file), gpu, ready. `on_words_seen()` hears that a new wallet's recovery words were written down (words_once)."""
+    file), gpu, ready. `on_words_seen()` hears that a new wallet's recovery words were written down (serve_words)."""
     from . import cli, unattended
     from . import wallet as wallets
 
@@ -121,9 +121,15 @@ def prepare(a, report=None, on_words_seen=None) -> tuple[str, Path]:
     address, pw, words = cli.ensure_wallet(path, "wallet: ", no_password=bool(getattr(a, "no_password", False)),
                                            caller_shows_words=shown)
     facts = {"address": address, "path": str(path), "words_pending": False}
-    if words:  # a new wallet whose key is in the credential store: the words exist nowhere but here, until written down
+    held = False  # whether the words wait in the credential store (they then outlive this app), else in memory only
+    if words:  # a new wallet whose key is in the credential store: its words wait beside it until written down
+        held = hold_words(address, words)
+    elif shown and wallets.kind(path) == "store":  # a start after one that quit before the words were written down
+        held = pending_words(address)
+    if words or held:
         token = secrets.token_urlsafe(32)
-        facts |= {"words_pending": True, "words_token": token, "words_port": serve_words(words, token, on_seen=on_words_seen)}
+        port = serve_words(None if held else words, token, on_seen=on_words_seen, address=address if held else None)
+        facts |= {"words_pending": True, "words_token": token, "words_port": port}
     else:
         words_file = unattended.words_file(address)  # a headless setup's file, or an old one
         facts["words_file"] = str(words_file) if words_file.exists() else None
@@ -155,33 +161,72 @@ def prepare(a, report=None, on_words_seen=None) -> tuple[str, Path]:
     return url, path
 
 
-# --- the recovery words, shown once -------------------------------------------------------------------------------
+# --- the recovery words, until they are written down ------------------------------------------------------------
 
-_words_once: str | None = None  # a new wallet's 24 words, in this process's memory only (never state.json, a log or a file)
+_words_once: str | None = None  # the words in this process's memory, only when the store couldn't hold them (never state.json, a log or a file)
+_words_address: str | None = None  # the wallet whose words wait in the credential store (credstore.WALLET_WORDS)
 _words_server = None
 _words_lock = threading.Lock()
 
 
-def serve_words(words: str, token: str, on_seen=None) -> int:
-    """Hold a new wallet's recovery words in memory and serve them to the window on a loopback port of their own:
-    `GET /wallet/words` -> {"words": [...]} and `POST /wallet/words/seen` (the user ticked "I wrote them down"), which
-    clears them and calls `on_seen()`; anything else is 404, the words' route too once they are cleared (the listener
-    then answers nothing else and goes with the app, or with stop_words()). The words stay until `seen` or the
-    app's exit, not until the first GET, so a window that restarts before the tick can show them again. Exposure is
-    the worker feed's own (watch.py): 127.0.0.1 only, a Host that isn't this computer's is refused (DNS rebinding)
-    and so is an Origin that isn't (another website's page). The window runs in another process, so it asks here,
-    through state.json's `words_port` and `words_token`; the state holds the port, the token and `words_pending`,
-    never the words. Another user of this computer can reach the port too, so both routes also need the token (header
-    X-Words-Token, compared in constant time): state.json is in this user's own folder, which they can't read. -> the
-    port."""
-    global _words_once, _words_server
+def hold_words(address: str, words: str) -> bool:
+    """Keep a new wallet's recovery words in the credential store beside its key (the same trust boundary; not a file
+    of ours), so a quit, crash or reboot before they are written down doesn't lose them: each start offers them again
+    until `seen`. -> whether the store took them; if not, they are held in this app's memory only, as said here."""
+    from . import credstore
+    try:
+        credstore.put(credstore.WALLET_WORDS, address, words)
+        return True
+    except credstore.Unavailable as e:
+        print(f"wallet: the credential store wouldn't keep the recovery words ({e}); they are held in this app's memory "
+              "only and are lost if the app stops before you write them down", flush=True)
+        return False
+
+
+def pending_words(address: str) -> bool:
+    """Whether a new wallet's recovery words still wait in the credential store (an earlier start quit before `seen`)."""
+    from . import credstore
+    try:
+        return credstore.get(credstore.WALLET_WORDS, address) is not None
+    except credstore.Unavailable as e:
+        print(f"wallet: can't ask the credential store whether recovery words are waiting ({e})", flush=True)
+        return False
+
+
+def _current_words() -> str | None:
+    """The words the listener serves now: from the credential store when they are held there, else from memory."""
+    with _words_lock:
+        words, address = _words_once, _words_address
+    if address is None:
+        return words
+    from . import credstore
+    try:
+        return credstore.get(credstore.WALLET_WORDS, address)
+    except credstore.Unavailable:
+        return None
+
+
+def serve_words(words: str | None, token: str, on_seen=None, address: str | None = None) -> int:
+    """Serve a new wallet's recovery words to the window on a loopback port of their own: `GET /wallet/words` ->
+    {"words": [...]} and `POST /wallet/words/seen` (the user ticked "I wrote them down"), which forgets them and calls
+    `on_seen()`; anything else is 404, the words' route too once they are forgotten (the listener then answers nothing
+    else and goes with the app, or with stop_words()). With `address`, the words are read from the credential store
+    on each GET (hold_words put them there) and `seen` deletes them there; without, `words` are held in this process's
+    memory (the store refused them). They stay until `seen`, not until the first GET or the app's exit, so a window
+    or an app that restarts before the tick shows them again. Exposure is the worker feed's own (watch.py): 127.0.0.1
+    only, a Host that isn't this computer's is refused (DNS rebinding) and so is an Origin that isn't (another
+    website's page). The window runs in another process, so it asks here, through state.json's `words_port` and
+    `words_token`; the state holds the port, the token and `words_pending`, never the words. Another user of this
+    computer can reach the port too, so both routes also need the token (header X-Words-Token, compared in constant
+    time): state.json is in this user's own folder, which they can't read. -> the port."""
+    global _words_once, _words_address, _words_server
     import hmac
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     from .watch import local_host, local_origin
     stop_words()
     with _words_lock:
-        _words_once = words
+        _words_once, _words_address = (None, address) if address is not None else (words, None)
 
     class Handler(BaseHTTPRequestHandler):
         def _allowed(self) -> bool:
@@ -209,9 +254,8 @@ def serve_words(words: str, token: str, on_seen=None) -> int:
         def do_GET(self):  # noqa: N802
             if not self._allowed():
                 return
-            with _words_lock:
-                words = _words_once
-            if self.path == "/wallet/words" and words is not None:
+            words = _current_words() if self.path == "/wallet/words" else None
+            if words is not None:
                 self._json({"words": words.split()})
             else:
                 self.send_error(404)
@@ -222,7 +266,7 @@ def serve_words(words: str, token: str, on_seen=None) -> int:
             if self.path != "/wallet/words/seen":
                 self.send_error(404)
                 return
-            clear_words()
+            forget_words()
             if on_seen:
                 on_seen()
             self._json({"ok": True})
@@ -237,14 +281,31 @@ def serve_words(words: str, token: str, on_seen=None) -> int:
     return server.server_address[1]
 
 
-def clear_words() -> None:
-    global _words_once
+def forget_words() -> None:
+    """The words were written down: delete them from the credential store, if held there, and from memory."""
+    global _words_address
     with _words_lock:
-        _words_once = None
+        address, _words_address = _words_address, None
+    if address is not None:
+        from . import credstore
+        try:
+            credstore.delete(credstore.WALLET_WORDS, address)
+        except credstore.Unavailable as e:
+            print(f"wallet: the credential store wouldn't forget the recovery words ({e}); the next start offers them "
+                  "again", flush=True)
+    clear_words()
+
+
+def clear_words() -> None:
+    """Forget the words in this process (memory, and which store entry it serves); the store entry itself stays."""
+    global _words_once, _words_address
+    with _words_lock:
+        _words_once = _words_address = None
 
 
 def stop_words() -> None:
-    """Forget the words and stop listening (the app's exit, or a second wallet's words replacing these)."""
+    """Stop serving the words (the app's exit, or a second wallet's words replacing these). Words held in the
+    credential store stay there for the next start; words held in memory only are gone."""
     global _words_server
     clear_words()
     server, _words_server = _words_server, None
