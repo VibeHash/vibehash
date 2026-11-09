@@ -89,3 +89,32 @@ needs float32, so an NPU is unlikely to land inside a bf16 checker's margin as i
 3. If its worst gap is under half the cross margin, an `npu` setup (`hardware.BACKENDS` has it) that answers but
    doesn't check, until the census backs it.
 4. If not, the integer rule (H) is where NPUs fit: int8 with int32 sums is what they're built for, and exact.
+
+### Step 2, first measurement (2026-11-08, Intel AI Boost)
+
+`vibehash/es_npu.py` is the answering path: es_hybrid's decode step as one pure function (every state and every
+twisted linear's factors are inputs), compiled by OpenVINO 2026.4 for the NPU with fixed shapes (16 rows a step; about
+9 minutes the first time, seconds from the compile cache). The shared prompt reading stays on the CPU in float32.
+`scripts/evo_margin_xgpu.py answer --device npu` and `check --device npu` use it. On OpenVINO's CPU in float32 it gives
+es_hybrid's answers and gaps exactly (tests/test_es_npu.py).
+
+The NPU has fp16 and int8 only. As written, its honest answers were rejected outright: a float32 checker found them
+up to 6.0 below its greedy choice, as far as a cheat. The cause was one place. Some Gated DeltaNet heads read out
+values around 1e-5, which are fp16 subnormals. The NPU holds those to a few bits, and the gated RMSNorm after them
+scales the error up to full size: the layer's output came out 3e-2 off float32, 20 times an Intel GPU's fp16. The fix
+computes the read-out `QSCALE * sqrt(Dk)` times larger and takes the factor back out of the norm's epsilon, which
+the norm otherwise ignores. The l2 norms and the gated norm are also written so that nothing squared leaves fp16's
+range. Nothing else needed a change.
+
+Qwen3.5-0.8B, the `vibe` mix, 2 pairs (4 members) x 8 problems, up to 128 tokens, one round, checked by the CPU in
+float32 (the arithmetic of Intel, Apple and CPU checkers):
+
+| | worst honest gap | false rejections at 0.1 / 0.375 / 0.5 / 0.75 / 1 | smallest cheat gap | false acceptances |
+|---|---|---|---|---|
+| before the fix | 6.01 | 4 / 4 / 4 / 4 / 4 | 4.30 | 0 |
+| after | 0.065 | 0 / 0 / 0 / 0 / 0 | 3.96 | 0 |
+
+One step's log-probabilities are now 0.047 off float32 (OpenVINO's Intel GPU in fp16: 0.069). The NPU also agrees
+with itself: its own answers teacher-forced on it have gaps of exactly 0. So step 3's condition (worst gap under half
+the cross margin) holds on this sample. The sample is small, though: a larger round, a CUDA bf16 checker (copy the
+answers dump to a CUDA machine and run `check`), and the NPU as checker of others' work are still to measure.
