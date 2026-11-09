@@ -3,6 +3,9 @@ zlib): the brand mark (the pickaxe of three gold blocks, docs/site) on a rounded
 
     launcher/VibeHash.ico                          the miner's app: the mark on dark
     vibehash/data/admin.ico, vibehash/data/admin.png   the admin app (admin.py's shortcut and window): the mark on violet
+    docs/site/watch-180.png, docs/site/watch-512.png    vibehash.org/watch on a phone's home screen: the mark on dark,
+                                                        square and opaque (iOS rounds the corners itself, and fills
+                                                        anything transparent with black)
 
 Run it after changing the mark: python scripts/make_icon.py"""
 from __future__ import annotations
@@ -17,12 +20,13 @@ MARK = ((0, 0, 1, 3), (2, 0, 1, 3), (1, 3, 1, 1))  # on a 3 by 4 grid: two uprig
 SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
-def pixel(x: float, y: float, n: int, ground=DARK) -> tuple[int, int, int, int]:
-    """The colour at (x, y) of an n by n icon: transparent outside the rounded square, the mark in gold inside."""
+def pixel(x: float, y: float, n: int, ground=DARK, square: bool = False) -> tuple[int, int, int, int]:
+    """The colour at (x, y) of an n by n icon: transparent outside the rounded square (`square`: no corners, every
+    pixel opaque), the mark in gold inside."""
     r = n * 0.22
     dx = max(r - x, x - (n - r), 0)
     dy = max(r - y, y - (n - r), 0)
-    if dx * dx + dy * dy > r * r:
+    if not square and dx * dx + dy * dy > r * r:
         return (0, 0, 0, 0)
     pad = n * 0.2
     cell = (n - 2 * pad) / 4  # the grid is 3 wide, 4 tall: fit the height, centre the width
@@ -33,7 +37,7 @@ def pixel(x: float, y: float, n: int, ground=DARK) -> tuple[int, int, int, int]:
     return ground
 
 
-def png(n: int, ground=DARK) -> bytes:
+def png(n: int, ground=DARK, square: bool = False) -> bytes:
     rows = bytearray()
     for y in range(n):
         rows.append(0)  # filter: none
@@ -41,7 +45,7 @@ def png(n: int, ground=DARK) -> bytes:
             # 4 samples per pixel for soft edges
             acc = [0, 0, 0, 0]
             for sx, sy in ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)):
-                p = pixel(x + sx, y + sy, n, ground)
+                p = pixel(x + sx, y + sy, n, ground, square)
                 for i in range(4):
                     acc[i] += p[i]
             rows.extend(v // 4 for v in acc)
@@ -67,7 +71,9 @@ def ico(sizes=SIZES, ground=DARK) -> bytes:
 if __name__ == "__main__":
     root = Path(__file__).resolve().parent.parent
     outs = {root / "launcher" / "VibeHash.ico": ico(), root / "vibehash" / "data" / "admin.ico": ico(ground=VIOLET),
-            root / "vibehash" / "data" / "admin.png": png(256, VIOLET)}
+            root / "vibehash" / "data" / "admin.png": png(256, VIOLET),
+            root / "docs" / "site" / "watch-180.png": png(180, square=True),
+            root / "docs" / "site" / "watch-512.png": png(512, square=True)}
     if len(sys.argv) > 1:  # one file, named: the miner's icon
         outs = {Path(sys.argv[1]): ico()}
     for out, data in outs.items():
