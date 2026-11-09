@@ -3,6 +3,8 @@ orders (admin.py), and the globe's land dots (scripts/make_globe.py)."""
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -396,10 +398,214 @@ class NodeRouteTests(unittest.TestCase):
         sent = {**signed, nodeadmin.CODE_HEADER: nodeadmin.totp(key, step())}
         self.assertEqual(self.call("/admin/review", {"on": True}, token=NODE_TOKEN, headers=sent)[1]["review"], True)
 
+    def test_an_allowlist_hides_the_routes_from_other_addresses(self):
+        self.node.admin.allow = nodeadmin.parse_allow("100.64.0.0/10")  # the test talks from 127.0.0.1
+        self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 404)
+        self.assertEqual(self.call("/admin/login", {"code": "123456"}, token=NODE_TOKEN)[0], 404)
+        self.assertEqual(self.call("/status")[0], 200)  # the public routes don't change
+        self.node.admin.allow = nodeadmin.parse_allow("100.64.0.0/10,127.0.0.1/32")
+        self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 200)
+
     def test_a_node_without_a_token_has_no_admin_routes(self):
         self.node.admin.token = None
         self.assertEqual(self.call("/admin/overview", token=NODE_TOKEN)[0], 404)
         self.assertEqual(self.call("/admin/jobs/j1/hold", {}, token=NODE_TOKEN)[0], 404)
+
+
+class OpsRouteTests(NodeRouteTests):
+    """The server's health in the overview, and the operations on it, each wanting a fresh authenticator code."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [time.time()]
+        self.node.admin.now = lambda: self.clock[0]
+        self.key = nodeadmin.mfa_key(KEY)
+        self.backups = Path(self.node.store.dir).resolve().parent / "backup"
+
+    def code(self):
+        """A code of a step no code was taken in yet: each code is good once."""
+        self.clock[0] += nodeadmin.CODE_STEP
+        return nodeadmin.totp(self.key, int(self.clock[0] // nodeadmin.CODE_STEP))
+
+    def signed_in(self):
+        self.node.admin.mfa = self.key
+        code, out = self.call("/admin/login", {"code": self.code()}, token=NODE_TOKEN)
+        self.assertEqual(code, 200)
+        return {nodeadmin.LOGIN_HEADER: out["session"]}
+
+    def test_the_overview_says_how_the_server_is(self):
+        ops = self.call("/admin/overview", token=NODE_TOKEN)[1]["ops"]
+        from vibehash import __version__
+        self.assertEqual(ops["version"], __version__)
+        self.assertGreaterEqual(ops["uptime_s"], 0)
+        self.assertGreater(ops["disk"]["total_bytes"], 0)
+        self.assertTrue(0 <= ops["disk"]["free_pct"] <= 100)
+        self.assertIsInstance(ops["blobs_bytes"], int)
+        self.assertEqual((ops["backup"], ops["backups_set_up"], ops["halted"]), (None, False, False))
+        q = ops["quorum"]  # this chain has no validators: the node seals alone, so a restart stops blocks
+        self.assertEqual((q["bft"], q["safe_to_restart"]), (False, False))
+        self.backups.mkdir()
+        (self.backups / "last_backup.json").write_text(json.dumps(
+            {"timestamp": int(time.time()) - 7200, "chain_bytes": 1234, "remote_ok": True, "error": None}))
+        (self.backups.parent / "health.json").write_text(json.dumps({"checked_at": 1, "height": 3, "tip_time": 1, "ok": True, "reason": None}))
+        ops = self.call("/admin/overview", token=NODE_TOKEN)[1]["ops"]
+        self.assertTrue(ops["backups_set_up"])
+        self.assertEqual(ops["backup"]["chain_bytes"], 1234)
+        self.assertAlmostEqual(ops["backup"]["age_hours"], 2.0, delta=0.1)
+        self.assertTrue(ops["health"]["ok"])
+
+    def test_operations_want_a_fresh_code(self):
+        for op in ("prune", "backup", "restart"):
+            code, out = self.call(f"/admin/{op}", {}, token=NODE_TOKEN)  # no authenticator key on this node: refused
+            self.assertEqual(code, 401, op)
+            self.assertIn(nodeadmin.NEED_FRESH, out["error"])
+        signed = self.signed_in()
+        for op in ("prune", "backup", "restart"):
+            self.assertEqual(self.call(f"/admin/{op}", {}, token=NODE_TOKEN, headers=signed)[0], 401, op)  # a sign-in alone
+            bad = "000000" if self.code() != "000000" else "111111"
+            self.assertEqual(self.call(f"/admin/{op}", {}, token=NODE_TOKEN, headers={**signed, nodeadmin.CODE_HEADER: bad})[0], 401)
+            self.assertEqual(self.call(f"/admin/{op}", {}, token="nope", headers={**signed, nodeadmin.CODE_HEADER: self.code()})[0], 401)
+        used = self.code()
+        fresh = {**signed, nodeadmin.CODE_HEADER: used}
+        while self.node.coord.r is not None:  # (no job on this chain: no round opens)
+            time.sleep(0.1)
+        code, out = self.call("/admin/prune", {}, token=NODE_TOKEN, headers=fresh)
+        self.assertEqual((code, out["ok"]), (200, True))
+        self.assertEqual(self.call("/admin/prune", {}, token=NODE_TOKEN, headers=fresh)[0], 401)  # that code is used
+
+    def test_a_backup_is_asked_of_the_backup_service(self):
+        signed = self.signed_in()
+        code, out = self.call("/admin/backup", {}, token=NODE_TOKEN, headers={**signed, nodeadmin.CODE_HEADER: self.code()})
+        self.assertEqual(code, 409)  # no backup service on this server
+        self.assertIn("setup-node.sh", out["error"])
+        self.backups.mkdir()
+        code, out = self.call("/admin/backup", {}, token=NODE_TOKEN, headers={**signed, nodeadmin.CODE_HEADER: self.code()})
+        self.assertEqual((code, out["already"]), (200, False))
+        self.assertEqual(json.loads((self.backups / "request").read_text())["requested_at"], out["requested_at"])
+        code, out = self.call("/admin/backup", {}, token=NODE_TOKEN, headers={**signed, nodeadmin.CODE_HEADER: self.code()})
+        self.assertTrue(out["already"])  # asked a moment ago and not begun: not asked again
+
+    def test_a_restart_that_would_stop_the_chain_is_refused_unless_forced(self):
+        signed = self.signed_in()
+        with mock.patch.dict(os.environ, {"INVOCATION_ID": "", "VIBEHASH_SUPERVISED": ""}):
+            code, out = self.call("/admin/restart", {}, token=NODE_TOKEN, headers={**signed, nodeadmin.CODE_HEADER: self.code()})
+            self.assertEqual(code, 409)
+            self.assertIn("systemd", out["error"])  # nothing would start it again
+        with mock.patch.dict(os.environ, {"INVOCATION_ID": "abc"}):
+            code, out = self.call("/admin/restart", {}, token=NODE_TOKEN, headers={**signed, nodeadmin.CODE_HEADER: self.code()})
+            self.assertEqual(code, 409)  # it seals this chain's blocks alone
+            self.assertIn("force", out["error"])
+            self.assertIsNone(self.node.restart_requested)
+            code, out = self.call("/admin/restart", {"force": True}, token=NODE_TOKEN,
+                                  headers={**signed, nodeadmin.CODE_HEADER: self.code()})
+            self.assertEqual((code, out["restarting"], out["safe"]), (200, True, False))
+            self.assertIn("forced", self.node.restart_requested)
+
+
+class AllowTests(unittest.TestCase):
+    """$VIBEHASH_ADMIN_ALLOW_IPS: the admin routes answer only clients in those networks (a tailnet, this computer)."""
+
+    def test_networks_are_read_and_matched(self):
+        nets = nodeadmin.parse_allow("100.64.0.0/10, 127.0.0.1/32;fd7a:115c:a1e0::/48")
+        for ip, ok in [("100.101.5.9", True), ("127.0.0.1", True), ("8.8.8.8", False), ("::ffff:100.64.0.7", True),
+                       ("fd7a:115c:a1e0::5", True), ("::1", False), (None, False), ("not an address", False)]:
+            self.assertEqual(nodeadmin.allowed(ip, nets), ok, ip)
+        self.assertTrue(nodeadmin.allowed("8.8.8.8", nodeadmin.parse_allow("")))  # none set: every address
+        with self.assertRaises(ValueError):
+            nodeadmin.parse_allow("100.64.0.0/10,tailnet")
+
+    def test_from_elsewhere_the_routes_arent_there_and_it_isnt_a_wrong_try(self):
+        a = nodeadmin.Admin(FakeStore(), TOKEN, allow="100.64.0.0/10")
+        a.check("Bearer " + TOKEN, ip="100.70.1.2")
+        for _ in range(nodeadmin.MAX_FAILS + 2):
+            with self.assertRaises(KeyError):  # 404, as from a node with no admin routes
+                a.check("Bearer " + TOKEN, ip="8.8.8.8")
+            with self.assertRaises(KeyError):
+                a.login("Bearer " + TOKEN, "123456", ip="8.8.8.8")
+        self.assertEqual(a.fails, {})
+        with mock.patch.dict(os.environ, {nodeadmin.ALLOW_ENV: "127.0.0.1/32"}):
+            b = nodeadmin.Admin(FakeStore(), TOKEN)  # from the environment when not given
+        with self.assertRaises(KeyError):
+            b.check("Bearer " + TOKEN, ip="100.70.1.2")
+
+
+class QuorumTests(unittest.TestCase):
+    """Whether finality survives a validator's restart, from who signed the last blocks' certificates."""
+
+    def view(self, me, signed_by, stakes=None):
+        keys = [KeyPair.generate(bytes([i])) for i in range(4)]
+        vals = {k.address: (stakes or [100] * 4)[i] for i, k in enumerate(keys)}
+        certs = {h: {"votes": [{"pubkey": keys[i].public.hex(), "sig": "00"} for i in signed_by]} for h in range(95, 101)}
+        node = SimpleNamespace(
+            chain=SimpleNamespace(tip=SimpleNamespace(height=100),
+                                  state=SimpleNamespace(validator_set=lambda: vals, validators={a: None for a in vals})),
+            store=SimpleNamespace(certificates=lambda lo, hi: {h: c for h, c in certs.items() if lo <= h <= hi}),
+            keys=keys[me] if me is not None else KeyPair.generate(b"follower"))
+        return nodeadmin.quorum_view(node), keys
+
+    def test_four_equal_validators_survive_one_restart(self):
+        q, _ = self.view(0, [0, 1, 2, 3])
+        self.assertEqual((q["online"], q["online_pct"], q["safe_to_restart"]), (4, 100.0, True))
+
+    def test_with_one_already_down_restarting_another_would_stop_blocks(self):
+        q, keys = self.view(0, [0, 1, 2])
+        self.assertTrue(q["quorum_now"])  # 3 of 4: blocks are final
+        self.assertFalse(q["safe_to_restart"])  # 2 of 4 without this one: not more than two thirds
+        self.assertIn("50%", q["why"])
+        self.assertFalse(q["signers"][keys[3].address]["online"])
+        self.assertEqual(q["signers"][keys[1].address]["last_signed"], 100)
+
+    def test_two_validators_is_a_trap_and_a_follower_is_always_safe(self):
+        q, _ = self.view(0, [0, 1], stakes=[100, 100, 0, 0])
+        self.assertFalse(q["safe_to_restart"])
+        q, _ = self.view(None, [0, 1, 2])
+        self.assertTrue(q["safe_to_restart"])
+
+
+class HaltExitTests(unittest.TestCase):
+    """`vibehash node` ends with HALT_EXIT after a halt (systemd leaves it down: RestartPreventExitStatus), and with
+    RESTART_EXIT after an admin's restart (systemd starts it again)."""
+
+    def run_node(self, **state):
+        from vibehash import cli
+        from vibehash import node as node_module
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        genesis = Path(tmp.name) / "genesis.json"
+        genesis.write_text(json.dumps({"chain_id": "x", "timestamp": 0, "allocations": {}}))
+        fake = SimpleNamespace(**{"halted": None, "restart_requested": None, "stop": lambda: None, **state})
+        fake.start = lambda: fake
+        a = cli.parser().parse_args(["node", "--genesis", str(genesis), "--wallet", "w.json", "--data-dir", str(Path(tmp.name) / "d")])
+        with mock.patch.object(node_module, "Node", lambda *args, **kw: fake), \
+             mock.patch.object(cli, "load_wallet", lambda *args, **kw: KeyPair.generate(b"n")), \
+             mock.patch("sys.stderr"), self.assertRaises(SystemExit) as ctx:
+            cli.cmd_node(a)
+        return ctx.exception.code
+
+    def test_a_halt_exits_42_and_a_restart_75(self):
+        from vibehash.node import HALT_EXIT, RESTART_EXIT
+        self.assertEqual(HALT_EXIT, 42)
+        self.assertEqual(self.run_node(halted="block 9 couldn't be saved"), HALT_EXIT)
+        self.assertEqual(self.run_node(restart_requested="an admin asked"), RESTART_EXIT)
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_follow_refuses_options_that_make_a_new_network(self):
+        script = str(ROOT / "deploy" / "setup-node.sh")
+        cases = [(["--follow", "https://node.example.org", "--fund", "vibe1x=5"], "make a new network"),
+                 (["--follow", "https://node.example.org", "--es"], "make a new network"),
+                 (["--follow", "ftp://node.example.org"], "a node's address"),
+                 (["--follow", "https://node.example.org", "--genesis-hash", "abc"], "64 hex digits"),
+                 (["--genesis-hash", "0" * 64], "goes with --follow")]
+        for extra, says in cases:
+            out = subprocess.run(["bash", script, "--domain", "node2.example.org", *extra], capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.returncode, 1, extra)
+            self.assertIn(says, out.stdout + out.stderr, extra)
+
+    def test_the_service_never_restarts_a_halted_node(self):
+        unit = (ROOT / "deploy" / "setup-node.sh").read_text(encoding="utf-8")
+        from vibehash.node import HALT_EXIT
+        self.assertIn(f"RestartPreventExitStatus={HALT_EXIT}", unit)
+        self.assertIn("--trust-proxy-dns", unit)
 
 
 class GeoTests(unittest.TestCase):
@@ -933,6 +1139,35 @@ class AdminAppTests(unittest.TestCase):
         no = admin.AdminApp([admin.NodeLink("http://x", None, client=self.fake)], None, self.app.geo)
         with self.assertRaises(admin.AdminError):
             no.hold("j1")
+
+    def test_an_operation_goes_to_one_node_with_a_fresh_code(self):
+        seen = []
+
+        class OpsNode(FakeNode):
+            def _req(self, method, path, data=None, headers=None, limit=None):
+                if path.startswith("/admin/") and path != "/admin/overview":
+                    seen.append((self.url, path, (headers or {}).get(nodeadmin.CODE_HEADER), json.loads(data)))
+                    if path == "/admin/restart" and not json.loads(data).get("force"):
+                        raise NodeError(f"{method} {path}: blocks stop until it's back. Send force to restart it anyway", 409)
+                return super()._req(method, path, data, headers, limit)
+
+        one, two = OpsNode({"/admin/prune": {"ok": True, "removed": 3, "freed_bytes": 10},
+                            "/admin/restart": {"ok": True, "restarting": True, "safe": False}}), OpsNode({})
+        two.url = "https://two.test:8545"
+        app = admin.AdminApp([admin.NodeLink(one.url, "t", client=one), admin.NodeLink(two.url, "t", client=two)],
+                             None, admin.Geo(Path(self.tmp.name) / "geo.json", lookup=lambda ips: {}))
+        out = app.operate(one.url, "prune", " 123456 ")
+        self.assertTrue(out["ok"])
+        self.assertEqual(seen, [(one.url, "/admin/prune", "123456", {})])  # that node only, with the code
+        out = app.operate(one.url, "restart", "234567")
+        self.assertEqual((out["ok"], out["status"]), (False, 409))  # the page offers to force it
+        out = app.operate(one.url, "restart", "345678", force=True)
+        self.assertTrue(out["ok"])
+        self.assertEqual(seen[-1][3], {"force": True})
+        for bad in [(one.url, "format", "123456"), (one.url, "prune", "12345"), ("https://elsewhere", "prune", "123456")]:
+            with self.assertRaises(admin.AdminError):
+                app.operate(*bad)
+        self.assertEqual(len(seen), 3)
 
     def test_settings_keep_a_saved_token_when_the_page_leaves_it_empty(self):
         saved = {}

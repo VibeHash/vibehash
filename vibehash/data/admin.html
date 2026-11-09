@@ -7,7 +7,8 @@
 <!-- The admin app's page (admin.py serves it on 127.0.0.1 with the nodes behind it). It reads only its own server:
      /api/overview every few seconds (every node's view, the devices with their places, the jobs, the mempool), /api/blocks
      for the ledger, and sends orders to /api/jobs/<id>/hold|release|cancel, /api/jobs/post, /api/review, /api/unlock,
-     /api/settings, each with the session key the server put in window.ADMIN. Everything a node says is put on the page
+     /api/settings, /api/ops/prune|backup|restart (one node, with a fresh authenticator code), each with the session
+     key the server put in window.ADMIN. Everything a node says is put on the page
      as text, never as markup. The globe is a canvas: the land as dots (globe.json), the devices where they connect
      from, arcs to the node each reports to, and the validators linked to each other. -->
 <style>
@@ -95,6 +96,11 @@
   .nodes dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 8px 0 0; font-size: 13px; }
   .nodes dt { color: var(--ink-2); } .nodes dd { margin: 0; overflow-wrap: anywhere; }
   .settings { max-width: 760px; }
+  .infra td { vertical-align: middle; }
+  .meter { position: relative; height: 7px; width: 110px; background: var(--rule); border-radius: 4px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; }
+  .meter i { position: absolute; inset: 0 auto 0 0; background: var(--green); }
+  .meter.warn i { background: var(--gold); } .meter.crit i { background: var(--red); }
+  .warn-text { color: var(--gold); } .crit-text { color: var(--red); } .ok-text { color: var(--green); }
   .settings .node-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
   footer { color: var(--ink-2); font-size: 11px; padding: 0 20px 14px; }
 </style>
@@ -111,6 +117,7 @@
   <button role="tab" aria-selected="false" data-tab="jobs">Jobs<i id="n-jobs" hidden></i></button>
   <button role="tab" aria-selected="false" data-tab="ledger">Ledger</button>
   <button role="tab" aria-selected="false" data-tab="devices">Devices<i id="n-devices" hidden></i></button>
+  <button role="tab" aria-selected="false" data-tab="infra">Infrastructure</button>
   <button role="tab" aria-selected="false" data-tab="nodes">Nodes</button>
   <button role="tab" aria-selected="false" data-tab="settings">Settings</button>
 </nav>
@@ -195,6 +202,15 @@
       <thead><tr><th>Device</th><th>Hardware</th><th class="n">Speed</th><th class="n">Memory</th><th>Last seen</th><th>From</th><th>Node</th></tr></thead>
       <tbody id="devices"></tbody>
     </table>
+  </section>
+
+  <section id="tab-infra" hidden>
+    <div class="toolbar"><b>Infrastructure &amp; validators</b><span class="muted">Each server's health from its node. Backup, prune and restart act on one server and ask for a fresh authenticator code.</span></div>
+    <div style="overflow-x:auto"><table class="infra"><thead><tr><th>Node</th><th>Chain</th><th>Version</th><th class="n">Uptime</th><th class="n">Height</th><th>Quorum</th><th>Disk free</th><th class="n">Checkpoints</th><th>Last backup</th><th>Actions</th></tr></thead><tbody id="infra"></tbody></table></div>
+    <div class="msg" id="infra-msg"></div>
+    <h3 class="muted" style="margin:18px 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.06em">Who signed lately</h3>
+    <table><thead><tr><th>Validator</th><th>Address</th><th class="n">Stake</th><th class="n">Last signed</th><th>Status</th></tr></thead><tbody id="signers"></tbody></table>
+    <div class="muted" id="signers-note" style="font-size:12px;margin-top:6px"></div>
   </section>
 
   <section id="tab-nodes" hidden>
@@ -321,7 +337,7 @@
     text($("k-supply-sub"), sup ? "VIBE · " + Number(sup.total).toLocaleString(undefined, { maximumFractionDigits: 0 }) + " in all" : "VIBE");
     var badge = $("n-jobs"); badge.hidden = !held && d.review !== true ? true : false; badge.className = held ? "gold" : ""; text(badge, held ? held + " held" : "review on");
     $("n-devices").hidden = !online; text($("n-devices"), online);
-    renderCode(d); renderJobs(d); renderDevices(d); renderNodes(d); renderMempool(d); renderSettings(d);
+    renderCode(d); renderJobs(d); renderDevices(d); renderNodes(d); renderInfra(d); renderMempool(d); renderSettings(d);
     text($("foot"), "Vibe Hash " + (ADMIN.version || "") + " · admin app on this computer only · " + (d.geo && d.geo.enabled ? (d.geo.waiting ? d.geo.waiting + " places being looked up" : "places looked up over https, cached a month") : "place lookups off"));
     globeData(d);
   }
@@ -426,6 +442,96 @@
       tr.appendChild(el("td", null, host(v.url))); tr.appendChild(el("td", "mono", shortAddr(a))); tr.appendChild(el("td", "n", vibe(v.stake))); tr.appendChild(el("td", null, v.votes ? "yes" : "not yet")); tr.appendChild(el("td", null, placeName(v.place) || "–"));
       tb.appendChild(tr);
     });
+  }
+
+  // --- infrastructure: each server's health (nodeadmin.ops) and its operations ---
+  function gb(b) { return b == null ? "–" : (b >= 1e9 ? (b / 1e9).toFixed(b >= 1e11 ? 0 : 1) + " GB" : Math.round(b / 1e6) + " MB"); }
+  function span(s) { if (s == null) return "–"; if (s < 3600) return Math.round(s / 60) + " min"; if (s < 86400) return (s / 3600).toFixed(1) + " h"; return (s / 86400).toFixed(1) + " d"; }
+  function renderInfra(d) {
+    var tb = $("infra"); tb.textContent = "";
+    var signers = null;
+    (d.nodes || []).forEach(function (n) {
+      var o = n.ops, tr = document.createElement("tr");
+      tr.appendChild(el("td", null, host(n.url)));
+      tr.appendChild(el("td", "mono", n.chain_id || "–"));
+      var ver = el("td"); ver.appendChild(el("span", "tag", (o && o.version) || n.version || "–")); tr.appendChild(ver);
+      tr.appendChild(el("td", "n", o ? span(o.uptime_s) : "–"));
+      tr.appendChild(el("td", "n", n.height == null ? "–" : n.height));
+      var q = el("td");
+      if (down(n)) q.appendChild(el("span", "crit-text", "unreachable"));
+      else if (o && o.halted) q.appendChild(el("span", "crit-text", "halted"));
+      else if (!o) q.appendChild(el("span", "muted", n.admin ? "older node: no health" : (n.mfa ? "sign in" : "no admin token")));
+      else {
+        var qq = o.quorum || {};
+        if (qq.bft && !signers) signers = qq;
+        var me = qq.signers ? Object.keys(qq.signers).filter(function (a) { return qq.signers[a].me; })[0] : null;
+        var voting = me ? (qq.signers[me].online ? "signing" : "not signing") : (qq.bft ? "follower" : "seals alone");
+        q.appendChild(el("span", me && !qq.signers[me].online ? "warn-text" : null, voting));
+        q.appendChild(document.createTextNode(" · "));
+        var safe = el("span", qq.safe_to_restart ? "ok-text" : "warn-text", qq.safe_to_restart ? "safe to restart" : "restart stops blocks");
+        if (qq.why) safe.title = qq.why;
+        q.appendChild(safe);
+      }
+      tr.appendChild(q);
+      var disk = el("td");
+      if (o && o.disk && o.disk.free_pct != null) {
+        var pct = o.disk.free_pct, m = el("span", "meter" + (pct < 10 ? " crit" : pct < 20 ? " warn" : "")), fill = el("i");
+        fill.style.width = Math.max(2, Math.min(100, pct)) + "%"; m.appendChild(fill); disk.appendChild(m);
+        disk.appendChild(el("span", pct < 10 ? "crit-text" : pct < 20 ? "warn-text" : null, pct.toFixed(0) + "% · " + gb(o.disk.free_bytes) + " of " + gb(o.disk.total_bytes)));
+      } else disk.textContent = "–";
+      tr.appendChild(disk);
+      tr.appendChild(el("td", "n", o ? gb(o.blobs_bytes) : "–"));
+      var bk = el("td");
+      if (!o) bk.textContent = "–";
+      else if (!o.backups_set_up) bk.appendChild(el("span", "muted", "not set up"));
+      else if (!o.backup) bk.appendChild(el("span", "warn-text", o.backup_requested ? "asked for, none yet" : "none yet"));
+      else {
+        var age = o.backup.age_hours, bad = !o.backup.remote_ok || age > 26;
+        var s = el("span", bad ? "warn-text" : null, age == null ? "–" : (age < 1 ? Math.round(age * 60) + " min ago" : age.toFixed(age < 10 ? 1 : 0) + " h ago"));
+        if (!o.backup.remote_ok) s.title = o.backup.error || "not copied off the server";
+        bk.appendChild(s);
+        if (!o.backup.remote_ok) bk.appendChild(el("span", "warn-text", " · local only"));
+      }
+      tr.appendChild(bk);
+      var acts = el("td"), row = el("div", "actions");
+      if (o && n.admin) {
+        var b1 = el("button", "btn", "Backup now"); b1.disabled = !o.backups_set_up; b1.onclick = function () { operate(n, "backup"); }; row.appendChild(b1);
+        var b2 = el("button", "btn", "Prune old blobs"); b2.onclick = function () { operate(n, "prune"); }; row.appendChild(b2);
+        var b3 = el("button", "btn danger", "Safe restart"); b3.disabled = !o.supervised; if (!o.supervised) b3.title = "not run by systemd: nothing would start it again"; b3.onclick = function () { operate(n, "restart"); }; row.appendChild(b3);
+      }
+      acts.appendChild(row); tr.appendChild(acts);
+      tb.appendChild(tr);
+    });
+    var sb = $("signers"); sb.textContent = "";
+    if (signers && signers.signers) {
+      Object.keys(signers.signers).sort(function (a, b) { return signers.signers[b].stake - signers.signers[a].stake; }).forEach(function (a) {
+        var v = signers.signers[a], tr = document.createElement("tr");
+        tr.appendChild(el("td", null, v.url ? host(v.url) : "–")); tr.appendChild(el("td", "mono", shortAddr(a))); tr.appendChild(el("td", "n", vibe(v.stake)));
+        tr.appendChild(el("td", "n", v.last_signed == null ? "–" : v.last_signed));
+        tr.appendChild(el("td", v.online ? "ok-text" : "warn-text", v.online ? "online" : "no vote lately"));
+        sb.appendChild(tr);
+      });
+      text($("signers-note"), signers.online + " of " + signers.validators + " validators signed in the last " + signers.window + " blocks, holding " + signers.online_pct + "% of the stake" + (signers.quorum_now ? "." : ": that's two thirds or less, so blocks aren't final.") + " Restart validators one at a time.");
+    } else text($("signers-note"), "No node with an admin token reports the validators' votes yet.");
+  }
+  var OP_WORDS = { backup: "back up", prune: "prune old blobs on", restart: "restart" };
+  function operate(n, op, force) {
+    var what = OP_WORDS[op] + " " + host(n.url);
+    var code = prompt((force ? "Restart anyway. " : "") + "To " + what + ", type the 6-digit code from your authenticator app:");
+    if (code === null) return;
+    say($("infra-msg"), "asking " + host(n.url) + "…", "");
+    api("/api/ops/" + op, { url: n.url, code: code.replace(/\s/g, ""), force: !!force }).then(function (r) {
+      if (r.ok) {
+        var x = r.result || {};
+        say($("infra-msg"), op === "prune" ? host(n.url) + ": pruned " + x.removed + " files, freed " + gb(x.freed_bytes)
+          : op === "backup" ? host(n.url) + (x.already ? ": a backup was already asked for" : ": backup asked for; its result shows under Last backup")
+          : host(n.url) + ": restarting" + (x.safe ? "" : " (forced: blocks stop until it's back)"), "good");
+        refresh();
+      } else if (op === "restart" && r.status === 409 && !force && /force/.test(r.error || "")) {
+        if (confirm(host(n.url) + ": " + r.error + "\n\nRestart it anyway? It needs another, new code.")) operate(n, op, true);
+        else say($("infra-msg"), host(n.url) + ": not restarted", "");
+      } else say($("infra-msg"), host(n.url) + ": " + r.error, "bad");
+    }).catch(function (e) { say($("infra-msg"), e.message, "bad"); });
   }
 
   // --- the ledger ---

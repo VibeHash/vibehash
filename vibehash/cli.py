@@ -412,7 +412,7 @@ def _loopback(host: str) -> bool:
 
 def cmd_node(a):
     from .coordinator import CoordinatorConfig
-    from .node import FolderInUse, Node, PhaseTimes, bucket_from_env  # only nodes need the server
+    from .node import HALT_EXIT, RESTART_EXIT, FolderInUse, Node, PhaseTimes, bucket_from_env  # only nodes need the server
     from .ratelimit import Limits
 
     if crypto.BACKEND != "openssl":
@@ -441,6 +441,7 @@ def cmd_node(a):
             raise ValueError(f"the admin routes would be reachable from other computers (--host {a.host}) behind a token alone. "
                              f"Make an authenticator key with `{prog()} admin --new-mfa` and give it to the node with "
                              "--admin-mfa KEY (or $VIBEHASH_ADMIN_MFA), or bind 127.0.0.1")
+        nodeadmin.parse_allow(os.environ.get(nodeadmin.ALLOW_ENV))  # a network that isn't one, before anything starts
     except ValueError as e:
         sys.exit(f"error: {e}")
     try:
@@ -460,13 +461,17 @@ def cmd_node(a):
         for path in a.dataset:
             print(f"dataset {path} -> {node.store.add_dataset(path)}")
     try:
-        while not node.halted:
+        while not node.halted and not getattr(node, "restart_requested", None):
             time.sleep(1)
     except KeyboardInterrupt:
         pass
     node.stop()
     if node.halted:  # a block it couldn't save (Node._halt): it ends, rather than run on serving what isn't on disk
-        sys.exit(f"error: {node.halted}")
+        print(f"error: {node.halted}", file=sys.stderr)
+        sys.exit(HALT_EXIT)  # systemd leaves it down (setup-node.sh: RestartPreventExitStatus): no restart loop
+    if getattr(node, "restart_requested", None):  # an admin's restart (POST /admin/restart): systemd starts it again
+        print(f"restarting: {node.restart_requested}", file=sys.stderr)
+        sys.exit(RESTART_EXIT)
 
 
 def cmd_tls_cert(a):
