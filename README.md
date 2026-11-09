@@ -374,6 +374,7 @@ pip install "vibehash[finetune]"          # the tokenizer and chat templates, fo
 python -m vibehash testnet --job none --workers 3 --device cuda
 python -m vibehash train chats.jsonl --base qwen3-0.6b --node http://127.0.0.1:8545 --wallet ~/.vibehash/testnet/requester.json
 python -m vibehash job download           # a LoRA adapter for transformers, PEFT and vLLM
+python -m vibehash job download --merged  # or the whole model, the adapter folded in
 ```
 
 `chats.jsonl` holds one chat a line, `{"messages": [{"role": "user", ...},

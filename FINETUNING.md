@@ -188,6 +188,37 @@ or `vllm serve deepseek-ai/DeepSeek-V4.1-Flash --enable-lora --lora-modules mine
 The adapter is small: hundreds of MB even for the largest models. That's
 LoRA's point, and why the job only pays to train and move the adapter.
 
+### The whole model: `--merged`
+
+```bash
+vibehash job download my-chats --merged
+```
+
+This writes `my-chats-merged/`: the base model with the adapter folded into
+its weights (W + alpha/rank·B·A for every adapted projection), in the base's
+own layout, names, config and tokenizer. It loads wherever the base does,
+with no PEFT: `AutoModelForCausalLM.from_pretrained("my-chats-merged")`,
+`vllm serve my-chats-merged`, or llama.cpp's converter for Ollama and LM
+Studio. Like the adapter, it can be downloaded mid-training, and by anyone.
+
+It needs no PyTorch: `finetune.export_merged` works tensor by tensor in
+NumPy. The base's weights come through the same tensor cache a worker uses,
+checked against the manifest the job pins. A computer that didn't post the job
+gets that manifest from the job's dataset on the node.
+
+The weights keep the base's precision (bf16, so the same size as the base).
+Workers train with the adapter beside W in float32, so rounding W + B·A back
+to bf16 moves each weight a little. The command reports by how much. On the
+`everyday-v4` adapter for Qwen3-0.6B (4 rounds, held-back loss 2.533 →
+1.105), rounding is off by 10.6% of the change in root-mean-square. That noise
+averages out: held-back loss is 1.10475 for the base with the adapter, for
+the bf16 merge and for a float32 one, and the bf16 merge predicts 1 token in
+12,238 differently. `--float32` keeps the change whole at twice the size.
+
+A DeepSeek job has no `--merged`: its merged model would be the whole of
+DeepSeek-V4.1-Flash rewritten. Its adapter loads on the base with PEFT or
+vLLM.
+
 ## Working
 
 ```bash
@@ -236,6 +267,7 @@ working on the jobs they fit.
 | Token datasets carrying the model's manifest and config; chats through the model's own chat template, learning only the replies | done |
 | `train DATA --base`: pre-flight, checking the weights once, one question, posting | done (manifests are cached by the poster, not yet shared on the network) |
 | PEFT export in `job download` | done, loads in PEFT (tested on tiny models of each family, and with Qwen3-0.6B) |
+| Merged model (`job download --merged`) | done: the base with the adapter folded in, no PEFT or PyTorch; matches the adapter's outputs in transformers (tiny models), and its held-back loss on Qwen3-0.6B |
 | Workers fetch the base once (parallel ranged requests), keep it on the GPU, skip fine-tunes without PyTorch | done; no cache limit or download progress on the dashboard yet |
 | Measured CPU ↔ CUDA tolerances | done on NVIDIA, and again on a real job's data after the public network's round 7280 (2026-11-02), where honest workers on two machines failed each other: Adam's first step flips signs where a gradient is nearer zero than the devices' rounding, so checks follow rule 2 (DESIGN §8, `verification.FINETUNE_CHECK`); Intel, AMD and Apple unmeasured |
 | Disputes an honest worker can play from home | done after round 7280, where a defender's first split came a minute late and it lost its stake: moves timed for 10 Mbit/s up (`tasks.MOVE_*`), the worker moving first and in parallel, tensors eight at a time, checkpoints it uploaded reused (DESIGN §8, "Time") |
