@@ -142,17 +142,29 @@ class MenuTests(unittest.TestCase):
     def test_evo_ready_asks_before_installing_transformers(self):
         from importlib import util
         have = {"torch": object(), "transformers": None, "huggingface_hub": object()}
-        with mock.patch.object(util, "find_spec", lambda name: have.get(name)),                 mock.patch.object(menu.subprocess, "call", return_value=0) as pip,                 contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch.object(util, "find_spec", lambda name: have.get(name)),                 mock.patch.object(menu.update, "update", return_value=0) as upd,                 mock.patch("subprocess.call") as pip, contextlib.redirect_stdout(io.StringIO()):
             with mock.patch("builtins.input", lambda *a: ""):
                 self.assertFalse(menu._evo_ready())
-            pip.assert_not_called()
+            upd.assert_not_called()
             with mock.patch("builtins.input", lambda *a: "y"):
                 self.assertTrue(menu._evo_ready())
-            self.assertIn("vibehash[evo]", pip.call_args[0][0])
+            upd.assert_called_once_with(reinstall=True)  # the signed release's packages, Evo's extras included
+            pip.assert_not_called()  # never a bare pip install
+            upd.return_value = 1
+            with mock.patch("builtins.input", lambda *a: "y"):
+                self.assertFalse(menu._evo_ready())
         have["torch"] = None
         with mock.patch.object(util, "find_spec", lambda name: have.get(name)),                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertFalse(menu._evo_ready())
         self.assertIn("Install GPU support", out.getvalue())
+
+    def test_the_update_item_goes_through_the_verified_update(self):
+        with mock.patch.object(menu.update, "update", return_value=0) as upd,                 mock.patch("subprocess.call") as pip:
+            menu._update()
+        upd.assert_called_once_with()
+        pip.assert_not_called()
+        item = next(i for i in menu.items() if i.label == "Update Vibe Hash")
+        self.assertIs(item.action, menu._update)
 
     def test_nothing_is_sent_without_a_yes(self):
         answers = iter([checksummed(FRIEND), "2.5", ""])

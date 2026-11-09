@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -18,7 +17,7 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import settings, termui
+from . import settings, termui, update
 from .crypto import AddressError, checksummed, parse_address
 
 GUIDE = "https://vibehash.org/guide/"
@@ -125,11 +124,9 @@ def _evo_ready() -> bool:
         print("Evo Hash needs PyTorch for your graphics card first: More commands > Install GPU support, then come back.")
         return False
     if find_spec("transformers") is None or find_spec("huggingface_hub") is None:
-        if not _yes('Evo Hash needs transformers (pip install "vibehash[evo]"). Install it now?'):
+        if not _yes("Evo Hash needs transformers. Install it now (from the signed release, checked by hash)?"):
             return False
-        code = subprocess.call([sys.executable, "-m", "pip", "install", "--upgrade", "vibehash[evo]"])
-        if code != 0:
-            print(f"pip stopped with exit code {code}.")
+        if update.update(reinstall=True) != 0:  # the release's requirements include the Evo extras
             return False
     return True
 
@@ -139,9 +136,8 @@ def _cancel() -> list[list[str]] | None:
 
 
 def _update() -> None:
-    print(f"> {sys.executable} -m pip install --upgrade vibehash")
-    code = subprocess.call([sys.executable, "-m", "pip", "install", "--upgrade", "vibehash"])
-    print("Updated. Quit and start `vibehash` again to use it." if code == 0 else f"pip stopped with exit code {code}.")
+    """The same as `vibehash update`: only a release whose signature checks out, installed by hash."""
+    update.update()
 
 
 MORE = (
@@ -196,7 +192,7 @@ SECTIONS = [
         Item("Set up again", "network, wallet, graphics card, stake", ("setup",)),
         Item("My wallet", "its address and where its file is", ("wallet", "show")),
         Item("Model files", "what big models take on this PC; clear them", ("cache",)),
-        Item("Update Vibe Hash", "install the latest release", action=_update),
+        Item("Update Vibe Hash", "install the latest signed release", action=_update),
         Item("Open the guide", "vibehash.org/guide, in your browser", action=lambda: webbrowser.open(GUIDE)),
         Item("More commands", "send, stake, predict, validators and the rest", submenu=MORE),
     ]),

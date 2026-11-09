@@ -283,6 +283,19 @@ class ApiTests(Home):
             self.api.welcome_again()
             self.assertFalse(self.api.settings()["welcomed"])
 
+    def test_an_old_launcher_is_told_to_download_the_signed_one(self):
+        def settings_with(**env):
+            base = {k: v for k, v in os.environ.items() if k not in ("VIBEHASH_LAUNCHER", "VIBEHASH_LAUNCHER_VERSION")}
+            with mock.patch.dict(os.environ, base | env, clear=True):
+                c = self.api.settings()
+            return c["launcher_version"], c["launcher_outdated"]
+        self.assertEqual(settings_with(), (None, False))  # not under the launcher (pip, a script): nothing to update
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe"), (None, True))  # a 1.1 launcher says no version
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="1.1"), ("1.1", True))
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="1.2"), ("1.2", False))
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="1.10"), ("1.10", False))  # numbers, not text
+        self.assertEqual(settings_with(VIBEHASH_LAUNCHER="x.exe", VIBEHASH_LAUNCHER_VERSION="garbage"), ("garbage", True))
+
     def test_start_at_login_through_the_window(self):
         calls = []
         with mock.patch.object(Path, "home", return_value=Path(self.tmp.name)), \
@@ -441,6 +454,13 @@ class PageTests(unittest.TestCase):
         self.assertIn("z-index: 30", self.page)
         self.assertTrue(all(o > 0 for o in order))
         self.assertIn("!welcomeOffered", self.script)  # a settings reload mid-tour doesn't restart it
+
+    def test_the_old_launcher_banner_is_one_time_and_dismissible(self):
+        self.assertIn('id="launcher-banner"', self.page)
+        self.assertIn("A newer, signed Vibe Hash installer is available", self.page)
+        self.assertIn("c.launcher_outdated", self.script)
+        self.assertIn('$("launcher-later")', self.script)
+        self.assertIn('"vh-launcher-banner"', self.script)  # remembered once dismissed
 
     def test_nothing_from_the_wider_web_and_no_markup_from_data(self):
         self.assertNotIn("https://", self.page.replace("https://vibehash.org", ""))

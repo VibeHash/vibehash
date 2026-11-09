@@ -598,6 +598,51 @@ git push origin v0.5.11
 Follow the run under the repository's Actions tab. To try a build locally
 first, `python -m build` writes the packages to `dist/`.
 
+### The signed release manifest
+
+Nothing installs a release on trust. After the wheel is on PyPI, the `manifest`
+job of `publish.yml` (it needs `publish`, so a manifest never names a wheel PyPI
+doesn't have) attaches three files to the tag's GitHub release:
+
+- `requirements-<version>.txt`: every package the release needs, each pinned by
+  hash, the release's own wheel included (`uv pip compile ... --generate-hashes
+  --universal --no-emit-package torch`, then `scripts/release_manifest.py` puts the
+  built wheel's hash on the `vibehash==` line). PyTorch is left out on purpose, so
+  the GPU build `vibehash install-gpu` chose is never replaced. It includes the
+  `finetune`, `app` and `evo` extras, so there is one update path for the launcher,
+  the menu and `vibehash update`.
+- `release.json`: the manifest, with `version`, `wheel`, `wheel_sha256`,
+  `requirements`, `requirements_sha256`, `published` and `min_launcher`.
+- `release.sig`: the hex Ed25519 signature over `vibehash.crypto.canonical` of
+  that manifest (sorted keys, no spaces, ASCII).
+
+The launcher (`launcher/vibehash_launcher.py`) and `vibehash update` fetch the
+manifest from `releases/latest/download`, check the signature against
+`RELEASE_PUBKEYS`, check the requirements file against `requirements_sha256`, and
+install it with `--require-hashes`, so pip refuses any file not listed by hash.
+No key configured, a bad signature, a hash that doesn't match, or an older
+version: nothing is installed and one line says why. Developers can set
+`VIBEHASH_DEV=1` to make the launcher install the latest release from PyPI
+unverified; nothing else skips the check. The launcher also pins the hash of each
+uv download (`UV_SHA256`); when you bump `UV_VERSION`, update every hash.
+
+**The signing key, once.** Run `python scripts/make_release_key.py release.key`.
+It prints the public key and writes the secret to `release.key` (readable by you
+alone, never printed). Paste the public key into `RELEASE_PUBKEYS` in
+`launcher/vibehash_launcher.py` and `vibehash/settings.py` (until then both lists
+are empty and installers update nothing), store the file's contents as the secret
+`RELEASE_SIGNING_KEY` of the `pypi` environment, keep one offline copy, and
+delete the file. With no secret set the `manifest` job says so and attaches
+nothing: that release is still on PyPI, and installers skip updating to it.
+
+**Rotating the key.** Make a new pair, add its public key to both
+`RELEASE_PUBKEYS` lists next to the old one and publish a release signed with the
+old key, so installers learn both. Then switch `RELEASE_SIGNING_KEY` to the new
+secret for later releases, and drop the old public key in a release after the
+launchers in the field have had time to update. Launchers older than 1.2 keep
+updating the package without verifying it and never replace their own `.exe`;
+the dashboard tells them to download the new installer.
+
 ## Run a public node
 
 `deploy/setup-node.sh` turns a fresh Ubuntu 24.04 server into a network's

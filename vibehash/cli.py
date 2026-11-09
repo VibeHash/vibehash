@@ -764,6 +764,14 @@ def _setup_gpu(assume_yes: bool) -> bool:
     return any(d["ready"] for d in found if d["id"] != "cpu")
 
 
+def cmd_update(a):
+    from . import update
+
+    code = update.update()
+    if code:
+        sys.exit(code)
+
+
 def cmd_install_gpu(a):
     print("Graphics card")
     _setup_gpu(a.yes)
@@ -2441,6 +2449,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--tls-fingerprint", metavar="SHA256", help="trust the https node's certificate with this fingerprint "
                    "(how workers trust a self-signed testnet node; ask its operator)")
     p.add_argument("--tls-ca", metavar="FILE", help="verify the https node's certificate with this CA file")
+
+    p = sub.add_parser("update", help="install the latest Vibe Hash release, only if its signature checks out")
+    p.set_defaults(fn=cmd_update)
 
     p = sub.add_parser("install-gpu", help="find your graphics card and install the PyTorch build for it")
     p.add_argument("--yes", action="store_true", help="don't ask before downloading"); p.set_defaults(fn=cmd_install_gpu)

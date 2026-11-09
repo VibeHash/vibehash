@@ -259,6 +259,7 @@
   </nav>
 </header>
 
+<div class="update" id="launcher-banner" hidden><span><b>A newer, signed Vibe Hash installer is available</b> &mdash; download it from vibehash.org</span><span class="end"><button class="link" type="button" data-link="site">vibehash.org</button><button class="btn small" type="button" id="launcher-later">Dismiss</button></span></div>
 <div class="update" id="update" hidden><span><b id="update-text">A new Vibe Hash is out.</b> It installs the next time the app starts.</span><span class="end"><button class="link" type="button" data-link="releases">What's new</button><button class="btn small" type="button" id="update-later">Later</button></span></div>
 
 <main>
@@ -868,6 +869,9 @@
       $("words-actions").hidden = !c.words_file && !c.words_pending;
       $("words-delete").hidden = !c.words_file;  // the delete button is for an old words file only: a new wallet's words were never saved
       $("words-note").textContent = c.words_pending ? "Your 24 recovery words haven't been written down yet. They are shown once and are not saved on this computer: write them on paper, then check three of them." : c.words_file ? "The 24 words that restore this wallet are in a file in your Vibe Hash folder. Once they're on paper, delete the file: anyone who can read it can take your coins." : "The recovery words aren't saved on this computer. Your paper copy is the backup.";
+      var oldInstaller = !!c.launcher_outdated;
+      try { if (localStorage.getItem("vh-launcher-banner")) oldInstaller = false; } catch (e) {}
+      $("launcher-banner").hidden = !oldInstaller;
       if (!c.welcomed && !welcomeOffered) { welcomeOffered = true; welcome(1); }  // once a window: a later reload mustn't restart the tour
     }).catch(function () {});
   }
@@ -1050,6 +1054,8 @@
     }).catch(function () {});
   }
   $("update-later").addEventListener("click", function () { $("update").hidden = true; try { localStorage.setItem("vh-later", $("update").dataset.latest || ""); } catch (e) {} });
+
+  $("launcher-later").addEventListener("click", function () { $("launcher-banner").hidden = true; try { localStorage.setItem("vh-launcher-banner", "1"); } catch (e) {} });
 
   window.addEventListener("pywebviewready", function () {
     api = window.pywebview.api;

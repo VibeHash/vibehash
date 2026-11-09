@@ -186,7 +186,7 @@ class Api:
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
                 "deepseek": settings.deepseek_choice(cfg), "deepseek_pilot": settings.deepseek_pilot(),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
-                "words_file": _words_file_present(), "words_pending": _words_pending()}
+                "words_file": _words_file_present(), "words_pending": _words_pending(), **_launcher()}
 
     def set_option(self, name: str, value) -> dict:
         """One of Settings' switches (OPTIONS: the automatic pauses, reduced motion), or idle_minutes. The running app
@@ -471,6 +471,20 @@ def redact(value, home: str | None = None):
             value = value.replace(home, "~").replace(home.replace("\\", "/"), "~")
         return _ADDRESS.sub(r"\1...\2", value)
     return value
+
+
+MIN_LAUNCHER = "1.2"  # the first launcher that installs only signed releases (launcher/vibehash_launcher.py VERSION)
+
+
+def _launcher() -> dict:
+    """Which installer started this app: its version (the launcher exports $VIBEHASH_LAUNCHER_VERSION from 1.2 on), and
+    whether it is one too old to verify releases. An old launcher keeps updating the package but never replaces its own
+    .exe, so the dashboard tells the person to download the new installer. Not under a launcher (pip, a script): not old."""
+    from . import update
+    version = os.environ.get("VIBEHASH_LAUNCHER_VERSION")
+    have = update.parse_version(version)
+    outdated = bool(os.environ.get("VIBEHASH_LAUNCHER")) and (have is None or have < update.parse_version(MIN_LAUNCHER))
+    return {"launcher_version": version, "launcher_outdated": outdated}
 
 
 def _version() -> str:
