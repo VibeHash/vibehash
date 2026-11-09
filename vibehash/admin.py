@@ -102,6 +102,12 @@ class _KeepTokenHome(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+# The only places the page can send someone, by name (POST /api/open): never a URL the page makes up. They open in
+# the system's browser, in the window and in a browser tab alike.
+LINKS = {"docs": "https://docs.vibehash.org/nodes/admin-app", "nodes": "https://docs.vibehash.org/nodes", "reference": "https://docs.vibehash.org/reference"}
+OPEN = webbrowser.open  # how a link leaves the app (tests replace it)
+
+
 def _admin_client(url: str) -> NodeClient:
     client = NodeClient(url, timeout=NODE_TIMEOUT)
     client._opener = client._opener or urllib.request.build_opener()  # noqa: SLF001
@@ -684,6 +690,12 @@ class AdminApp:
                         if not isinstance(spec, dict):
                             raise AdminError("the job spec is a JSON object")
                         out = app.post_job(spec, body.get("budget"))
+                    elif parts == ["open"]:
+                        url = LINKS.get(body.get("name")) if isinstance(body.get("name"), str) else None
+                        if url is None:
+                            raise AdminError("not a link the admin app opens")
+                        OPEN(url)
+                        out = {"ok": True, "url": url}
                     elif parts == ["unlock"]:
                         out = app.unlock(str(body.get("password") or ""))
                     elif parts == ["login"]:

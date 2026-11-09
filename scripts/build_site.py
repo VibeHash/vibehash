@@ -1,6 +1,8 @@
 """Build the vibehash.org website: the front page and the guide.
 
 docs/site/index.html is the front page, a whole page as it is, which reads the network live from the node's /network.
+docs/site/agents.html is /agents/, the business page: a model from one sentence, through the fine-tune queue's API.
+docs/site/watch.html is /watch/, a wallet watched from a phone (watch.webmanifest and watch-*.png make it an app).
 docs/guide.html is written for the claude.ai artifact viewer, which wraps a page in its own <html> and <head>; on the
 site it's /guide/, so it needs that wrapper itself, plus what search engines and link previews read.
 
@@ -56,8 +58,12 @@ def build(guide: Path, front: Path, out: Path) -> None:
 """
     (out / "guide").mkdir(parents=True, exist_ok=True)
     (out / "guide" / "index.html").write_text(page, encoding="utf-8", newline="\n")
+    pages = {"agents.html": "agents", "watch.html": "watch"}  # docs/site pages in folders of their own: /agents/, /watch/
     for f in front.parent.iterdir():  # the front page and what it links: og.png, the link preview (docs/brand/og.html)
-        if f.is_file():
+        if f.is_file() and f.name in pages:
+            (out / pages[f.name]).mkdir(parents=True, exist_ok=True)
+            (out / pages[f.name] / "index.html").write_bytes(f.read_bytes())
+        elif f.is_file():
             (out / f.name).write_bytes(f.read_bytes())
     (out / "CNAME").write_text(DOMAIN + "\n", encoding="utf-8", newline="\n")  # GitHub Pages' custom domain
     (out / ".nojekyll").write_text("", encoding="utf-8")  # serve the files as they are
@@ -66,7 +72,7 @@ def build(guide: Path, front: Path, out: Path) -> None:
     # app.ps1 fetches the launcher from here: irm https://vibehash.org/app.ps1 | iex
     (out / "vibehash_launcher.py").write_bytes((guide.parent.parent / "launcher" / "vibehash_launcher.py").read_bytes())
     (out / "whitepaper.pdf").write_bytes((guide.parent / "whitepaper.pdf").read_bytes())  # vibehash.org/whitepaper.pdf
-    print(f"wrote index.html, guide/index.html ({len(page.encode()):,} bytes), install.ps1, install.sh, app.ps1, vibehash_launcher.py, "
+    print(f"wrote index.html, agents/index.html, watch/index.html, guide/index.html ({len(page.encode()):,} bytes), install.ps1, install.sh, app.ps1, vibehash_launcher.py, "
           "whitepaper.pdf, "
           "CNAME and .nojekyll")
 

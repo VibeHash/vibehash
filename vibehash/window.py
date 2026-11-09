@@ -47,7 +47,8 @@ ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off", "restart")  # ap
 # The only places the page can send someone, by name (Api.open_link): never a URL the page makes up, so nothing in the
 # page, or put into it, can open an arbitrary address. They open in the system's browser, never inside this window.
 LINKS = {"site": "https://vibehash.org", "whitepaper": "https://vibehash.org/whitepaper.pdf",
-         "source": "https://github.com/VibeHash/vibehash", "releases": "https://github.com/VibeHash/vibehash/releases"}
+         "source": "https://github.com/VibeHash/vibehash", "releases": "https://github.com/VibeHash/vibehash/releases",
+         "docs": "https://docs.vibehash.org", "help": "https://docs.vibehash.org/mining/troubleshooting"}  # docs: the GitBook (docs/book)
 OPEN = webbrowser.open  # how a link leaves the app (tests replace it)
 PYPI = "https://pypi.org/pypi/vibehash/json"
 UPDATE_EVERY_S = 6 * 3600.0

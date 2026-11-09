@@ -73,6 +73,79 @@ class ProblemTests(unittest.TestCase):
             p.return_value = None
             self.assertIsNone(Es2Work(work).why_not(job))
 
+    def test_only_an_error_says_when_to_ask_again(self):
+        clock = [1000.0]
+        self.assertIsNone(evo_selftest.retry_in("cuda:0"))  # never checked
+        with mock.patch.object(evo_selftest.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(evo_selftest, "check", side_effect=RuntimeError("out of memory")):
+            evo_selftest.problem("cuda:0")
+            clock[0] += 100
+            self.assertEqual(evo_selftest.retry_in("cuda:0"), evo_selftest.RETRY_S - 100)
+            clock[0] += evo_selftest.RETRY_S
+            self.assertEqual(evo_selftest.retry_in("cuda:0"), 0.0)
+        for result in ({"ok": True, "worst": 0.0, "swap": 0.2, "seconds": 1.0},  # passed, or failed for good
+                       {"ok": False, "worst": 0.5, "swap": 0.2, "seconds": 1.0}):
+            evo_selftest._done.clear()
+            with mock.patch.object(evo_selftest, "check", return_value=result):
+                evo_selftest.problem("cuda:0")
+            self.assertIsNone(evo_selftest.retry_in("cuda:0"))
+
+
+class WorkerRecheckTests(unittest.TestCase):
+    """A worker refusing an Evo job remembers it (client.Client.job): over an errored self-check only until
+    evo_selftest would try the check again, or the job was refused until the worker restarted."""
+
+    def setUp(self):
+        import tempfile
+
+        from vibehash import client as client_module
+        from vibehash.crypto import KeyPair
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.client_module = client_module
+        self.c = client_module.WorkerClient("http://127.0.0.1:9", KeyPair.generate(b"recheck"), device="cpu",
+                                            cache_dir=tmp.name)
+        self.c.node = mock.Mock(**{"get.return_value": {"spec": {}, "owner": "someone"}})
+        self.job = SimpleNamespace(job_id="evo", es=True, deepseek=False, data_source={"kind": "es"},
+                                   spec=SimpleNamespace(repo="tiny", rule=2))
+        self.clock = [1000.0]
+
+    def patched(self, why, wait):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(self.client_module.time, "monotonic", side_effect=lambda: self.clock[0]))
+        stack.enter_context(mock.patch.object(self.client_module.TrainingJob, "from_spec_json", return_value=self.job))
+        why_not = stack.enter_context(mock.patch.object(self.c.es, "why_not", side_effect=lambda j: why[0]))
+        stack.enter_context(mock.patch.object(self.c.es, "retry_in", side_effect=lambda j: wait))
+        stack.enter_context(self.assertLogs("vibehash.worker", "INFO"))
+        return stack, why_not
+
+    def test_a_job_refused_over_an_errored_self_check_is_asked_about_again_when_it_is_due(self):
+        why = ["job evo: Evo's self-check on cpu failed (RuntimeError: out of memory)"]
+        stack, why_not = self.patched(why, evo_selftest.RETRY_S)
+        with stack:
+            self.c.job("evo")
+            self.assertIn("out of memory", self.c.cannot["evo"])
+            self.clock[0] += evo_selftest.RETRY_S - 1
+            self.c.job("evo")
+            self.assertEqual(why_not.call_count, 1)  # not due yet
+            self.clock[0] += 2
+            why[0] = None  # the check passes this time
+            self.assertIs(self.c.job("evo"), self.job)
+            self.assertEqual(why_not.call_count, 2)
+            self.assertNotIn("evo", self.c.cannot)
+            self.assertIn("evo", self.c.speed)  # taken on as any job the worker can run
+
+    def test_a_refusal_that_stands_is_never_asked_about_again(self):
+        stack, why_not = self.patched(["job evo: Evo's self-check on cpu: came back 0.5 below"], None)
+        with stack:
+            self.c.job("evo")
+            self.clock[0] += 10 * evo_selftest.RETRY_S
+            self.c.job("evo")
+            self.assertEqual(why_not.call_count, 1)
+            self.assertIn("evo", self.c.cannot)
+
 
 class SelftestRowTests(unittest.TestCase):
     def row(self, **patches):

@@ -19,6 +19,8 @@
   header .mark { width: 15px; height: 20px; }
   header h1 { font-size: 16px; margin: 0; font-weight: 700; }
   header h1 span { color: var(--ink-2); font-weight: 500; margin-left: 6px; }
+  header .help { font: 600 13px system-ui, sans-serif; color: var(--ink-2); background: none; border: 1px solid var(--rule); border-radius: 7px; padding: 4px 10px; cursor: pointer; }
+  header .help:hover { color: var(--ink); border-color: var(--ink-2); }
   header .state { margin-left: auto; color: var(--ink-2); font-size: 13px; display: flex; align-items: center; gap: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-2); flex: none; }
   .dot.on { background: var(--green); box-shadow: 0 0 0 0 rgb(95 225 130 / .5); animation: pulse 2s infinite; }
@@ -102,6 +104,7 @@
   <svg class="mark" viewBox="0 0 3 4" aria-hidden="true"><path fill="#f1b23c" d="M0 0h1v3H0zM2 0h1v3H2zM1 3h1v1H1z"/></svg>
   <h1>Vibe Hash <span>admin</span></h1>
   <div class="state"><span class="dot" id="dot"></span><span id="state">connecting…</span></div>
+  <button class="help" type="button" id="open-docs" title="The admin app's page in the docs, in your browser">Docs</button>
 </header>
 <nav role="tablist">
   <button role="tab" aria-selected="true" data-tab="globe">Globe</button>
@@ -261,6 +264,8 @@
   });
 
   // --- the overview ---
+  $("open-docs").onclick = function () { api("/api/open", { name: "docs" }).catch(function (e) { text($("state"), e.message); }); };
+
   function refresh() {
     api("/api/overview").then(function (d) {
       state.data = d; state.lastErr = null;

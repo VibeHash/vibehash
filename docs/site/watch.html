@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vibe Hash Watch</title>
+<meta name="description" content="Watch your Vibe Hash wallet from your phone: balance, stake, reputation, what each round paid you, and what the network is training. Nothing to sign in to and no keys.">
+<link rel="canonical" href="https://vibehash.org/watch/">
+<link rel="manifest" href="/watch.webmanifest">
+<link rel="apple-touch-icon" href="/watch-180.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 3 4'%3E%3Cpath fill='%23f1b23c' d='M0 0h1v3H0zM2 0h1v3H2zM1 3h1v1H1z'/%3E%3C/svg%3E">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="VH Watch">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0a09" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f3ee" media="(prefers-color-scheme: light)">
+<meta name="format-detection" content="telephone=no">
+<style>
+/* /watch/: one wallet address, watched from a phone. Read-only: it asks the public node (every GET there is public),
+   holds no keys, and keeps only the addresses you add, in this browser. Built for iPhone first: safe areas, 16 px
+   inputs (Safari zooms into anything smaller), 44 px touch targets, dvh heights, no blur or scroll work, and it stops
+   asking the node while the app is in the background. */
+:root {
+  --bg: #f6f3ee; --card: #ffffff; --line: #e4ddd2; --ink: #1d1a16; --ink-2: #6b6258;
+  --gold: #a86a08; --gold-wash: #f6ead5; --good: #23863a; --good-wash: #e2f0e3; --bad: #b8443a; --bad-wash: #f8e1de;
+  --sys: system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0a09; --card: #161412; --line: #2b2723; --ink: #eeebe6; --ink-2: #a39c93;
+    --gold: #f1b23c; --gold-wash: #2e220e; --good: #6fd27d; --good-wash: #13291a; --bad: #f28b7d; --bad-wash: #331916;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0b0a09; --card: #161412; --line: #2b2723; --ink: #eeebe6; --ink-2: #a39c93;
+  --gold: #f1b23c; --gold-wash: #2e220e; --good: #6fd27d; --good-wash: #13291a; --bad: #f28b7d; --bad-wash: #331916;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); }
+body {
+  margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--bg); color: var(--ink);
+  font: 16px/1.45 var(--sys); -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent;
+  padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+/* Safari draws the page behind the status bar and the Dynamic Island: this strip, in the page's own colour, sits over
+   that band so what scrolls up passes under it instead of showing through beside the clock. */
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); background: var(--bg); z-index: 10; pointer-events: none; }
+.app { max-width: 560px; margin: 0 auto; padding-block: 14px 28px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 14px; }
+button { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.quiet { color: var(--ink-2); }
+.small { font-size: 0.875rem; }
+
+/* top */
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
+.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; color: var(--ink); min-width: 0; }
+.brand svg { width: 13px; height: 18px; color: var(--gold); flex: none; }
+.brand b { font-size: 1.06rem; letter-spacing: -0.01em; white-space: nowrap; }
+.brand span { font-size: 0.75rem; color: var(--ink-2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+.icon { display: inline-grid; place-items: center; width: 44px; height: 44px; border: 0; background: none; border-radius: 10px; cursor: pointer; color: var(--ink-2); flex: none; }
+.icon:active { background: var(--line); }
+.icon svg { width: 22px; height: 22px; }
+.spin svg { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* address switcher */
+.addrs { display: flex; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 2px; }
+.addrs::-webkit-scrollbar { display: none; }
+.addr { flex: none; min-height: 36px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--card); font: 0.85rem var(--mono); cursor: pointer; }
+.addr[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); background: var(--gold-wash); }
+.addr.add { font-family: var(--sys); font-weight: 600; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.card h2 { font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-2); margin: 0; }
+
+/* status line */
+.state { display: flex; align-items: flex-start; gap: 10px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ink-2); flex: none; }
+.state .dot { margin-top: 0.42em; }  /* level with the heading's first line, however many lines the reason takes */
+.dot.good { background: var(--good); } .dot.warn { background: var(--gold); } .dot.bad { background: var(--bad); }
+.state b { font-size: 1.05rem; }
+.state p { margin: 0; color: var(--ink-2); font-size: 0.9rem; }
+
+/* balance */
+.balance { display: grid; gap: 2px; min-width: 0; }
+.balance > * { min-width: 0; }
+#address { overflow-wrap: anywhere; word-break: break-all; }
+.balance .big { font-size: clamp(2rem, 11vw, 2.6rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+.balance .big small { font-size: 1rem; font-weight: 600; color: var(--ink-2); margin-left: 6px; letter-spacing: 0; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat { display: grid; gap: 2px; min-width: 0; }
+.stat dt { font-size: 0.78rem; color: var(--ink-2); }
+.stat dd { margin: 0; font-size: 1.05rem; font-weight: 650; overflow-wrap: anywhere; }
+.rep { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.rep i { display: block; height: 100%; width: 0; background: var(--good); }
+dl { margin: 0; }
+
+/* earnings */
+.earned { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.earned b { font-size: 1.5rem; font-weight: 700; color: var(--gold); }
+.list { list-style: none; margin: 0; padding: 0; display: grid; }
+.list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.list li:first-child { border-top: 0; padding-top: 2px; }
+.list .what { font-weight: 600; overflow-wrap: anywhere; }
+.list .amt { font-weight: 650; text-align: right; }
+.list .amt.plus { color: var(--good); } .list .amt.minus { color: var(--bad); }
+.list .sub { grid-column: 1 / -1; font-size: 0.82rem; color: var(--ink-2); overflow-wrap: anywhere; }
+.empty { color: var(--ink-2); font-size: 0.92rem; }
+
+/* network */
+.net { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.net .stat dd { font-size: 1rem; }
+.job { font-size: 0.9rem; overflow-wrap: anywhere; }
+
+/* forms */
+form { display: grid; gap: 10px; margin: 0; }
+label { font-weight: 600; }
+input[type="text"] {
+  width: 100%; min-height: 48px; font: 16px var(--mono); color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; -webkit-appearance: none; appearance: none;
+}
+input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.go { min-height: 48px; border: 0; border-radius: 12px; background: var(--gold); color: #1d1406; font-weight: 700; font-size: 1rem; cursor: pointer; }
+.go:active { filter: brightness(0.94); }
+.plain { min-height: 44px; border: 1px solid var(--line); border-radius: 12px; background: none; font-weight: 600; cursor: pointer; padding: 0 14px; }
+.plain.bad { color: var(--bad); }
+.err { color: var(--bad); font-size: 0.9rem; min-height: 1.2em; margin: 0; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.hint { font-size: 0.85rem; color: var(--ink-2); margin: 0; }
+.hint code { font: 0.82rem var(--mono); }
+.foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 0.8rem; color: var(--ink-2); padding-inline: 2px; }
+.foot a { color: var(--ink-2); }
+/* the pickaxe beside "Earning" and "Working": transforms only (the compositor's work, not layout), still otherwise */
+.state { position: relative; }
+.pick { width: 40px; height: 40px; flex: none; margin-left: auto; color: var(--gold); opacity: 0.35; }
+.pick .head { transform-origin: 20px 36px; transform: rotate(-24deg); }
+.pick .spark { opacity: 0; }
+.mining .pick { opacity: 1; }
+.mining .pick .head { animation: swing 1.3s cubic-bezier(.5, 0, .85, .45) infinite; }
+.mining .pick .spark { animation: spark 1.3s linear infinite; }
+.mining .pick .spark:nth-of-type(2) { animation-delay: 0.04s; }
+@keyframes swing { 0%, 55% { transform: rotate(-38deg); } 78% { transform: rotate(8deg); } 84% { transform: rotate(4deg); } 100% { transform: rotate(-38deg); } }
+@keyframes spark { 0%, 76% { opacity: 0; transform: translate(0, 0); } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(5px, -7px); } }
+@media (prefers-reduced-motion: reduce) { .mining .pick .head, .mining .pick .spark { animation: none; } }
+
+/* alerts */
+.alerts p { margin: 0; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 0.92rem; color: var(--ink-2); }
+.check { display: flex; align-items: center; gap: 10px; min-height: 44px; font-weight: 500; }
+.check input { width: 22px; height: 22px; accent-color: var(--gold); flex: none; margin: 0; }
+.on { color: var(--good); font-weight: 650; }
+.offline { background: var(--bad-wash); color: var(--bad); border-radius: 12px; padding: 10px 12px; font-size: 0.9rem; }
+@media (prefers-reduced-motion: reduce) { .spin svg { animation: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <a class="brand" href="/" aria-label="Vibe Hash home">
+      <svg viewBox="0 0 3 4" aria-hidden="true"><path fill="currentColor" d="M0 0h1v3H0zM2 0h1v3H2zM1 3h1v1H1z"/></svg>
+      <b>Vibe Hash</b><span>Watch</span>
+    </a>
+    <button class="icon" type="button" id="refresh" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+    </button>
+  </header>
+
+  <nav class="addrs" id="addrs" aria-label="Your addresses"></nav>
+
+  <div class="offline" id="offline" hidden>Can't reach the network right now. Showing what it last said.</div>
+
+  <section class="card" id="add" hidden aria-labelledby="add-h">
+    <h2 id="add-h">Watch a wallet</h2>
+    <form id="add-form" novalidate>
+      <label for="addr-in">Wallet address</label>
+      <input type="text" id="addr-in" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="vibe1…" maxlength="60">
+      <p class="hint">It's in the desktop app's footer and Wallet tab, or <code>vibehash wallet show</code>. Only the address: this never asks for recovery words or a password.</p>
+      <p class="err" id="add-err" role="alert"></p>
+      <div class="row"><button class="go" type="submit" style="flex:1">Watch it</button><button class="plain" type="button" id="add-cancel">Cancel</button></div>
+    </form>
+  </section>
+
+  <div id="view" hidden>
+    <div style="display:grid;gap:14px">
+      <section class="card" aria-label="How it's doing">
+        <div class="state" id="state-box"><span class="dot" id="state-dot"></span><div style="min-width:0"><b id="state">Loading…</b><p id="state-why"></p></div>
+          <svg class="pick" viewBox="0 0 40 40" aria-hidden="true"><g class="head"><rect x="18.5" y="13" width="3.4" height="24" rx="1.7" fill="#a3753a"/><path d="M5 17 Q19 4 35 13 L34 16.4 Q19 8.6 7.5 19.6 Z" fill="currentColor"/></g><circle class="spark" cx="31" cy="30" r="1.6" fill="currentColor"/><circle class="spark" cx="34" cy="33" r="1.2" fill="currentColor"/></svg>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="bal-h">
+        <h2 id="bal-h">Balance</h2>
+        <div class="balance"><div class="big num" id="balance">–</div><span class="small quiet num" id="address"></span></div>
+        <dl class="grid3">
+          <div class="stat"><dt>Staked</dt><dd class="num" id="stake">–</dd></div>
+          <div class="stat"><dt>Unbonding</dt><dd class="num" id="unbonding">–</dd></div>
+          <div class="stat"><dt>Reputation</dt><dd class="num" id="rep">–</dd></div>
+        </dl>
+        <div class="rep" aria-hidden="true"><i id="rep-bar"></i></div>
+      </section>
+
+      <section class="card" aria-labelledby="earn-h">
+        <h2 id="earn-h">Recent rounds</h2>
+        <div class="earned"><b class="num" id="earned">–</b><span class="small quiet" id="earned-sub"></span></div>
+        <ul class="list" id="rounds"></ul>
+        <p class="empty" id="rounds-empty" hidden></p>
+      </section>
+
+      <section class="card" aria-labelledby="net-h">
+        <h2 id="net-h">The network</h2>
+        <dl class="net">
+          <div class="stat"><dt>Miners online</dt><dd class="num" id="online">–</dd></div>
+          <div class="stat"><dt>Block</dt><dd class="num" id="height">–</dd></div>
+        </dl>
+        <p class="job" id="job"></p>
+      </section>
+
+      <section class="card alerts" id="alerts" aria-labelledby="alerts-h">
+        <h2 id="alerts-h">Alerts</h2>
+        <div id="alerts-install" hidden>
+          <p>Get a notification when a wallet you watch is slashed, misses a deadline, or stops working while others earn. iPhone sends these only to apps on the Home Screen:</p>
+          <ol class="steps"><li>Tap the Share button in Safari</li><li>Choose <b>Add to Home Screen</b>, then <b>Add</b></li><li>Open <b>VH Watch</b> from your Home Screen and turn alerts on here</li></ol>
+        </div>
+        <div id="alerts-off" hidden>
+          <p>A notification when a wallet you watch is slashed, misses a deadline, or stops working while others earn.</p>
+          <label class="check"><input type="checkbox" id="alerts-pay" checked> Also when it's paid, at most once an hour</label>
+          <button class="go" type="button" id="alerts-on">Turn on alerts</button>
+        </div>
+        <div id="alerts-live" hidden>
+          <p class="on" id="alerts-what">Alerts are on</p>
+          <label class="check"><input type="checkbox" id="alerts-pay-live"> Also when it's paid, at most once an hour</label>
+          <button class="plain" type="button" id="alerts-stop">Turn off alerts</button>
+        </div>
+        <p class="hint" id="alerts-note" hidden></p>
+        <p class="err" id="alerts-err" role="alert"></p>
+      </section>
+
+      <div class="row"><button class="plain bad" type="button" id="remove">Stop watching this address</button></div>
+    </div>
+  </div>
+
+  <footer class="foot"><span id="updated"></span><span>Counts visits with a random number, never your address.</span><span><a href="https://docs.vibehash.org">Docs</a> · <a href="/">vibehash.org</a></span></footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var NODE = "https://node.vibehash.org";  // every GET it answers is public: balance, blocks, the network
+  var ALERTS = "https://watch-api.vibehash.org";  // alerts and counts (deploy/watch-push/worker.js)
+  var SYN = 1e8;                              // syn in a VIBE
+  var KEY = "vh-watch";                       // {addresses: [...], current}
+  var WINDOW = 100;                           // blocks kept for "recent rounds" (one request: the node's maximum)
+  var REFRESH_MS = 30000;
+  var ADDRESS = /^vibe1[0-9a-f]{36}$/;
+  var $ = function (id) { return document.getElementById(id); };
+  var saved = load(), blocks = [], tip = null, timer = null, busy = false, lastOk = 0;
+
+  function load() {
+    try { var s = JSON.parse(localStorage.getItem(KEY) || "{}"); return { addresses: (s.addresses || []).filter(function (a) { return ADDRESS.test(a); }), current: s.current || null }; }
+    catch (e) { return { addresses: [], current: null }; }
+  }
+  function store() { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {} }
+  function get(path) {
+    return fetch(NODE + path, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error(path + ": " + r.status);
+      return r.json();
+    });
+  }
+  function vibe(syn, digits) {
+    if (syn == null) return "–";
+    var v = syn / SYN;
+    return v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits == null ? (Math.abs(v) < 10 ? 4 : 2) : digits });
+  }
+  function short(a) { return a.slice(0, 9) + "…" + a.slice(-4); }
+  function ago(t) {
+    var s = Math.max(0, Date.now() / 1000 - t);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " d ago";
+  }
+  function set(id, s) { $(id).textContent = s; }
+
+  // ---- addresses ----
+  function drawAddrs() {
+    var nav = $("addrs"); nav.textContent = "";
+    saved.addresses.forEach(function (a) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "addr"; b.textContent = short(a);
+      b.setAttribute("aria-pressed", String(a === saved.current)); b.setAttribute("aria-label", "Watch " + a);
+      b.addEventListener("click", function () { if (a !== saved.current) { saved.current = a; store(); switchTo(); } });
+      nav.appendChild(b);
+    });
+    var add = document.createElement("button");
+    add.type = "button"; add.className = "addr add"; add.textContent = saved.addresses.length ? "+ Add" : "+ Add a wallet";
+    add.addEventListener("click", function () { showAdd(true); });
+    nav.appendChild(add);
+    nav.hidden = !saved.addresses.length;
+  }
+  function showAdd(on) {
+    $("add").hidden = !on; $("add-cancel").hidden = !saved.addresses.length;
+    $("view").hidden = on || !saved.current;
+    if (on) { $("add-err").textContent = ""; $("addr-in").value = ""; }
+  }
+  $("add-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var a = $("addr-in").value.trim().toLowerCase();
+    if (!ADDRESS.test(a)) { $("add-err").textContent = "That isn't a Vibe Hash address: it starts with vibe1 and has 41 characters."; return; }
+    if (saved.addresses.indexOf(a) < 0) saved.addresses.push(a);
+    saved.current = a; store(); $("addr-in").blur(); switchTo(); resync();
+  });
+  $("add-cancel").addEventListener("click", function () { showAdd(false); });
+  $("remove").addEventListener("click", function () {
+    var a = saved.current;
+    if (!a) return;
+    var b = $("remove");
+    if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Tap again to stop watching " + short(a); setTimeout(function () { b.dataset.sure = ""; b.textContent = "Stop watching this address"; }, 4000); return; }
+    b.dataset.sure = ""; b.textContent = "Stop watching this address";
+    saved.addresses = saved.addresses.filter(function (x) { return x !== a; });
+    saved.current = saved.addresses[0] || null; store(); switchTo(); resync();
+  });
+  function switchTo() {
+    drawAddrs();
+    if (!saved.current) { showAdd(true); return; }
+    showAdd(false);
+    set("address", saved.current);
+    set("state", "Loading…"); set("state-why", ""); $("state-dot").className = "dot";
+    drawRounds();
+    refresh();
+  }
+
+  // ---- what the node says ----
+  function refresh() {
+    if (busy || !saved.current) return;
+    busy = true; $("refresh").classList.add("spin");
+    var who = saved.current;
+    Promise.all([get("/account/" + who), get("/status"), get("/network").catch(function () { return null; })])
+      .then(function (r) {
+        var acct = r[0], st = r[1], net = r[2];
+        return more(st.height).then(function () { return [acct, st, net]; });
+      })
+      .then(function (r) {
+        if (who !== saved.current) return;
+        lastOk = Date.now(); $("offline").hidden = true;
+        drawAccount(r[0]); drawNetwork(r[1], r[2]); drawRounds(); drawState(r[1]);
+      })
+      .catch(function () { $("offline").hidden = false; })
+      .then(function () { busy = false; $("refresh").classList.remove("spin"); drawUpdated(); });
+  }
+  // Recent blocks: the last WINDOW at first, then only the new ones.
+  function more(height) {
+    if (tip === height) return Promise.resolve();
+    var from = tip == null || height - tip > WINDOW ? Math.max(0, height - WINDOW + 1) : tip + 1;
+    return get("/blocks?from=" + from + "&to=" + height).then(function (list) {
+      if (tip == null || height - tip > WINDOW) blocks = [];
+      blocks = blocks.concat(list.filter(function (b) { return b && typeof b.height === "number"; })).slice(-WINDOW);
+      tip = height;
+    }, function () {  // a batch too big to send at once: the last 20 will do
+      return get("/blocks?from=" + Math.max(0, height - 19) + "&to=" + height).then(function (list) { blocks = list.slice(-WINDOW); tip = height; });
+    });
+  }
+
+  function drawAccount(a) {
+    var big = $("balance"); big.textContent = vibe(a.balance, 2);
+    var u = document.createElement("small"); u.textContent = "VIBE"; big.appendChild(u);
+    set("stake", vibe(a.stake, 2));
+    var ub = (a.unbonding || []).reduce(function (n, x) { return n + (Array.isArray(x) ? Number(x[0]) || 0 : Number(x && x.amount) || 0); }, 0);
+    set("unbonding", vibe(ub, 2));
+    var rep = typeof a.reputation === "number" ? a.reputation : null;
+    set("rep", rep == null ? "–" : rep.toFixed(2));
+    $("rep-bar").style.width = rep == null ? "0" : Math.round(100 * Math.max(0, Math.min(1, rep))) + "%";
+  }
+
+  // This address's part in each recent round: work credited, checks, a missed deadline, a slash, and what it was paid.
+  function involvement(b, a) {
+    var s = b.summary || {}, paid = 0, how = [];
+    (b.txs || []).forEach(function (t) {
+      if (t.kind === "reward" && t.recipient === a) { paid += t.amount; how.push(t.memo); }
+      if (t.kind === "slash" && t.sender === a) how.push("slashed");
+    });
+    var slashed = (s.slashes || []).filter(function (x) { return x[0] === a; });
+    var worked = s.worker_flops && s.worker_flops[a] > 0, checked = s.verifier_flops && s.verifier_flops[a] > 0;
+    var missed = (s.missed || []).indexOf(a) >= 0;
+    if (!paid && !worked && !checked && !missed && !slashed.length) return null;
+    var what = slashed.length ? "Slashed" : missed ? "Missed a deadline" : worked && paid ? "Paid for training" : checked && paid ? "Paid for checking"
+      : how.indexOf("propose") >= 0 ? "Paid for proposing the block" : worked ? "Trained, not paid" : checked ? "Checked others' work" : "Paid";
+    var why = slashed.length ? slashed[0][2] : (s.job_id ? "job " + s.job_id : "");
+    return { height: b.height, time: b.timestamp, what: what, why: why, paid: paid, bad: !!(slashed.length || missed) };
+  }
+  function drawRounds() {
+    var a = saved.current, ul = $("rounds"); ul.textContent = "";
+    if (!a || !blocks.length) { set("earned", "–"); set("earned-sub", ""); $("rounds-empty").hidden = true; return; }
+    var mine = blocks.map(function (b) { return involvement(b, a); }).filter(Boolean).reverse();
+    var total = mine.reduce(function (n, m) { return n + m.paid; }, 0);
+    var first = blocks[0], span = first ? Date.now() / 1000 - first.timestamp : 0;
+    set("earned", "+" + vibe(total) + " VIBE");
+    set("earned-sub", "in the last " + blocks.length + " blocks" + (span > 0 ? " (" + (span < 7200 ? Math.round(span / 60) + " min" : Math.round(span / 3600) + " h") + ")" : ""));
+    $("rounds-empty").hidden = mine.length > 0;
+    $("rounds-empty").textContent = "No rounds for this address in the last " + blocks.length + " blocks. When its computer trains or checks work, each round shows up here with what it paid.";
+    mine.slice(0, 30).forEach(function (m) {
+      var li = document.createElement("li"), w = document.createElement("span"), amt = document.createElement("span"), sub = document.createElement("span");
+      w.className = "what"; w.textContent = m.what;
+      amt.className = "amt num" + (m.paid ? " plus" : m.bad ? " minus" : "");
+      amt.textContent = m.paid ? "+" + vibe(m.paid) : m.bad ? "!" : "";
+      sub.className = "sub"; sub.textContent = "Block " + m.height.toLocaleString() + " · " + ago(m.time) + (m.why ? " · " + m.why : "");
+      li.appendChild(w); li.appendChild(amt); li.appendChild(sub); ul.appendChild(li);
+    });
+  }
+  // The headline: earning, checking, idle, or something wrong, from the same rounds.
+  function drawState(st) {
+    var a = saved.current, recent = blocks.slice(-10).map(function (b) { return involvement(b, a); }).filter(Boolean);
+    var lastAny = blocks.map(function (b) { return involvement(b, a); }).filter(Boolean).pop();
+    var dot = "dot", head, why;
+    if (st && st.halted) { dot = "dot bad"; head = "The network has stopped"; why = st.halted; }
+    else if (recent.some(function (m) { return m.what === "Slashed"; })) { dot = "dot bad"; head = "Slashed recently"; why = "A check caught work that didn't match. Look at the worker's log."; }
+    else if (recent.some(function (m) { return m.paid > 0; })) { dot = "dot good"; head = "Earning"; why = "Paid in " + recent.filter(function (m) { return m.paid > 0; }).length + " of the last 10 blocks."; }
+    else if (recent.some(function (m) { return m.what === "Missed a deadline"; })) { dot = "dot warn"; head = "Missing deadlines"; why = "Its computer registered but didn't finish in time. Is it busy, or asleep?"; }
+    else if (recent.length) { dot = "dot good"; head = "Working"; why = "Taking part in rounds; pay comes when a round pays for work."; }
+    else if (blocks.slice(-10).some(function (b) { return b.proposer === a || (b.summary && b.summary.proposer === a); })) {
+      dot = "dot good"; head = "Validating"; why = "Proposing and signing blocks. It's paid for that only in rounds that pay for work.";
+    }
+    else if (st && !st.job_id) { dot = "dot"; head = "Network idle"; why = "No job is training right now, so nobody earns until one starts."; }
+    else { dot = "dot warn"; head = "Not seen lately"; why = lastAny ? "Last seen " + ago(lastAny.time) + ". Is its computer on and mining?" : "No work from this address in the last " + blocks.length + " blocks. Is its computer on and mining?"; }
+    $("state-dot").className = dot; set("state", head); set("state-why", why);
+    $("state-box").classList.toggle("mining", head === "Earning" || head === "Working");
+  }
+  function drawNetwork(st, net) {
+    set("height", st.height != null ? Number(st.height).toLocaleString() : "–");
+    set("online", net && net.miners && net.miners.online != null ? String(net.miners.online) : "–");
+    var wait = st.job_id && st.waiting && st.waiting[st.job_id];
+    if (wait) {
+      wait = String(wait).replace(/^job \S+ waits: /, "");
+      set("job", "Job " + st.job_id + " is waiting for miners: " + wait + ".");
+    } else set("job", st.job_id ? "Training " + st.job_id + (st.phase ? " · " + st.phase : "") : "No job training right now");
+  }
+  function drawUpdated() {
+    set("updated", lastOk ? "Updated " + new Date(lastOk).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
+  }
+
+  // ---- alerts: a push subscription on this phone, and the addresses it watches, kept at the alerts Worker ----
+  var ALERT_KEY = "vh-watch-alerts";  // {on, payments}
+  var standalone = navigator.standalone === true || (window.matchMedia && matchMedia("(display-mode: standalone)").matches);
+  var ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  var canPush = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && window.isSecureContext;
+  function alertState() { try { return JSON.parse(localStorage.getItem(ALERT_KEY) || "{}") || {}; } catch (e) { return {}; } }
+  function saveAlerts(s) { try { localStorage.setItem(ALERT_KEY, JSON.stringify(s)); } catch (e) {} }
+  function key64(s) {
+    var b = atob((s + "===".slice((s.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/")), out = new Uint8Array(b.length);
+    for (var i = 0; i < b.length; i++) out[i] = b.charCodeAt(i);
+    return out;
+  }
+  function post(path, body) {
+    return fetch(ALERTS + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || "the alerts service answered " + r.status); return j; }); });
+  }
+  function drawAlerts() {
+    var s = alertState(), denied = canPush && Notification.permission === "denied";
+    $("alerts-install").hidden = !(ios && !standalone);
+    $("alerts-off").hidden = !(canPush && !(ios && !standalone) && !s.on && !denied);
+    $("alerts-live").hidden = !(canPush && s.on && !denied);
+    $("alerts-pay-live").checked = !!s.payments;
+    var n = saved.addresses.length;
+    $("alerts-what").textContent = "Alerts are on for " + n + (n === 1 ? " wallet" : " wallets") + " on this phone";
+    var note = !canPush && !(ios && !standalone) ? (window.isSecureContext ? "This browser can't show notifications." : "Alerts work on vibehash.org itself.")
+      : denied ? "Notifications are off for this app. Turn them on in Settings → Notifications → VH Watch, then come back." : "";
+    $("alerts-note").textContent = note; $("alerts-note").hidden = !note;
+  }
+  function subscribe(payments) {
+    return navigator.serviceWorker.ready.then(function (reg) {
+      return reg.pushManager.getSubscription().then(function (sub) {
+        if (sub) return sub;
+        return fetch(ALERTS + "/api/key").then(function (r) { return r.json(); }).then(function (k) {
+          return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key64(k.key) });
+        });
+      });
+    }).then(function (sub) {
+      return post("/api/subscribe", { subscription: sub.toJSON(), addresses: saved.addresses.slice(0, 5), payments: payments });
+    });
+  }
+  // The addresses changed (added or removed) while alerts are on: the Worker's list follows.
+  function resync() {
+    var s = alertState();
+    if (!s.on || !canPush) return;
+    if (!saved.addresses.length) { turnOff(); return; }
+    subscribe(!!s.payments).catch(function () {});
+  }
+  function turnOff() {
+    var s = alertState(); s.on = false; saveAlerts(s); drawAlerts();
+    if (!canPush) return;
+    navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) {
+      if (!sub) return;
+      var endpoint = sub.endpoint;
+      return sub.unsubscribe().then(function () { return post("/api/unsubscribe", { endpoint: endpoint }); });
+    }).catch(function () {});
+  }
+  $("alerts-on").addEventListener("click", function () {
+    var b = $("alerts-on"), payments = $("alerts-pay").checked;
+    $("alerts-err").textContent = ""; b.disabled = true; b.textContent = "Turning on…";
+    // iPhone asks once, and only from a tap: the request comes first, straight from this click.
+    Notification.requestPermission().then(function (p) {
+      if (p !== "granted") throw new Error(p === "denied" ? "Notifications were turned off. You can turn them on in Settings → Notifications → VH Watch." : "Alerts weren't turned on.");
+      return subscribe(payments);
+    }).then(function () { saveAlerts({ on: true, payments: payments }); drawAlerts(); })
+      .catch(function (e) { $("alerts-err").textContent = e.message; })
+      .then(function () { b.disabled = false; b.textContent = "Turn on alerts"; drawAlerts(); });
+  });
+  $("alerts-pay-live").addEventListener("change", function () {
+    var payments = $("alerts-pay-live").checked;
+    subscribe(payments).then(function () { saveAlerts({ on: true, payments: payments }); })
+      .catch(function (e) { $("alerts-err").textContent = e.message; $("alerts-pay-live").checked = !payments; });
+  });
+  $("alerts-stop").addEventListener("click", turnOff);
+  if (canPush) navigator.serviceWorker.register("/watch-sw.js", { scope: "/watch/" }).catch(function () {});
+
+  // ---- counting: how many people use it, and how many from the Home Screen (a random id, at most once a day) ----
+  (function count() {
+    var id, day = new Date().toISOString().slice(0, 10), kind = standalone ? "open" : "visit";
+    try {
+      id = localStorage.getItem("vh-watch-id");
+      if (!id) { id = crypto.randomUUID ? crypto.randomUUID() : "10000000-1000-4000-8000-100000000000".replace(/[018]/g, function (c) { return (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16); }); localStorage.setItem("vh-watch-id", id); }
+      if (localStorage.getItem("vh-watch-counted-" + kind) === day) return;
+      localStorage.setItem("vh-watch-counted-" + kind, day);
+    } catch (e) { return; }
+    post("/api/hello", { id: id, standalone: standalone }).catch(function () {});
+  })();
+
+  // ---- refresh only while it's on screen ----
+  function schedule() {
+    clearInterval(timer); timer = null;
+    if (document.visibilityState === "visible") { timer = setInterval(refresh, REFRESH_MS); }
+  }
+  document.addEventListener("visibilitychange", function () {
+    schedule();
+    if (document.visibilityState === "visible" && Date.now() - lastOk > 10000) refresh();
+  });
+  window.addEventListener("pageshow", function (e) { if (e.persisted) refresh(); });  // back from Safari's page cache
+  $("refresh").addEventListener("click", refresh);
+
+  var fromLink = new URLSearchParams(location.search).get("a");
+  if (fromLink && ADDRESS.test(fromLink.toLowerCase())) {
+    fromLink = fromLink.toLowerCase();
+    if (saved.addresses.indexOf(fromLink) < 0) saved.addresses.push(fromLink);
+    saved.current = fromLink; store();
+    history.replaceState(null, "", location.pathname);
+  }
+  if (saved.current && saved.addresses.indexOf(saved.current) < 0) saved.current = saved.addresses[0] || null;
+  switchTo(); schedule(); drawAlerts();
+})();
+</script>
+</body>
+</html>
