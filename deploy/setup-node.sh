@@ -322,8 +322,7 @@ if status=$(curl -fsS "$URL/status" 2>/dev/null); then
   echo "$status" | python3 -c "import json, sys; s = json.load(sys.stdin); print(f\"network {s['chain_id']}, block {s['height']}\")"
   if [ -n "$FOLLOW" ]; then
     printf '\nDone. The node address is %s, following %s\n  wallet   %s\n  logs:    journalctl -u %s -f\n' "$URL" "$FOLLOW" "$ADDRESS" "$SERVICE"
-    printf 'To make it a validator once it has caught up: send its wallet at least 100 VIBE and a little for fees, then
-'
+    printf 'To make it a validator once it has caught up: send its wallet at least 100 VIBE and a little for fees, then\n'
     printf '  sudo -u vibehash --preserve-env=VIBEHASH_PASSWORD,VIBEHASH_HOME %s stake --amount 100 --wallet %s --node %s\n' "$VH" "$WALLET" "$URL"
     printf '  sudo -u vibehash --preserve-env=VIBEHASH_PASSWORD,VIBEHASH_HOME %s validator join --url %s --wallet %s --node %s\n' "$VH" "$URL" "$WALLET" "$URL"
     printf '(with %s'"'"'s variables loaded: set -a; . %s; set +a). Never run this wallet on two servers at once.\n' "$ETC/env" "$ETC/env"
