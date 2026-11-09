@@ -150,6 +150,12 @@ def handler(proxy_url: str, context=None, pin: str | None = None):
     kind = socks.PROXY_TYPE_SOCKS5 if SCHEMES[parts.scheme.lower()] == 5 else socks.PROXY_TYPE_SOCKS4
 
     class _Connection(sockshandler.SocksiPyConnectionS):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            # PySocks reads this when the context doesn't check host names (the pin-only one); Python 3.12's
+            # HTTPSConnection no longer defines it. The pin (below) or the context is the trust, never a name match.
+            self._check_hostname = False
+
         def connect(self):
             super().connect()
             if pin:

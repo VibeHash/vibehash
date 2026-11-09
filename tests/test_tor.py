@@ -168,6 +168,110 @@ class FakeSocks:
         self.srv.close()
 
 
+class RelayingSocks:
+    """A SOCKS5 server on loopback that records what it is asked to connect to, then relays to `upstream_port`."""
+
+    def __init__(self, upstream_port):
+        self.upstream_port = upstream_port
+        self.srv = socket.create_server(("127.0.0.1", 0))
+        self.port = self.srv.getsockname()[1]
+        self.asked = []
+        threading.Thread(target=self.run, daemon=True).start()
+
+    @staticmethod
+    def relay(a, b):
+        try:
+            while True:
+                x = a.recv(65536)
+                if not x:
+                    break
+                b.sendall(x)
+        except OSError:
+            pass
+        for s in (a, b):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def serve(self, c):
+        c.recv(3)
+        c.sendall(b"\x05\x00")
+        head = c.recv(4)
+        if head[3] == 3:
+            host = c.recv(c.recv(1)[0]).decode()
+        else:
+            host = socket.inet_ntoa(c.recv(4))
+        c.recv(2)
+        self.asked.append((head[3], host))
+        up = socket.create_connection(("127.0.0.1", self.upstream_port))
+        c.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+        back = threading.Thread(target=self.relay, args=(up, c), daemon=True)
+        back.start()
+        self.relay(c, up)
+        back.join(5)
+        c.close()
+        up.close()
+
+    def run(self):
+        while True:
+            try:
+                c, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.serve, args=(c,), daemon=True).start()
+
+    def close(self):
+        self.srv.close()
+
+
+class PinnedOverSocksTests(unittest.TestCase):
+    """End to end on loopback: a pinned https node reached through a socks5h proxy (PySocks' https connection reads
+    _check_hostname, which Python 3.12's HTTPSConnection no longer has)."""
+
+    def setUp(self):
+        import http.server
+        import json
+        import tempfile
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        cert, key = str(pathlib.Path(d, "c.pem")), str(pathlib.Path(d, "k.pem"))
+        self.fp = tls.make_self_signed(cert, key, ["node.example"])
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"height": 7}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        srv.socket = tls.server_context(cert, key).wrap_socket(srv.socket, server_side=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.socks = RelayingSocks(srv.server_address[1])
+        self.addCleanup(self.socks.close)
+        self.proxy = f"socks5h://127.0.0.1:{self.socks.port}"
+
+    def test_a_pinned_node_answers_through_the_proxy(self):
+        client = NodeClient("https://node.example:443", timeout=10, fingerprint=self.fp, proxy=self.proxy)
+        self.assertEqual(client.get("/status"), {"height": 7})
+        self.assertEqual(self.socks.asked, [(3, "node.example")])  # ATYP 3: the proxy was given the name
+
+    def test_a_wrong_pin_is_refused_through_the_proxy(self):
+        client = NodeClient("https://node.example:443", timeout=10, fingerprint="aa" * 32, proxy=self.proxy)
+        with self.assertRaisesRegex(NodeError, "pinned"):
+            client.get("/status")
+        self.assertEqual(self.socks.asked, [(3, "node.example")])
+
+
 class LeakTests(unittest.TestCase):
     def tearDown(self):
         proxy.activate(None, None)

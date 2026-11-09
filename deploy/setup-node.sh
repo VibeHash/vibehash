@@ -271,7 +271,11 @@ done
 if status=$(curl -fsS "$URL/status" 2>/dev/null); then
   echo "$status" | python3 -c "import json, sys; s = json.load(sys.stdin); print(f\"network {s['chain_id']}, block {s['height']}\")"
   printf '\nDone. The node address is %s\n  validator %s\n  logs:     journalctl -u %s -f\n' "$URL" "$ADDRESS" "$SERVICE"
-  [ -z "$TOR" ] || printf '  onion:    %s (port 443; trust its certificate by fingerprint)\n' "$ONION"
+  if [ -n "$TOR" ]; then
+    printf '  onion:    %s (port 443; trust its certificate by fingerprint, below)\n' "$ONION"
+    # (`vibehash setup --tls-fingerprint` takes it with or without the colons; a renewed certificate has a new one)
+    printf '  cert:     %s\n' "$(openssl x509 -in "$ETC/tls/cert.pem" -noout -fingerprint -sha256 2>/dev/null || echo 'unreadable: openssl x509 failed')"
+  fi
   printf '\nStill to do:\n'
   printf '  - Turn on weekly snapshots for this droplet in the DigitalOcean control panel.\n'
   printf '  - Without BACKUP_RCLONE_REMOTE the blobs are not backed up at all. Make a remote with\n'
