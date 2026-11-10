@@ -1759,6 +1759,7 @@ class ClientMoveTests(unittest.TestCase):
             self.assertEqual(len(sent), 2)
 
 
+@unittest.skipUnless(torch is not None and HAVE_TOKENIZERS, "needs PyTorch, tokenizers and jinja2")
 class LiveNetworkTests(unittest.TestCase):
     """The whole thing over HTTP, offline: a fake Hugging Face (tests/test_hub.py) serving a tiny model and its
     tokenizer, a node and three workers, `vibehash train chats.jsonl --base`, rounds, and `vibehash job download`."""

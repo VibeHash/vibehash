@@ -4,6 +4,7 @@ tiny random Qwen2 (CPU), and a local network whose state a fresh rebuild from it
 cheating worker caught. CPU only; the model tests need PyTorch and transformers and are skipped without them.
 """
 import hashlib
+import importlib.util
 import json
 import math
 import subprocess
@@ -653,6 +654,7 @@ class EvoModeTests(unittest.TestCase):
         code, _ = self.run_cli("testnet", "--evo", "--dir", str(d), "--plain")
         self.assertIn("made without Evo jobs", str(code))
 
+    @unittest.skipUnless(importlib.util.find_spec("huggingface_hub"), "needs huggingface_hub")
     def test_a_folder_and_the_cache(self):
         """A model's folder is pinned by where it is; a Hugging Face model by its commit, looked for in the cache first
         (downloaded only when it isn't there), and a worker finds a local network's base in its cache by itself."""
