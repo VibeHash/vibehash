@@ -9,7 +9,7 @@ VibeHash is a Python proof-of-useful-work testnet: workers train models, the cha
 and `docs/CLI.md` (every command).
 
 The business has two halves. This repository is the public one: the open chain, its miners and the open domain
-models they train. Luh Labs LLC's private engine (customer jobs, trained on in-house machines from those open models)
+models they train. The private engine (customer jobs, trained on in-house machines from those open models)
 lives in a separate private repository. The next section says what belongs where.
 
 ## Public repository, private business
