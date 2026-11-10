@@ -226,9 +226,12 @@ def chain_bytes(entry) -> int:
 # (the cheap cheat) were at least 3.5 below, 46 or more tokens each. Same GPU kind: every honest gap exactly 0. Their
 # replay log-probabilities differed by at most 0.015 (lp_tol 0.05).
 V2_SETTINGS = dict(pairs=64, pairs_per_unit=8, problems=16, max_tokens=64, sigma=1e-3, lr=5e-4, lr_floor=0.25,
-                   rounds=12, replay=16, margin=0.5, lp_tol=0.05, decay=1 / 256, lenient=True)
+                   rounds=12, replay=16, margin=0.5, lp_tol=0.02, decay=1 / 256, lenient=True)
 # Jobs with `tasks` mix them in every round (Spec2.mix): spec2_for turns it on whenever a job names tasks.
 V2_MIX = True
+# A thin round (only some units landed) takes a step its share of the full one (Spec2.fixed_step): on for new jobs made
+# by `job template --evo` (--no-fixed-step turns it off). A spec without the field still means off.
+V2_FIXED_STEP = True
 # lr 1e-3 and decay 1/64, the anchored step (es2's docstring, HANDOFF "The Evo collapse: cause and fix"): lr 4e-3 with
 # no anchor drifted the model 1.6% from its base a round at the cosine's top, broke it within about 100 rounds, and
 # made the testnet's ~400-round line worse on every task. Anchored at 1/64, random drift levelled off at 2%, but a task
@@ -248,7 +251,10 @@ V2_MIX = True
 # look the same, so no margin tells them apart. It doesn't pay: workers are paid by accepted FLOPs, not rewards, and
 # the update follows the replay log-probabilities; a swap can at most make a key's answer a problem's replay target.
 # The cheat that pays, skipping work (claiming a twin's answers), sat 3.5 or more below in all 128 members tried.
-# lp_tol 0.05: workers and checkers score the replay answers on the same path (es_fast.score_items).
+# lp_tol 0.02 (0.05 before 2026-11-09): workers and checkers score the replay answers on the same path
+# (es_fast.score_items). On Qwen2.5-0.5B the members' scores spread only 0.031-0.046, so at 0.05 one unit with 12.5% of
+# the work could take 21-36% of the step; at 0.02, 7-22% (honest 7-15%). The headroom is thin: two honest GPUs (a 4090
+# and a 4070 SUPER) were measured up to 0.015 apart. A job keeps whatever its spec says.
 V2_COMPUTE_S = 300
 # Margins by pair of number setups (Spec2.cross_margin, docs/CROSS-HARDWARE.md), as `job template --evo` sets them:
 # a claim gets a referee of the worker's setup when one registered, and two machines that round alike give gaps of
@@ -256,6 +262,10 @@ V2_COMPUTE_S = 300
 # the margin above, which the census (/network's gaps) can show to be too tight or loose before the next job.
 V2_PAIRED_MARGIN = 0.1
 V2_CROSS_MARGIN = 0.5
+# A gold job's replay (Spec2.gold, `job template --evo --gold`): its rounds score members on their own problems' gold
+# answers, and replay targets are only the reasoned tasks' (es_tasks.WRITTEN). The scores are one flat mean, so 16
+# targets beside a 16-problem round's gold answers would be half or more of every round's signal; 4 keeps them a part.
+V2_GOLD_REPLAY = 4
 
 
 def tensors2_for(config) -> tuple:

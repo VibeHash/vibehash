@@ -70,7 +70,7 @@ from .p2p import Peers
 from .ratelimit import GuardedHandler, GuardedServer, Limits, path_parts
 from .replay import replay_block
 from .storage import NotSaved, RivalBlock, Store, record_blobs
-from .tasks import SYN_PER_VIBE, InvalidJob, Reveal, TrainingJob
+from .tasks import NO_VOCAB_MSG, SYN_PER_VIBE, InvalidJob, Reveal, TrainingJob
 from .verification import FINETUNE_CHECK
 from .wire import MAX_CLOCK_SKEW_S, WireError, blob_openings_in, blob_openings_out, commitment_in, commitment_out, open_envelope
 
@@ -904,7 +904,10 @@ class Node:
         if self.halted:  # it would never reach a block from here
             raise ProtocolError(f"this node has stopped: {self.halted_public}")
         if tx.kind == "post_job":  # relay policy, not a rule: a block with a bigger job is as valid as before
-            size = TrainingJob.from_spec_json(tx.memo, tx.sender, tx.amount).checkpoint_bytes
+            job = TrainingJob.from_spec_json(tx.memo, tx.sender, tx.amount)
+            if job.no_vocab():  # also relay policy: blocks already on a chain with such a job replay as they did
+                raise ProtocolError(NO_VOCAB_MSG)
+            size = job.checkpoint_bytes
             if size > self.max_job_bytes:
                 raise ProtocolError(f"this node relays jobs whose models are at most {self.max_job_bytes / 2**20:g} MB "
                                     f"a checkpoint (--max-job-mb); this one's are {size / 2**20:.1f} MB")

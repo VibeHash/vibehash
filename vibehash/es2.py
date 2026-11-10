@@ -15,7 +15,9 @@ What changes from rule 1 (es.py):
   the CPU, for anyone who wants the exact numbers. Updates use the factors rounded to bf16 (what the workers' forward
   uses), so every machine applies the same values.
 * **Fitness**: each member's mean per-token log-probability of earlier rounds' correct answers (the targets the node
-  records, `replay_targets`), z-scored; right/wrong only while no target exists yet (`coefficients`).
+  records, `replay_targets`), z-scored; right/wrong only while no target exists yet (`coefficients`). With `gold`,
+  also of the round's own problems' gold answers (es2_rounds.gold_problems), so a round learns from what the line
+  gets wrong too.
 * **Averaging**: a job may start from a weighted sum of earlier jobs' changes (`start`: [[job id, weight, the
   parent's params_hash], ...]), how a cycle of tunes is averaged into the next cycle's starting point.
 * **The anchor** (`decay`): before each round's step the change gives back that share of itself, so it stays near the
@@ -103,6 +105,35 @@ class Spec2(es.EsSpec):
     # fewer tokens a round (es_tasks.VIBE_TASK_TOKENS). Empty: max_tokens for every task, as before it (left out of
     # the spec).
     task_tokens: tuple = ()
+    # The step's scale over every member a round could have (2 x pairs), not over its accepted claims' members
+    # (step_scale). Over the accepted ones, a round where 2 of 8 units landed took a step as big as a full round's,
+    # out of a quarter of the members: the z-scored coefficients' noise adds up as sqrt(k) over k members, so its step
+    # had twice the noise for the same push. Over every member, a thin round takes a step its share of the size, at a
+    # full round's signal to noise: a round that learned less moves the model less. False: left out of the spec, as
+    # before it.
+    fixed_step: bool = False
+    # Members scored on the round's own problems' gold answers: each member's log-probability of writing
+    # "<answer>gold</answer>" (es2_rounds.gold_text) after the problem's prompt, for every problem of a task whose
+    # answer is one short text (every task but es_tasks.WRITTEN, whose problems keep the replay targets), averaged
+    # with the replay targets' and z-scored as before. The replay targets alone are answers the line already gets
+    # right, so a round can only make it surer of them: it never learns from a problem it gets wrong, and with
+    # `lenient` a right answer without its tags becomes a target and teaches dropping them. The gold answers come
+    # from the round's seed like its problems, so workers, checkers and anyone replaying score the same tokens, and a
+    # round's update no longer depends on which answers happened to be right. Measured on Qwen2.5-0.5B-Instruct
+    # (2026-11-09, RTX 4070 SUPER, 64 pairs, lr 5e-4, decay 1/256, 10 tasks mixed, 100 rounds, 200 held-out problems
+    # a task): strict accuracy on the trained tasks 36.9% to 52.4% (lenient 37.1% to 52.5%), on 7 tasks never trained
+    # 33.5% to 41.9% (lenient 40.1% to 42.8%), 2.4% from the base. What it learns is to answer in the job's format,
+    # not new knowledge: asked for only a letter, the base says A to 84-100% of 5 multiple-choice tasks' problems and
+    # the trained line picks (so a task at chance can fall as its guesses shift: aqua_rat 24.5% to 16.0%). On Qwen's
+    # own tests, which ask for reasoning first, the same line ties the original (scripts/vibe_bench.py, 200 problems,
+    # paired: MMLU-Redux -1.0 ±7.7, MMLU-Pro +1.0 ±5.0, GSM8K -1.5 ±6.6). docs/EVO-POOLS.md, 2026-11-09. False: left out of the
+    # spec, as before it.
+    gold: bool = False
+    # The most tokens a pool task's target reply is scored on (es_tasks.PoolTask, es2_rounds.gold_caps), the
+    # end-of-turn token included: its targets are whole worked replies, while max_tokens (what members write) can stay
+    # short, enough for the answer check to see each member's own model at work. 0: no pool task (left out of the
+    # spec, as before it).
+    target_tokens: int = 0
 
     def __post_init__(self):
         super().__post_init__()
@@ -149,6 +180,17 @@ class Spec2(es.EsSpec):
             out.append("decay is 0 to 0.5")
         if not isinstance(self.lenient, bool):
             out.append("lenient is true or false")
+        if not isinstance(self.fixed_step, bool):
+            out.append("fixed_step is true or false")
+        if not isinstance(self.gold, bool):
+            out.append("gold is true or false")
+        pools = [t for t in (self.tasks or (self.task,)) if t in es_tasks.POOL_TASKS]
+        if type(self.target_tokens) is not int or not (self.target_tokens == 0 or 16 <= self.target_tokens <= 2048):
+            out.append("target_tokens is 0 or 16-2048")
+        elif pools and not (self.gold and self.target_tokens):
+            out.append(f"a pool task ({pools[0]}) needs gold and target_tokens")
+        elif self.target_tokens and not pools:
+            out.append("target_tokens is for pool tasks")
         if not isinstance(self.mix, bool) or (self.mix and not self.tasks):
             out.append("mix is true or false, and true only with tasks")
         if self.loop_stop and not (len(self.loop_stop) == 2 and all(type(x) is int for x in self.loop_stop)
@@ -174,8 +216,10 @@ class Spec2(es.EsSpec):
         return pack(start_hash(self), ctrl)
 
     def flops_per_step(self, batch_size: int = 1) -> int:
-        """A unit's nominal FLOPs: every member writing every answer and being scored on the replay targets."""
-        return 2 * self.base_params * (self.max_tokens + 2 * self.replay) * self.problems * self.members * batch_size
+        """A unit's nominal FLOPs: every member writing every answer and being scored on the replay targets (and, in
+        a job with pool tasks, on each problem's target reply, up to target_tokens)."""
+        return (2 * self.base_params * (self.max_tokens + 2 * self.replay + self.target_tokens) * self.problems
+                * self.members * batch_size)
 
     def to_json(self) -> dict:
         return {"base": self.base, "manifest": self.manifest, "model": self.model,
@@ -189,14 +233,18 @@ class Spec2(es.EsSpec):
                        **({"lenient": True} if self.lenient else {}), **({"mix": True} if self.mix else {}),
                        **({"loop_stop": list(self.loop_stop)} if self.loop_stop else {}),
                        **({"cross_margin": self.cross_margin} if self.cross_margin else {}),
-                       **({"task_tokens": dict(self.task_tokens)} if self.task_tokens else {})}}
+                       **({"task_tokens": dict(self.task_tokens)} if self.task_tokens else {}),
+                       **({"fixed_step": True} if self.fixed_step else {}),
+                       **({"gold": True} if self.gold else {}),
+                       **({"target_tokens": self.target_tokens} if self.target_tokens else {})}}
 
     @classmethod
     def from_json(cls, d: dict) -> "Spec2":
         e = d["es"]
         known = {"rule", "tensors", "n", "tensors_sha", "task", "pairs", "pairs_per_unit", "problems", "max_tokens",
                  "sigma", "lr", "lr_floor", "rounds", "replay", "start", "check", "margin", "lp_tol", "rank", "tasks",
-                 "decay", "lenient", "mix", "loop_stop", "cross_margin", "task_tokens"}
+                 "decay", "lenient", "mix", "loop_stop", "cross_margin", "task_tokens", "fixed_step", "gold",
+                 "target_tokens"}
         if set(e) - known:
             raise ValueError(f"a rule-2 ES spec has no field {sorted(set(e) - known)[0]!r}")
         if not isinstance(e.get("task_tokens", {}), dict):
@@ -214,7 +262,8 @@ class Spec2(es.EsSpec):
                    rank=int(e.get("rank", 1)), rule=int(e["rule"]), tasks=tuple(str(t) for t in e.get("tasks", [])),
                    decay=float(e.get("decay", 0.0)), lenient=e.get("lenient", False), mix=e.get("mix", False),
                    loop_stop=tuple(e.get("loop_stop", [])), cross_margin=float(e.get("cross_margin", 0.0)),
-                   task_tokens=dict(e.get("task_tokens", {})))
+                   task_tokens=dict(e.get("task_tokens", {})), fixed_step=e.get("fixed_step", False),
+                   gold=e.get("gold", False), target_tokens=e.get("target_tokens", 0))
 
     def tokens_for(self, task: str) -> int:
         """The most tokens an answer to a problem of `task` has: its task_tokens entry, else max_tokens."""
@@ -382,10 +431,16 @@ def lr_at(spec: Spec2, round_index: int) -> float:
 def coefficients(binary: list, replay_lp: list | None) -> tuple[list[float], str]:
     """Pair coefficients c_j = z+_j - z-_j from members in order [+0, -0, +1, -1, ...]: z-scores of the replay
     log-probabilities when given, else of the right/wrong scores. Returns (coefficients, "replay" or "binary").
-    The step is then scale = lr_at(...) / N (N members) times sum_j c_j A_j B_j^T."""
+    The step is then step_scale(...) times sum_j c_j A_j B_j^T."""
     use = replay_lp if replay_lp is not None and len(replay_lp) == len(binary) else None
     z = es.shaped([float(x) for x in (use if use is not None else binary)])
     return [z[2 * k] - z[2 * k + 1] for k in range(len(z) // 2)], ("replay" if use is not None else "binary")
+
+
+def step_scale(spec: Spec2, round_index: int, members: int) -> float:
+    """A round's step scale: the cosine's lr (lr_at) over the members counted, which are every member the round
+    could have (2 x pairs) when the spec has fixed_step, else the `members` of its accepted claims."""
+    return lr_at(spec, round_index) / (2 * spec.pairs if getattr(spec, "fixed_step", False) else members)
 
 
 def replay_targets(n_problems: int, answers: list, ok: list, vocab: int = 0) -> list[tuple[int, list[int]]]:

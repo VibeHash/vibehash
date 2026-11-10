@@ -334,6 +334,28 @@ round it completes work instead of almost never, as in lottery mining.
     three newcomers mints from its first round; the newcomers reach their
     5 VIBE stake in six rounds; a lazy cheater among them is caught by the
     coordinator's own checks from the first round and never paid.
+  - **What an Evo round scores its members on (2026-11-09).** A rule-2
+    round's step comes from z-scored pairs of member scores: by default each
+    member's mean log-probability of the replay targets (earlier rounds'
+    right answers), right/wrong before any exist. Three spec fields change
+    that. Each is left out of the spec when off, so older jobs hash and
+    replay as they did, and nodes before 0.5.28 refuse a job that has one
+    (`Spec2.from_json` knows no such field). `gold` scores members on the
+    round's own problems' right answers (`es2_rounds.gold_problems`,
+    `gold_text`), so a job learns from what its model gets wrong, not only
+    from what it already gets right. `target_tokens`, with a pool task
+    (`es_tasks.PoolTask`: problems with whole target replies, its file
+    shipped in the package and pinned by sha256), scores them on those
+    replies up to that many tokens while members write only short answers;
+    the answer check still teacher-forces each claimed answer through the
+    claimed member's model, and `flops_per_step` prices the targets'
+    scoring. `fixed_step` divides a round's step by every member it could
+    have had, not the members that landed, so a thin round moves the model
+    less. Like `task_tokens` and `loop_stop` before them they bring no block
+    version: blocks without such a job are valid to old and new nodes alike,
+    and an older node refuses a block that posts one, so every validator
+    must run 0.5.28 or later before anyone posts such a job. Measured:
+    `docs/EVO-POOLS.md`.
 
   The genesis hash commits to all three (starter jobs only when there are
   some). Genesis files without them keep their

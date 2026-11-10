@@ -280,13 +280,14 @@ class DrawingTests(unittest.TestCase):
                                         "commonsense_qa", "sst2", "openbookqa", "asdiv", "nq_open", "winogrande",
                                         "ag_news", "qasc", "aqua_rat", "web_questions", "hellaswag", "emotion",
                                         "boolq", "arc_challenge", "piqa", "social_iqa"), "earlier tasks keep places")
-        self.assertEqual(T.NAMES[22:], ("ifeval", "gsm8k", "math", "medmcqa"))
+        self.assertEqual(T.NAMES[22:26], ("ifeval", "gsm8k", "math", "medmcqa"))
+        self.assertEqual(T.NAMES[26:], T.POOL_TASKS)  # the pool tasks (es_tasks.PoolTask), last
         self.assertEqual(len(T.CURATED), 17)
         self.assertTrue(set(T.VIBE) <= set(T.NAMES))
         self.assertEqual(len(set(T.VIBE)), len(T.VIBE))
         self.assertEqual(len(T.VIBE), 16, "16 problems a round: one of each")
         self.assertFalse({"sst2", "ag_news", "emotion", "trivia_qa", "nq_open", "web_questions"} & set(T.VIBE))
-        self.assertTrue(set(T.HUB) >= set(T.NAMES) - {"countdown", "arithmetic", "arc_easy"})
+        self.assertTrue(set(T.HUB) >= set(T.NAMES) - {"countdown", "arithmetic", "arc_easy", *T.POOL_TASKS})
 
     def test_items_are_the_same_every_time(self):
         rows = fake_rows()

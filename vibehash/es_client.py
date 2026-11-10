@@ -525,6 +525,20 @@ def prompt_rows(rt: es.Runtime, items) -> list[list[int]]:
     return out
 
 
+def gold_items(rt: es.Runtime, spec, items, rows, step: int) -> list[tuple[list[int], list[int]]]:
+    """A round's own problems its members are scored on, as (prompt ids, answer ids), in a job with `gold`
+    (es2_rounds.gold_problems; none in any other job): each one's gold answer between the tags, or a pool task's whole
+    target reply (es2_rounds.gold_text), as the tokenizer splits it, cut one short of the problem's most gold tokens
+    (es2_rounds.gold_caps), then the end-of-turn token, the reply a member could have given. From the round's seed
+    and step alone, so a worker and a checker score the same tokens."""
+    which = es2_rounds.gold_problems(spec, step)
+    if not which:
+        return []
+    caps = es2_rounds.gold_caps(spec, step)
+    return [(rows[i], rt.tokenizer.encode(es2_rounds.gold_text(items[i]), add_special_tokens=False)[:caps[i] - 1]
+             + [rt.eos[0]]) for i in which]
+
+
 class Es2Work:
     """A worker's part in rule-2 Evo rounds (the module's docstring)."""
 
@@ -732,7 +746,8 @@ class Es2Work:
         ps = es2_rounds.items(spec, seed, step)
         rows = prompt_rows(rt, ps)
         want_lps = bool(spec.replay) and es2.ctrl_of(ln.state)[3] > 0
-        replay = self.replay_items(rt, ln) if want_lps else []
+        # What members are scored on: a gold job's own problems' gold answers, then the replay targets
+        replay = gold_items(rt, spec, ps, rows, step) + (self.replay_items(rt, ln) if want_lps else [])
         lap("prompts")
         fac = round_factors(rt, spec, seed)
         lap("noise")
@@ -756,7 +771,8 @@ class Es2Work:
             lap("answer")
             lp = None
             if replay:
-                st.activity = f"scoring {len(members)} twisted models on {len(replay)} earlier right answers"
+                st.activity = (f"scoring {len(members)} twisted models on {len(replay)} "
+                               f"{'right' if spec.gold else 'earlier right'} answers")
                 lp = es_fast.score_items(rt, rt.linears, fac, members, replay, spec.sigma, spec.rank).mean(1).tolist()
                 lap("replay")
         M = spec.members
@@ -852,9 +868,13 @@ class Es2Work:
             lap("catch_up")
             seed = unit0.seed
             step = int(es2.ctrl_of(ln.state)[2])
-            rows = prompt_rows(rt, es2_rounds.items(spec, seed, step))
+            ps = es2_rounds.items(spec, seed, step)
+            rows = prompt_rows(rt, ps)
             caps = es2_rounds.caps(spec, step)
-            replay = self.replay_items(rt, ln) if any(p[4] is not None for p in parsed) else []
+            replay = []  # what the claims' members were scored on, as the worker's compute lists them
+            if any(p[4] is not None for p in parsed):
+                want = bool(spec.replay) and es2.ctrl_of(ln.state)[3] > 0
+                replay = gold_items(rt, spec, ps, rows, step) + (self.replay_items(rt, ln) if want else [])
             lap("prompts")
             fac = round_factors(rt, spec, seed)
             lap("noise")

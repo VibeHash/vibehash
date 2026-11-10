@@ -53,7 +53,7 @@ EVAL_N = 200
 MAX_CHARS = 320
 NAMES = ("countdown", "arithmetic", "arc_easy", "sciq", "svamp", "trivia_qa", "commonsense_qa", "sst2", "openbookqa",
          "asdiv", "nq_open", "winogrande", "ag_news", "qasc", "aqua_rat", "web_questions", "hellaswag", "emotion",
-         "boolq", "arc_challenge", "piqa", "social_iqa", "ifeval", "gsm8k", "math", "medmcqa")
+         "boolq", "arc_challenge", "piqa", "social_iqa", "ifeval", "gsm8k", "math", "medmcqa", "vibe_reason")
 # What Evo Hash trains on (see the docstring): the knowledge benchmarks first, then commonsense, math, classification.
 CURATED = ("arc_easy", "sciq", "commonsense_qa", "openbookqa", "arc_challenge", "piqa", "social_iqa", "qasc",
            "winogrande", "hellaswag", "boolq", "aqua_rat", "svamp", "asdiv", "sst2", "ag_news", "emotion")
@@ -74,6 +74,10 @@ VIBE_LOOP_STOP = (32, 48)  # VIBE's jobs' es2 loop_stop: 279 of 1,832 answers at
 # on vibe-08b-2's line, 2026-11-07: math keeps 97% of its right answers at 448, gsm8k 99% at 384, ifeval 97% at 256;
 # es2.Spec2.task_tokens), about 12% fewer tokens decoded a round.
 VIBE_TASK_TOKENS = {"math": 448, "gsm8k": 384, "ifeval": 256}
+# The tasks whose right answers are written out (worked reasoning, or a reply at length), not one short text between
+# the tags. A job with `gold` (es2.Spec2) scores its members on every other task's gold answers, and on these tasks'
+# own earlier right answers (the replay targets), as every job before it scores all of them.
+WRITTEN = ("ifeval", "gsm8k", "math")
 MAX_LONG = 520  # a Hugging Face task's longest prompt, in characters (about 150 tokens)
 MAX_REASON = 1000  # the longest prompt of the tasks with room to think (ifeval, gsm8k, math), about 300 tokens
 POOL = 20_000  # the most rows a task keeps the indices of for each part
@@ -123,7 +127,7 @@ def lenient(item: "Item") -> "Item":
     """The item, its check also taking a right answer given without tags (`salvage`); a reply with tags is checked as
     before. An item with its own lenient check (`loose`) takes that instead."""
     if item.loose is not None:
-        return Item(item.messages, item.loose, item.gold)
+        return Item(item.messages, item.loose, item.gold, target=item.target)
     strict = item.check
 
     def ok(text: str) -> bool:
@@ -131,7 +135,7 @@ def lenient(item: "Item") -> "Item":
             return strict(text)
         a = salvage(text, item.gold)
         return a is not None and strict(f"<answer>{a}</answer>")
-    return Item(item.messages, ok, item.gold)
+    return Item(item.messages, ok, item.gold, target=item.target)
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,10 @@ class Item:
     # The check `lenient` uses when `salvage` can't read the answer (a reasoned one in \boxed{}, a whole reply); None:
     # salvage's, as every task before these.
     loose: Callable[[str], bool] | None = field(default=None, hash=False, compare=False)
+    # A whole reply to score a member on, a pool task's (PoolTask): worked reasoning ending in the answer, the way the
+    # benchmarks ask for it. "" for every other task, whose gold answer is scored between the tags
+    # (es2_rounds.gold_text).
+    target: str = field(default="", compare=False)
 
 
 def _draw(*parts) -> Draw:
@@ -707,6 +715,76 @@ HUB = {
                 _half("validation", True), _half("validation", False), _medmcqa),
 }
 
+class PoolTask:
+    """Problems with a whole target reply each, shipped in the package (vibehash/data) and pinned by their sha256: a
+    job with `gold` (es2.Spec2) scores its members on how likely they are to write the target (es2_rounds.gold_text),
+    with `target_tokens` room for it. A row is {"prompt", "target", "gold", "kind": "mc" | "number" | "math", "src",
+    "part": "train" | "eval"}; the prompts are asked the way scripts/vibe_bench.py asks the benchmarks (reason, then
+    "The answer is X" or \\boxed{}), and every row's problem comes from a training split (the file's README says
+    which). Training draws from "train", eval_items and val_items from "eval" (problems held out of training, no
+    target needed)."""
+
+    def __init__(self, name: str, file: str, sha256: str, folder=None):
+        from pathlib import Path
+        self.name, self.file, self.sha256 = name, file, sha256
+        self.path = Path(folder or Path(__file__).parent / "data") / file
+        self._rows = None
+
+    def _data(self):
+        if self._rows is None:
+            import gzip
+            import hashlib
+            import json
+            path = self.path
+            try:
+                raw = path.read_bytes()
+            except OSError as e:
+                raise TaskUnavailable(f"{self.name}'s file {self.file} isn't installed: {e}") from None
+            if hashlib.sha256(raw).hexdigest() != self.sha256:
+                raise TaskUnavailable(f"{self.name}'s file {self.file} isn't the pinned one (sha256 differs)")
+            rows = [json.loads(line) for line in gzip.decompress(raw).decode("utf-8").splitlines() if line.strip()]
+            self._rows = {part: [self._item(r) for r in rows if r["part"] == part] for part in ("train", "eval")}
+        return self._rows
+
+    @staticmethod
+    def _item(r) -> Item:
+        gold, kind = str(r["gold"]), r["kind"]
+        if kind == "mc":
+            def ok(text: str, gold=gold) -> bool:
+                said = [m.group(1).upper() for m in _LETTER_SAID.finditer(text)]
+                return bool(said) and said[-1] == gold
+        elif kind == "number":
+            ok = _reasoned_number_check(gold, True)
+        else:
+            ok = _math_check(math_norm(gold), True)
+        return Item([{"role": "user", "content": r["prompt"]}], ok, gold, ok, target=r.get("target", ""))
+
+    def items(self, seed: int, n: int) -> list[Item]:
+        train = self._data()["train"]
+        d = _draw(b"evo2 " + self.name.encode(), seed)
+        return [train[d.below(len(train))] for _ in range(n)]
+
+    def eval_items(self) -> list[Item]:
+        return self._data()["eval"][:EVAL_N]
+
+    def val_items(self, n: int) -> list[Item]:
+        return self._data()["eval"][-n:]
+
+
+# name: (file in vibehash/data, its sha256). vibe_reason: Qwen3.5-4B's right answers to GSM8K and MATH training
+# problems and Qwen3.5-0.8B's own right answers (median length, at least 2 of 8 twisted copies agreeing) to MMLU's
+# validation and dev questions, MedMCQA's and AQuA's training questions (docs/EVO-POOLS.md, and
+# scripts/build_evo_pool.py, which makes it).
+POOLS = {"vibe_reason": ("evo_pool_vibe_reason.jsonl.gz",
+                         "77f94d44be61fcdfe534c790a2fc52af94ca6ab086c2f319b5061a7dd6564854")}
+# The tasks whose problems carry a whole target reply: a job naming one scores its members on the targets (gold)
+POOL_TASKS = tuple(POOLS)
+# A pool job's defaults (`job template --evo MODEL --tasks vibe_reason`): targets scored up to 1,024 tokens (the most a
+# benchmark reply gets, scripts/vibe_bench.py), members' own answers 16 tokens (enough for the answer check, which
+# teacher-forces them through the claimed member's model, to tell it from another's)
+POOL_TARGET_TOKENS = 1024
+POOL_ANSWER_TOKENS = 16
+
 _TASKS: dict = {}
 
 
@@ -716,5 +794,6 @@ def get(name: str):
         raise ValueError(f"no Evo task {name!r}: one of {', '.join(NAMES)}")
     if name not in _TASKS:
         made = {"countdown": Countdown, "arithmetic": Arithmetic, "arc_easy": ArcEasy}.get(name)
-        _TASKS[name] = made() if made else HubTask(name, *HUB[name])
+        _TASKS[name] = (made() if made else PoolTask(name, *POOLS[name]) if name in POOLS
+                        else HubTask(name, *HUB[name]))
     return _TASKS[name]

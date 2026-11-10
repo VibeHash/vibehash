@@ -46,7 +46,7 @@ from .client import MIN_CLIENT, NodeClient, NodeError, WorkerClient, too_old
 from .crypto import AddressError, KeyPair, checksummed, parse_address
 from .ledger import UNBONDING_ROUNDS, Block, Chain, canonical
 from .model import ModelSpec
-from .tasks import SYN_PER_VIBE, InvalidJob, TrainingJob
+from .tasks import NO_VOCAB_MSG, SYN_PER_VIBE, InvalidJob, TrainingJob
 from .watch import DEFAULT_PORT as WATCH_PORT
 
 ADMIN_PORT = 7546  # the admin app's local server (admin.DEFAULT_PORT; not imported: the admin module is for admins only)
@@ -1130,6 +1130,8 @@ def cmd_post_job(a):
         job = TrainingJob.from_spec_json(json.dumps(spec), keys.address, a.budget)
     except InvalidJob as e:
         sys.exit(f"invalid job spec: {e}")
+    if job.no_vocab():
+        sys.exit(f"invalid job spec: {NO_VOCAB_MSG}")
     fee = node.min_fee() if a.fee is None else a.fee
     txid = node.send_tx(keys, "post_job", "system", a.budget, job.spec_json(), fee)
     print(f"posted job {job.job_id} with budget {fmt(a.budget)} and a {fmt(fee)} fee ({txid})")
@@ -1194,15 +1196,29 @@ def _evo_template(a, out: Path):
     its tasks taken in turn, `--rounds` each (es2.task_at), fee 0. Only the model's config.json is fetched."""
     from . import es_local, es_tasks
 
-    named = {"all": es_tasks.NAMES, "curated": es_tasks.CURATED, "vibe": es_tasks.VIBE}
+    named = {"all": tuple(t for t in es_tasks.NAMES if t not in es_tasks.POOL_TASKS), "curated": es_tasks.CURATED,
+             "vibe": es_tasks.VIBE}
     tasks = (list(named[a.tasks]) if a.tasks in named else [t.strip() for t in a.tasks.split(",") if t.strip()])
     unknown = [t for t in tasks if t not in es_tasks.NAMES]
     if unknown or not tasks:
         sys.exit(f"unknown task {unknown[0] if unknown else '(none given)'}: the tasks are {', '.join(es_tasks.NAMES)}")
+    problems = getattr(a, "problems", None)
+    if problems is not None and problems < 1:
+        sys.exit(f"--problems is a positive number of problems a member answers a round, not {problems}")
+    # A pool task's problems carry whole target replies (es_tasks.PoolTask): members are scored on those (gold), with
+    # room for them (target_tokens), and write only a short answer each, enough for the answer check to see their own
+    # model at work. A job of pool tasks alone forms no replay targets (every problem is a gold one).
+    pools = [t for t in tasks if t in es_tasks.POOL_TASKS]
+    target_tokens = getattr(a, "target_tokens", None)
+    if target_tokens is not None and not pools:
+        sys.exit("--target-tokens is for pool tasks (" + ", ".join(es_tasks.POOL_TASKS) + ")")
+    pool_set = ({"gold": True, "target_tokens": target_tokens or es_tasks.POOL_TARGET_TOKENS,
+                 **({"replay": 0} if len(pools) == len(tasks) else {})} if pools else {})
     try:
         found = es_local.find(a.evo, config_only=True)
         # The vibe mix reasons before it answers (gsm8k, math, ifeval), so it gets room to: es_tasks.VIBE.
-        max_tokens = a.max_tokens or (es_tasks.VIBE_MAX_TOKENS if a.tasks == "vibe" else None)
+        max_tokens = a.max_tokens or (es_tasks.VIBE_MAX_TOKENS if a.tasks == "vibe" else
+                                      es_tasks.POOL_ANSWER_TOKENS if pools and len(pools) == len(tasks) else None)
         # A looping answer ends where it loops (es2.loop_end): on by default for vibe, whose answers run long.
         loop = (es_tasks.VIBE_LOOP_STOP if a.tasks == "vibe" else ()) if a.loop_stop is None else _loop_stop(a.loop_stop)
         # Checkers paired by number setup, a tight margin for the same setup and a wider one across (es2.cross_margin).
@@ -1217,7 +1233,14 @@ def _evo_template(a, out: Path):
                                   **({"loop_stop": tuple(loop)} if loop else {}),
                                   **({"task_tokens": caps} if caps else {}),
                                   **({"margin": min(es_local.V2_PAIRED_MARGIN, cross), "cross_margin": cross}
-                                     if cross else {}))
+                                     if cross else {}),
+                                  **({"fixed_step": True} if es_local.V2_FIXED_STEP and not getattr(a, "no_fixed_step", False) else {}),
+                                  **({"problems": problems} if problems else {}),
+                                  # Right-answer scoring (es2.Spec2.gold); the few replay targets left are the reasoned
+                                  # tasks' (es_tasks.WRITTEN), kept few so they don't outweigh the round's own problems.
+                                  **({"gold": True, "replay": es_local.V2_GOLD_REPLAY}
+                                     if getattr(a, "gold", False) else {}),
+                                  **pool_set)
         job = es_local.job2(spec, a.id, "system", budget=1, fee=0)
     except (ValueError, RuntimeError, OSError, InvalidJob) as e:
         sys.exit(f"can't make an Evo job for {a.evo}: {e}")
@@ -1227,6 +1250,8 @@ def _evo_template(a, out: Path):
           f"{f' (or until one loops: {spec.loop_stop[1]} tokens repeating a stretch of up to {spec.loop_stop[0]})' if spec.loop_stop else ''}"
           f"{(', ' + ', '.join(f'{t} {n}' for t, n in spec.task_tokens)) if spec.task_tokens else ''}"
           f"{f', checked to {spec.margin:g} on a machine like its worker and {spec.cross_margin:g} across' if spec.cross_margin else ''}"
+          f"{', members scored on the right answers' if spec.gold else ''}"
+          f"{f' (pool targets up to {spec.target_tokens} tokens)' if spec.target_tokens else ''}"
           f", paying only new coins; give it to `vibehash genesis create --es "
           f"--starter-job {out}`, or post it with `vibehash post-job --spec {out} --budget VIBE`")
 
@@ -3007,6 +3032,16 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--cross-margin", metavar="X", help="with --evo: the margin, in logits, between machines that do "
                    "the arithmetic differently, with 0.1 for alike ones and checkers paired by setup (default 0.5), or "
                    "off for one margin of 0.5 and no pairing")
+    p.add_argument("--fixed-step", action="store_true", help="with --evo: on by default, kept so old commands work")
+    p.add_argument("--no-fixed-step", action="store_true", help="with --evo: a round where only some units land takes "
+                   "a full step out of fewer members, instead of a step its share of the size (the default)")
+    p.add_argument("--problems", type=int, metavar="N", help="with --evo: problems each member answers a round (default "
+                   "16); more problems a round puts more work into each round without extra noise cost")
+    p.add_argument("--gold", action="store_true", help="with --evo: score each round's members on its own problems' "
+                   "right answers, so the model learns from what it gets wrong too, instead of only on answers it "
+                   "already got right (needs nodes on 0.5.28+)")
+    p.add_argument("--target-tokens", type=int, metavar="N", help="with --evo and a pool task (vibe_reason): the most "
+                   "tokens a problem's target reply is scored on (default 1024; needs nodes on 0.5.28+)")
     p.set_defaults(fn=cmd_job_template)
 
     e = sub.add_parser("evo", help="Evo Hash's models").add_subparsers(dest="ecmd", required=True)

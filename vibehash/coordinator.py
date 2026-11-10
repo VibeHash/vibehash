@@ -778,7 +778,10 @@ class Coordinator:
             if start is not None:
                 ctrl = es2.ctrl_of(start)
                 step = int(ctrl[2])
-                fitness = "replay" if job.spec.replay and ctrl[3] > 0 else "binary"
+                # Log-probabilities once the job has replay targets, or in a round with gold problems (Spec2.gold:
+                # the step alone says them, es2_rounds.gold_problems); right/wrong scores otherwise.
+                scored = (job.spec.replay and ctrl[3] > 0) or es2_rounds.gold_problems(job.spec, step)
+                fitness = "replay" if scored else "binary"
                 if self.replaying and (got.get("step"), got.get("fitness")) != (step, fitness):
                     raise ProtocolError("the record's step or fitness isn't the one the round's starting state holds")
             else:
@@ -2567,7 +2570,7 @@ class Coordinator:
         their replay log-probabilities when the round scores them, else of their right/wrong scores), the step's scale
         is the cosine's lr over the members counted, and the round's targets are each problem's most common correct
         answer among the accepted members' (es2.replay_targets, from the node's own reading of their blobs; a replay
-        takes the record's). The entry (es2.entry) moves the state's hash chain on (es2.step_state): the node keeps no
+        takes the record's), but for a gold job's gold problems, which need none (es2_rounds.gold_problems). The entry (es2.entry) moves the state's hash chain on (es2.step_state): the node keeps no
         weights, and the summary's params_hash is the new state's, worked out here and again by any replay that has the
         state the round started from (es_states)."""
         r = self.r
@@ -2609,7 +2612,7 @@ class Coordinator:
             use_lps = r.record["es"]["fitness"] == "replay" and all(lp is not None for *_, lp in rows)
             lp = [x for *_, pair in rows for x in pair] if use_lps else None
             coefs, used = es2.coefficients(binary, lp)
-            scale = es2.lr_at(spec, int(r.record["es"]["step"])) / len(binary)
+            scale = es2.step_scale(spec, int(r.record["es"]["step"]), len(binary))
             if self.replaying:  # the node's reading of the blobs isn't in a replay: the record's targets
                 targets = (self.replaying.get("es") or {}).get("targets") or []
             else:
@@ -2620,6 +2623,9 @@ class Coordinator:
                 except (TypeError, ValueError, OverflowError):
                     vocab = 0
                 targets = es2.replay_targets(spec.problems, answers, ok, vocab)
+                # A gold job's later rounds score their own gold answers for those problems, not this round's
+                gold = set(es2_rounds.gold_problems(spec, int(r.record["es"]["step"])))
+                targets = [t for t in targets if t[0] not in gold]
             ent = es2.entry(seed, [[j, c] for (j, *_), c in zip(rows, coefs)], scale, targets)
             mean = es.mean_reward(binary)
             r.record["es"] |= {"used": used, "update": ent["update"], "scale": ent["scale"],
