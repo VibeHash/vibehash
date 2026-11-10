@@ -55,7 +55,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .model import PRECISIONS, batch_indices
+from vibehash.model import PRECISIONS, batch_indices
 
 TARGETS = ("q", "k", "v", "o", "gate", "up", "down")  # the projections LoRA can adapt, in their order within a layer
 MODULES = {"q": "self_attn.q_proj", "k": "self_attn.k_proj", "v": "self_attn.v_proj", "o": "self_attn.o_proj",

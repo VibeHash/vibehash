@@ -39,7 +39,7 @@ TIMEOUT_S = 8.0  # for each request, with no retries: a Hub that's out of reach 
 TODAY = "small models sized to a CSV file"  # what the public network trains today
 # Architectures finetune.py trains (its FAMILIES, by the name config.json gives them).
 ARCHITECTURES = {"LlamaForCausalLM", "MistralForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM", "SmolLM3ForCausalLM"}
-FINETUNING = "https://github.com/AlphaChad5000/vibehash/blob/main/FINETUNING.md"
+FINETUNING = "https://github.com/VibeHash/vibehash/blob/main/FINETUNING.md"
 # The owner's words, shown wherever model names and emblems are (here, the guide, the README, emblems.py).
 DISCLAIMER = ("Disclaimer: All product names, logos, and brands are property of their respective owners and are "
               "used purely for identification. Vibe Hash isn't affiliated with or endorsed by them.")

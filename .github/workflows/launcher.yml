@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # to attach the files to the release
+  contents: read  # the build job only reads the checkout; only the release job below gets write
 
 jobs:
   build:
@@ -32,17 +32,28 @@ jobs:
             name: VibeHash-linux
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Test the launcher
         run: python -m unittest tests.test_launcher
+      # A tag build ships the launcher people download. With RELEASE_PUBKEYS empty it could not verify, so could not install,
+      # any release: fail the build rather than publish that. Paste the public key from scripts/make_release_key.py first.
+      - name: Refuse to release a launcher that has no release key
+        if: github.ref_type == 'tag'
+        shell: python
+        run: |
+          import sys
+          sys.path.insert(0, "launcher")
+          import vibehash_launcher
+          if not vibehash_launcher.RELEASE_PUBKEYS:
+              sys.exit("RELEASE_PUBKEYS in launcher/vibehash_launcher.py is empty: this launcher could not install any release. Paste the release public key first.")
       - name: Build one file (Windows, windowed, with the icon and pywebview)
         if: runner.os == 'Windows'
         run: |
-          python -m pip install --quiet pyinstaller "pywebview>=6.2"
-          python -m PyInstaller --onefile --windowed --name VibeHash --icon launcher/VibeHash.ico --add-data "launcher/VibeHash.ico;." --collect-all webview --hidden-import clr --hidden-import clr_loader --hidden-import tkinter --distpath dist launcher/vibehash_launcher.py
+          python -m pip install --quiet "pyinstaller==6.22.3" "pywebview==6.2.1"
+          python -m PyInstaller --onefile --windowed --name VibeHash --icon launcher/VibeHash.ico --add-data "launcher/VibeHash.ico;." --collect-all webview --hidden-import clr --hidden-import clr_loader --hidden-import tkinter --hidden-import ed25519_verify --distpath dist launcher/vibehash_launcher.py
       - name: Wrap it in the setup wizard (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -50,17 +61,31 @@ jobs:
           $v = if ($env:GITHUB_REF_NAME -match '^v(.+)$') { $Matches[1] } else { '0.0.0' }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=$v installer\VibeHash.iss
           Get-ChildItem dist
+      # Code signing is switched off (`if: false`) until a code-signing certificate exists. Once it does, store it as
+      # the secrets WINDOWS_CERT_PFX (base64) and WINDOWS_CERT_PASSWORD, delete the `if: false` line, and this step signs
+      # dist/VibeHash.exe and dist/VibeHash-Setup.exe with signtool before they are uploaded to the release.
+      - name: Sign the Windows files (disabled until a code-signing certificate exists)
+        if: false
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          & $signtool sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\VibeHash.exe dist\VibeHash-Setup.exe
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx"
       - name: Build one file (console)
         if: runner.os != 'Windows'
         run: |
-          python -m pip install --quiet pyinstaller
-          python -m PyInstaller --onefile --console --name VibeHash --distpath dist launcher/vibehash_launcher.py
+          python -m pip install --quiet pyinstaller==6.22.3
+          python -m PyInstaller --onefile --console --name VibeHash --hidden-import ed25519_verify --distpath dist launcher/vibehash_launcher.py
       - name: Name it for the release
         shell: bash
         run: |
           if [ "${{ runner.os }}" != "Windows" ]; then mv dist/VibeHash "dist/${{ matrix.name }}"; fi  # Windows: VibeHash.exe already
           ls -l dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: |
@@ -71,8 +96,10 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # to attach the files to the release
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: dist
           merge-multiple: true
@@ -81,6 +108,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          # publish.yml's manifest job may be creating the same release at this moment: if ours fails, it is enough that it exists now
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed."
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed." || \
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
           gh release upload "$tag" dist/VibeHash-Setup.exe dist/VibeHash.exe dist/VibeHash-macos dist/VibeHash-linux --repo "$GITHUB_REPOSITORY" --clobber

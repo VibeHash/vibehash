@@ -3,7 +3,7 @@
 Get this computer ready to work: node, wallet, GPU support, stake.
 
 ```
-vibehash setup [-h] [--node NODE] [--wallet WALLET] [--gpu {auto,skip}] [--stake STAKE] [--yes] [--deepseek {yes,no}] [--models-dir MODELS_DIR] [--models-gb MODELS_GB] [--keep-models {yes,no}] [--tls-fingerprint SHA256] [--tls-ca FILE]
+vibehash setup [-h] [--node NODE] [--wallet WALLET] [--gpu {auto,skip}] [--stake STAKE] [--yes] [--deepseek {yes,no}] [--models-dir MODELS_DIR] [--models-gb MODELS_GB] [--keep-models {yes,no}] [--tls-fingerprint SHA256] [--tls-ca FILE] [--tor] [--proxy URL] [--tor-mode {control-only,strict}]
 ```
 
 Flags:
@@ -19,6 +19,9 @@ Flags:
 - `--keep-models {yes,no}`: keep them after a job ends (default no).
 - `--tls-fingerprint SHA256`: trust the https node's certificate with this fingerprint (how workers trust a self-signed testnet node; ask its operator).
 - `--tls-ca FILE`: verify the https node's certificate with this CA file.
+- `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
+- `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
+- `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).
 
 Examples:
 

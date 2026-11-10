@@ -12,6 +12,7 @@ Every `vibehash` command and flag, written from the command line's own parser by
 ## Commands
 
 - [`vibehash setup`](setup.md): get this computer ready to work: node, wallet, GPU support, stake
+- [`vibehash update`](update.md): install the latest Vibe Hash release, only if its signature checks out
 - [`vibehash install-gpu`](install-gpu.md): find your graphics card and install the PyTorch build for it
 - [`vibehash testnet`](testnet.md): run a whole network on this computer: node, workers and a job
 - [`vibehash wallet`](wallet.md): wallets: make one, rebuild one from its recovery words, or show one's address

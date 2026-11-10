@@ -22,8 +22,9 @@ login; it appears in Settings > Apps with an uninstaller that stops Vibe Hash,
 removes everything it put on the machine and asks whether to delete your
 wallet (kept unless you say so). The first run then installs a Python of its
 own, Vibe Hash and the GPU build of PyTorch into `%LOCALAPPDATA%\VibeHash`,
-makes a wallet (no password; the recovery words are shown once in the window
-and kept in a file only you can read), and mines; every run after that just
+makes a wallet (no password: its key is kept in Windows Credential Manager,
+not in the wallet file; the recovery words are shown once in the window and not
+saved anywhere), and mines; every run after that just
 mines, and checks for a newer Vibe Hash once a day. Windows warns that it's
 from an unknown publisher, since it isn't code-signed yet: choose "More
 info", then "Run anyway". The wizard is [installer/VibeHash.iss](installer/VibeHash.iss)
@@ -65,7 +66,9 @@ Docker `CMD`), nothing waits for an answer. The wallet password comes from
 and the worker stop at once and say so. A new wallet's 24 recovery words are
 then not printed into the log, which other people may be able to read: they go
 to `recovery-words-ADDRESS.txt` in the settings folder, readable only by you,
-and the log says where. Copy them somewhere offline and delete the file.
+and the log says where. Copy them somewhere offline and delete the file. (This is for headless runs: on
+a desktop the app keeps a password-less wallet's key in the OS credential store
+and saves no words file at all; see `vibehash wallet create --no-password`.)
 `setup --deepseek yes` (or `no`) answers the DeepSeek question in advance, and
 `--yes` installs GPU support without asking:
 
@@ -149,6 +152,18 @@ Each wallet gets its own cache (`~/.vibehash/cache/ADDRESS`: checkpoints,
 datasets, receipts). Model weights are shared: when two workers need the same
 model, one downloads it while the other waits for it.
 
+**A code before sends (optional).** `vibehash wallet mfa on` makes an
+authenticator key for the wallet, keeps it in this computer's credential store
+(Windows Credential Manager, the macOS Keychain or the Secret Service; it needs
+`pip install keyring`, in the `app` extra), and shows the link to add it to an
+authenticator app. From then on `send`, `stake` and `unstake` ask for the app's
+6-digit code (`--code`, else `$VIBEHASH_CODE`, else asked for, each code good
+once) before anything is signed. `wallet mfa off` (asks for a code) and `wallet
+mfa status`. This stops casual use of an unlocked machine and mistaken or
+scripted sends; it does not stop malware that already reads your credential
+store. The worker never needs a code, and a headless server keeps using
+`VIBEHASH_PASSWORD`.
+
 **What the network knows about your machine.** Each round, a worker registers
 what kind of machine it is: the card's vendor and family, its memory and its
 usual name (`RTX 4060, 8 GB (nvidia sm_89)`; a CPU-only worker says how many
@@ -206,7 +221,8 @@ Every command, with its flags and an example, is in [docs/CLI.md](docs/CLI.md);
 
 Or let it look after itself. `python -m vibehash app` does setup without
 questions (the wallet's password from `$VIBEHASH_PASSWORD`, or asked once; a
-new wallet's recovery words go to a file only you can read), installs GPU
+new wallet's recovery words are shown once in the window and, headless, go to
+a file only you can read), installs GPU
 support, mines with the worker's live feed on, opens the window, and starts
 the worker again if it ever stops. `app pause`, `app resume`, `app stop` and
 `app status` drive it from another terminal, and `app startup on` starts it
@@ -242,8 +258,7 @@ confirm, deny, cancel or post, the ledger as blocks land, the devices online
 and the nodes. It talks to nodes started with `--admin-token` (or
 `$VIBEHASH_ADMIN_TOKEN`), which adds a few routes behind that token: a hold
 on a job (the node leads no round for it until released) and the devices'
-addresses, looked up in batches at ip-api.com and cached a month, never for
-private ones; Settings turns the lookups off. Cancel and post sign with your
+addresses, which are looked up only if you turn that on in Settings (see below). Cancel and post sign with your
 wallet, unlocked in the page. Nodes, tokens and the wallet are saved under
 `"admin"` in config.json. To keep it as an app, `--install-shortcut` puts
 "Vibe Hash Admin", with its own violet icon, in the Start menu (the apps menu
@@ -267,6 +282,13 @@ private network. Behind a reverse proxy, the proxy must set
 `X-Forwarded-For`, or every client looks like the proxy and anyone's wrong
 guesses lock everyone out.
 
+A node with an admin token that listens beyond this computer (`--host`
+anything but 127.0.0.1 or `::1`) refuses to start without `--admin-mfa`; a
+test rig can say `--admin-allow-no-mfa` (unsafe). With the key, holding or
+releasing a job and switching review also ask for a fresh code (a new one,
+not the one the sign-in used; the admin app asks for it), since each changes
+what the network does.
+
 ```bash
 python -m vibehash admin --new-token
 python -m vibehash admin --new-mfa
@@ -279,7 +301,13 @@ What a node learns about a miner: the address its worker connects from, and
 what the worker reports of its machine (speed, memory and hardware class).
 The node keeps these in memory only and never serves them on a public route.
 It shows them to its operators in the admin app, which looks up each
-address's rough place (city and country) at ip-api.com to draw the globe.
+address's rough place (city and country) to draw the globe, but only if the
+operator turns that on in its Settings: geo lookups are off by default. When
+on, the addresses of connecting miners (and nothing else) are sent in batches
+to an HTTPS geo service, ipinfo.io by default with the operator's token in
+`$VIBEHASH_GEO_TOKEN`; `$VIBEHASH_GEO_URL` names another `https://` service
+(plain `http://` is refused). Places are cached a month, never looked up for
+private addresses, and the lookups are forced off whenever a proxy is in use.
 Your wallet address and what it earns are public on the chain, as on any
 blockchain.
 
@@ -334,8 +362,7 @@ model would take, and stops there: it posts nothing and spends nothing. Run
 in a terminal with no data file, `train` offers the same choice as a
 numbered menu, with today's CSV model first. A data file without `--base` is
 read as a table, as before. When a fine-tune trains, its dashboard forges the
-model maker's emblem in place of the blade (`scripts/preview_forge.py NAME`
-shows one now).
+model maker's emblem in place of the blade.
 
 **Fine-tuning** a model the list marks `ready` (one GPU holds it, and it's a
 Llama, Mistral, Qwen or SmolLM) works on any network whose node runs this
@@ -347,6 +374,7 @@ pip install "vibehash[finetune]"          # the tokenizer and chat templates, fo
 python -m vibehash testnet --job none --workers 3 --device cuda
 python -m vibehash train chats.jsonl --base qwen3-0.6b --node http://127.0.0.1:8545 --wallet ~/.vibehash/testnet/requester.json
 python -m vibehash job download           # a LoRA adapter for transformers, PEFT and vLLM
+python -m vibehash job download --merged  # or the whole model, the adapter folded in
 ```
 
 `chats.jsonl` holds one chat a line, `{"messages": [{"role": "user", ...},
@@ -388,6 +416,16 @@ is lost, and anyone who sees them can take its coins:
 python -m vibehash wallet restore
 ```
 
+A wallet made with `--no-password` keeps its key in the OS credential store
+(Windows Credential Manager, macOS Keychain, Secret Service), and its file holds
+only ciphertext: the file alone, copied to another computer or user, can't be
+opened, so restore from the words there. Where no store works, the key is kept in
+the file in the clear (and a loud line says so); `--insecure-plaintext` asks for
+that on purpose, for tests and throwaway keys. A plaintext wallet from an earlier
+release is moved into the store on the next start of the app, keeping
+`wallet.json.bak` until the new file has opened once. Files in this format need
+0.5.28 or later.
+
 `wallet restore` asks for the words (the first four letters of each are
 enough) and a new password. Add `--passphrase` if you gave the words one, and
 `--out FILE` to restore somewhere other than the default wallet.
@@ -410,6 +448,42 @@ your driver and Python version, installs the newest one that fits, and
 self-tests it. `vibehash devices` shows what's usable. Workers use the first
 GPU they find; `--device cpu|cuda|cuda:1|xpu|mps` overrides it. One worker uses
 one GPU: for more, see "Several GPUs" above.
+
+### Using Tor
+
+To hide your address from the node, run Tor (the Tor daemon on port 9050, or Tor
+Browser, which listens on 9150) and add `--tor` to a command: `vibehash worker
+--tor`, `vibehash send --tor ...`. It works on every command that takes `--node`,
+and on `node` and `admin`; for posting a job that is the top-level `post-job`.
+The offline `wallet create|restore|mfa|show` commands take no `--tor`: they
+never touch a node, so there is nothing to route. `--proxy socks5h://HOST:PORT` uses another SOCKS
+proxy, and `vibehash setup --tor` remembers the choice (the `proxy` and
+`tor_mode` settings), so later commands and the menu use it without the flag.
+
+- **`socks5h`, not `socks5`.** The `h` means the proxy looks up the node's name.
+  With plain `socks5://` (or `socks4://`) this computer asks its DNS resolver
+  first, which tells whoever runs it which node you use, so Vibe Hash refuses
+  those URLs and says why.
+- **Two modes (`--tor-mode`).** `control-only` sends every JSON request (status,
+  transactions, work units) through Tor but sends a checkpoint or dataset of
+  more than 50 MB straight to the node, with one warning in the log: through
+  Tor's speed a big file misses the round's deadline. `strict` sends everything
+  through Tor and refuses a transfer over 50 MB (use `control-only` for that).
+  The default is `strict` for `send`, `stake`, `unstake`, `post-job` and the
+  wallet commands, and `control-only` for `worker`, `app`, `node` and `admin`.
+  Public model files from the Hugging Face Hub follow the same split: direct
+  under `control-only`, through Tor under `strict`. Update and release traffic
+  (`vibehash update`, and the launcher fetching a release from GitHub and PyPI)
+  is not node traffic: it goes direct and ignores a saved proxy.
+- **Onion addresses.** A node run with `--onion ADDR.onion` shows the address in
+  `/status`; `setup` and the menu print it when a proxy is on ("reach this node
+  at ... to avoid exit-node blocks"). A `.onion` node is reached through the
+  local Tor even without `--tor` (it cannot be reached otherwise), always
+  through Tor whatever the size, and over plain `http://` is fine: a v3 onion
+  address is the service's public key, so the connection is authenticated and
+  encrypted end to end without a certificate.
+- **Operators.** `admin --tor` also turns the admin app's place lookups off, so
+  no address is sent outside the proxy.
 
 ## Evo mode: training by evolution, the chain is the model
 
@@ -544,7 +618,7 @@ Releases publish themselves from GitHub. `.github/workflows/publish.yml` runs
 when a version tag is pushed: it checks the tag matches `pyproject.toml`, runs
 the fast tests, builds the wheel and source archive, and uploads them to PyPI
 through a **trusted publisher**, so no API token is stored anywhere. PyPI's
-trusted publisher for `vibehash` names owner `AlphaChad5000`, repository
+trusted publisher for `vibehash` names the owner recorded in PyPI's trusted-publisher settings, repository
 `vibehash`, workflow `publish.yml` and environment `pypi`.
 
 1. Bump `version` in `pyproject.toml` (PyPI never accepts the same version
@@ -560,6 +634,51 @@ git push origin v0.5.11
 
 Follow the run under the repository's Actions tab. To try a build locally
 first, `python -m build` writes the packages to `dist/`.
+
+### The signed release manifest
+
+Nothing installs a release on trust. After the wheel is on PyPI, the `manifest`
+job of `publish.yml` (it needs `publish`, so a manifest never names a wheel PyPI
+doesn't have) attaches three files to the tag's GitHub release:
+
+- `requirements-<version>.txt`: every package the release needs, each pinned by
+  hash, the release's own wheel included (`uv pip compile ... --generate-hashes
+  --universal --no-emit-package torch`, then `scripts/release_manifest.py` puts the
+  built wheel's hash on the `vibehash==` line). PyTorch is left out on purpose, so
+  the GPU build `vibehash install-gpu` chose is never replaced. It includes the
+  `finetune`, `app` and `evo` extras, so there is one update path for the launcher,
+  the menu and `vibehash update`.
+- `release.json`: the manifest, with `version`, `wheel`, `wheel_sha256`,
+  `requirements`, `requirements_sha256`, `published` and `min_launcher`.
+- `release.sig`: the hex Ed25519 signature over `vibehash.crypto.canonical` of
+  that manifest (sorted keys, no spaces, ASCII).
+
+The launcher (`launcher/vibehash_launcher.py`) and `vibehash update` fetch the
+manifest from `releases/latest/download`, check the signature against
+`RELEASE_PUBKEYS`, check the requirements file against `requirements_sha256`, and
+install it with `--require-hashes`, so pip refuses any file not listed by hash.
+No key configured, a bad signature, a hash that doesn't match, or an older
+version: nothing is installed and one line says why. Developers can set
+`VIBEHASH_DEV=1` to make the launcher install the latest release from PyPI
+unverified; nothing else skips the check. The launcher also pins the hash of each
+uv download (`UV_SHA256`); when you bump `UV_VERSION`, update every hash.
+
+**The signing key, once.** Run `python scripts/make_release_key.py release.key`.
+It prints the public key and writes the secret to `release.key` (readable by you
+alone, never printed). Paste the public key into `RELEASE_PUBKEYS` in
+`launcher/vibehash_launcher.py` and `vibehash/settings.py` (until then both lists
+are empty and installers update nothing), store the file's contents as the secret
+`RELEASE_SIGNING_KEY` of the `pypi` environment, keep one offline copy, and
+delete the file. With no secret set the `manifest` job says so and attaches
+nothing: that release is still on PyPI, and installers skip updating to it.
+
+**Rotating the key.** Make a new pair, add its public key to both
+`RELEASE_PUBKEYS` lists next to the old one and publish a release signed with the
+old key, so installers learn both. Then switch `RELEASE_SIGNING_KEY` to the new
+secret for later releases, and drop the old public key in a release after the
+launchers in the field have had time to update. Launchers older than 1.2 keep
+updating the package without verifying it and never replace their own `.exe`;
+the dashboard tells them to download the new installer.
 
 ## Run a public node
 
@@ -579,11 +698,14 @@ listens on IPv4 only, so give it no AAAA record. Then copy the script over and
 run it:
 
 ```bash
-scp deploy/setup-node.sh root@SERVER-IP:
+scp -r deploy root@SERVER-IP:
 ```
 ```bash
-ssh root@SERVER-IP bash setup-node.sh --domain node.vibehash.org --fund YOUR-WALLET-ADDRESS=10000
+ssh root@SERVER-IP bash deploy/setup-node.sh --domain node.vibehash.org --fund YOUR-WALLET-ADDRESS=10000
 ```
+
+The script needs the other files in `deploy/` beside it (the backup, health
+check and alert scripts and their systemd units), so copy the whole folder.
 
 `--fund` gives one wallet test VIBE to post the first training jobs, since
 with earn-in nobody else starts with any. Running the script again upgrades
@@ -595,7 +717,10 @@ include both in backups.
 To open the admin routes on it, add `VIBEHASH_ADMIN_TOKEN=...` and
 `VIBEHASH_ADMIN_MFA=...` lines to `/etc/vibehash/env` (made with `vibehash
 admin --new-token` and `--new-mfa`), then run `systemctl restart
-vibehash-node`. Running the script again keeps them.
+vibehash-node`. Running the script again keeps them. A node that listens
+publicly won't start with a token and no key, so if you add only the token and
+run the script again, it makes the key, appends `VIBEHASH_ADMIN_MFA` to the
+same file and prints the link (and a QR code, with `qrencode`) once at the end.
 
 ### Lock down the server
 
@@ -628,10 +753,10 @@ same tailnet. The script leaves SSH rules alone once the firewall is on, so
 upgrading doesn't reopen port 22. Upgrade as your own user:
 
 ```bash
-scp deploy/setup-node.sh YOU@SERVER:
+scp -r deploy YOU@SERVER:
 ```
 ```bash
-ssh -t YOU@SERVER sudo bash setup-node.sh --domain node.vibehash.org
+ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --domain node.vibehash.org
 ```
 
 ### A second network on the same server
@@ -641,7 +766,7 @@ testnet, say. Give it a name, its own domain (an A record to the same
 server), a port other than 443 and its own chain id:
 
 ```bash
-ssh -t YOU@SERVER sudo bash setup-node.sh --name evo --domain evo.vibehash.org --port 8443 --chain-id vibehash-evo-1 --es --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
+ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --name evo --domain evo.vibehash.org --port 8443 --chain-id vibehash-evo-1 --es --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
 ```
 
 - `--name evo` keeps it apart: `/var/lib/vibehash-evo`, `/etc/vibehash-evo`,
@@ -655,6 +780,66 @@ ssh -t YOU@SERVER sudo bash setup-node.sh --name evo --domain evo.vibehash.org -
 
 Both nodes share the server's Vibe Hash install, so after upgrading one,
 restart the other too: `sudo systemctl restart 'vibehash-node*'`.
+
+### Backups, alerts and Tor
+
+Losing the server loses the chain unless it is backed up. The script sets up a
+daily backup, a health check every five minutes, and an alert for either
+failing. A named node gets its own copies (`vibehash-backup-evo.timer`, and so
+on). Also turn on weekly snapshots for the droplet in the DigitalOcean control
+panel.
+
+- **What is backed up.** `backup.sh` (run by `vibehash-backup.timer`) makes a
+  consistent online copy of the chain database with `sqlite3 .backup`, gzips it
+  into `/var/lib/vibehash/backup/` beside the genesis and the node's wallet, and
+  keeps the newest 14. If `BACKUP_RCLONE_REMOTE` is set it then sends the
+  checkpoints (`blobs/`) and that folder to the remote with `rclone`. The
+  checkpoints reach 1 GiB each and go straight from their folder to the remote,
+  never to a copy on the server's own disk.
+- **Set the remote.** Make one with `sudo rclone config --config
+  /etc/vibehash/rclone.conf` (S3-style remotes such as DigitalOcean Spaces work;
+  `sudo chgrp vibehash /etc/vibehash/rclone.conf && sudo chmod 640
+  /etc/vibehash/rclone.conf` lets the backup read it), then put
+  `BACKUP_RCLONE_REMOTE=spaces:vibehash-backups/public-1` in
+  `/etc/vibehash/env`. Until you do, the log warns that the **blobs are not
+  backed up** and the chain copy is on the server only. Try it with `sudo
+  systemctl start vibehash-backup && journalctl -u vibehash-backup -n 20`.
+- **Asking for a backup, and what happened.** The node (an unprivileged user)
+  asks for one by writing `{"requested_at": <unix time>}` to
+  `/var/lib/vibehash/backup/request`, atomically; `vibehash-backup.path` sees
+  it and starts the backup, which deletes the file as it starts. Every run,
+  failed or not, writes `backup/last_backup.json`:
+  `{"timestamp": <unix>, "chain_bytes": <size of the chain archive>,
+  "remote_ok": <true only if a remote is set and both rclone steps worked>,
+  "error": <text or null>}`. With no remote, `remote_ok` is false and `error` is
+  `"no BACKUP_RCLONE_REMOTE: blobs not backed up"`. The health check keeps
+  `/var/lib/vibehash/health.json`:
+  `{"checked_at": <unix>, "height": <int or null>, "tip_time": <unix or null>,
+  "ok": <bool>, "reason": <text or null>}`, where `tip_time` is when the check
+  first saw that height (`/status` has no block time).
+- **The wallet's password is not backed up.** The wallet in the backup is
+  encrypted with `VIBEHASH_PASSWORD` from `/etc/vibehash/env`: keep that
+  somewhere safe too.
+- **Restore.** On a new server run `setup-node.sh` first (same `--name` and
+  `--chain-id`), then follow `/usr/local/lib/vibehash/backup.sh --restore-hint`:
+  stop the node, `rclone copy` the `chain/` folder back, `gunzip` the chosen
+  archive to `data/chain.sqlite3`, `rclone sync` the `blobs/` back, start the
+  node.
+- **Alerts.** `healthcheck.sh` fails (and so does the unit) when the node
+  doesn't answer `/status`, says it halted itself, or has been mid-round or
+  holding transactions for 15 minutes without a new block. A chain with no job
+  makes no blocks, so an idle node is healthy at any height. A failing backup
+  or health check starts `vibehash-alert@.service`, which posts the unit's name
+  and last 20 log lines as JSON (`text` and `content` keys: Discord, Slack and
+  ntfy take it) to `ALERT_WEBHOOK` in `/etc/vibehash/env`. With no webhook it
+  only writes to the journal.
+- **Tor.** Run the script with `--enable-tor` to give the node a hidden
+  service. It installs `tor`, forwards the `.onion` address's port 443 to the
+  node's HTTPS port, starts the node with `--onion ADDR.onion` and prints the
+  address; `/status` then shows it as `onion`. Tor users can reach the node
+  there without Cloudflare blocking Tor exit nodes. The certificate is for the
+  node's domain, so a client trusts it by fingerprint (`vibehash setup --node
+  https://ADDR.onion --tls-fingerprint FINGERPRINT`).
 
 ## Run a network for other people
 
@@ -817,11 +1002,11 @@ to follow the chain, spot deposits, send withdrawals and read the supply.
 
 ## Simulate the economics
 
-Runs the same round logic as a real node, with 14 simulated rigs (7 of them
-cheating), in a few seconds:
+`vibehash testnet` runs the same round logic as a real node on one computer, in
+a few seconds, so you can watch rewards, checks and penalties play out:
 
 ```bash
-python simulate.py --rounds 20
+vibehash testnet
 ```
 
 ## Tests
@@ -885,7 +1070,7 @@ rule; `tests/test_setup.py` runs `setup` and `worker` with no terminal.
 | `vibehash/records.py` | What's kept on disk: workers' event logs and a line per round, a job's history, the page beside a downloaded model |
 | `vibehash/minerui.py` | The terminal mining dashboard (plain ANSI, ASCII fallback) |
 | `vibehash/trainui.py` | The terminal training dashboard: a job followed live from the node, politely, with a log-line mode |
-| `vibehash/emblems.py` | Pixel-art emblems of the model makers, which the training dashboard forges instead of a blade for a fine-tune (`scripts/preview_forge.py NAME` plays one) |
+| `vibehash/emblems.py` | Pixel-art emblems of the model makers, which the training dashboard forges instead of a blade for a fine-tune |
 | `vibehash/termui.py` | What the two dashboards share: palette, the mine's rock, banner, phase bar, event feed, the alternate screen |
 | `vibehash/tabular.py` | CSV files to training datasets, and downloaded models to predictions |
 | `vibehash/catalog.py` | The open-weight models `models` lists and `train --base` describes: live facts from Hugging Face, cached, the GPUs a team would need, and which are ready to fine-tune. `scripts/bake_models.py` writes them into the guide |
@@ -906,7 +1091,6 @@ rule; `tests/test_setup.py` runs `setup` and `worker` with no terminal.
 | `vibehash/filelock.py` | Locks between processes on one computer, so workers sharing it don't fetch the same model into the same files |
 | `vibehash/settings.py` | `~/.vibehash`: the default wallet, and the node address and its TLS trust that `setup` saves |
 | `vibehash/gpusetup.py` | GPU detection before PyTorch is installed; picks and installs the PyTorch build for the card |
-| `vibehash/protocol.py` | In-process driver for simulations |
 | `vibehash/shards.py` | Prototype, not yet used by the protocol: a model split into shards across workers, checked one shard at a time ([SHARDING.md](SHARDING.md)) |
 
 ## Status

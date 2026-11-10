@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import ipaddress
 import json
 import logging
 import os
@@ -37,7 +38,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import advice, crypto, filelock, hardware, mnemonic, modelstore, settings, tls, unattended
+from . import advice, credstore, crypto, filelock, hardware, mnemonic, modelstore, nodeadmin, proxy, settings, tls, unattended
 from . import economics as econ
 from . import fees
 from . import wallet as wallets
@@ -78,8 +79,9 @@ def password(prompt: str, confirm: bool = False) -> str | None:
 
 
 def load_wallet(path: str) -> KeyPair:
-    pw = password(f"Password for {path}: ") if wallets.is_encrypted(path) else None
-    if pw is None and wallets.is_encrypted(path):
+    asks = wallets.kind(path) == "password"  # a plain wallet has none, and a store wallet's key is in the credential store
+    pw = password(f"Password for {path}: ") if asks else None
+    if pw is None and asks:
         raise unattended.need(f"the password of {path}", "set VIBEHASH_PASSWORD to it (`export VIBEHASH_PASSWORD=...`; "
                               "in PowerShell, `$env:VIBEHASH_PASSWORD = \"...\"`)")
     return wallets.load(path, pw)
@@ -174,25 +176,49 @@ def show_words(words: str, indent: str = "") -> None:
     print()
 
 
-def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tuple[str, str | None]:
+def ensure_wallet(path: Path, indent: str = "", no_password: bool = False,
+                  caller_shows_words: bool = True) -> tuple[str, str | None, str | None]:
     """The wallet at `path`, made if there is none: its password asked for (or $VIBEHASH_PASSWORD; with neither, the
     error says so), its recovery words shown once or saved to a file when nobody is watching. -> (address, the
-    password a new wallet was made with, else None). `no_password`: make it without one, as `wallet create
-    --no-password` does, for an app that must start with no question: the file is then as safe as the user's
-    account, and the recovery words still restore it."""
+    password a new wallet was made with, else None, the recovery words when the caller must show them, else None).
+    `no_password`: make it without one, as `wallet create --no-password` does, for an app that must start with no
+    question: the key goes into this account's credential store and the file holds only ciphertext, and the words
+    come back in the tuple, never printed and never written, for the caller to show once. Where no store works the
+    key is in the file in the clear, the words go to a file as before, and a loud line says so. A plaintext wallet
+    that already exists is moved into the store when there is one (wallets.migrate_plaintext). `caller_shows_words`:
+    whether whoever called will show the returned words once (the app's window); when nobody will (`app
+    --no-window`, a start at login), the words go to the private file and its note as in a headless setup, since
+    otherwise they would be lost for good."""
     if path.exists():
         address = json.loads(path.read_text())["address"]
         print(f"{indent}using {path}\n{indent}address {checksummed(address)}")
-        return address, None
+        if wallets.kind(path) == "plain" and wallets.migrate_plaintext(path):
+            print(f"{indent}moved this wallet's key into the credential store (a copy of the old file stays beside it "
+                  "as .bak until the next start has opened the new one)")
+        return address, None, None
     if no_password and "VIBEHASH_PASSWORD" not in os.environ:
         words = mnemonic.generate()
         keys = mnemonic.keypair(words)
+        refused = ""
+        if credstore.available():
+            try:
+                wallets.save(keys, path, None, mnemonic.PATH, store=True)
+            except wallets.WalletError as e:  # the probe passed but the real entry was refused (a locked keychain, say)
+                refused = str(e)
+            else:
+                print(f"{indent}created {path} (key in this account's credential store)\n{indent}address {checksummed(keys.address)}")
+                if caller_shows_words:
+                    return keys.address, None, words
+                print(unattended.words_note(unattended.save_words(words, keys.address, path), indent))
+                return keys.address, None, None
         wallets.save(keys, path, None, mnemonic.PATH)
-        print(f"{indent}created {path} (no password: as safe as this user account)\n{indent}address {checksummed(keys.address)}")
-        # Always to the file, whether or not this is a terminal: the app's log scrolls on into the worker's, and
-        # someone who started it once and forgot it must still find the words later.
+        print(f"{indent}created {path}\n{indent}address {checksummed(keys.address)}")
+        print(f"{indent}no credential store on this system: the key is stored in the clear; set VIBEHASH_PASSWORD to encrypt it"
+              + (f" ({refused})" if refused else ""))
+        # To the file, whether or not this is a terminal: with no store there is nowhere else the words survive, and
+        # someone who started it once and forgot it must still find them later.
         print(unattended.words_note(unattended.save_words(words, keys.address, path), indent))
-        return keys.address, None
+        return keys.address, None, None  # (in the file, which the window reads: not also held for a second showing)
     pw = password(f"{indent}Choose a wallet password: ", confirm=True)
     if pw is None:
         raise unattended.need("a wallet password", "set VIBEHASH_PASSWORD to the one you want; the worker reads it "
@@ -204,7 +230,7 @@ def ensure_wallet(path: Path, indent: str = "", no_password: bool = False) -> tu
     wallets.save(keys, path, pw, mnemonic.PATH)
     print(f"{indent}created {path}\n{indent}address {checksummed(keys.address)}")
     give_words(words, keys.address, path, indent)
-    return keys.address, pw
+    return keys.address, pw, None
 
 
 def give_words(words: str, address: str, wallet: Path, indent: str = "") -> None:
@@ -238,13 +264,28 @@ def _passphrase(a, confirm: bool) -> str:
 
 
 def _new_wallet_password(a) -> str | None:
-    pw = None if a.no_password else password("New wallet password: ", confirm=True)
-    if not a.no_password and pw is None:
+    none = a.no_password or getattr(a, "insecure_plaintext", False)
+    pw = None if none else password("New wallet password: ", confirm=True)
+    if not none and pw is None:
         raise unattended.need("a wallet password", "set VIBEHASH_PASSWORD to the one you want (or pass --no-password "
-                              "for a throwaway test key)")
-    if not a.no_password and not pw:
-        sys.exit("a password is required (or pass --no-password for a throwaway test key)")
+                              "to keep the key in this account's credential store)")
+    if not none and not pw:
+        sys.exit("a password is required (or pass --no-password to keep the key in this account's credential store)")
     return pw
+
+
+def _save_new(keys: KeyPair, out: Path, pw: str | None, a, hd_path: str) -> None:
+    """Write a new wallet file as asked: a password, else (`--no-password`) the key in the credential store, else
+    (`--insecure-plaintext`, or no store on this system, said loudly) the key in the clear."""
+    if pw or getattr(a, "insecure_plaintext", False):
+        wallets.save(keys, out, pw, hd_path)
+    elif credstore.available():
+        wallets.save(keys, out, None, hd_path, store=True)
+        print("the key is in this account's credential store; the file holds only ciphertext")
+    else:
+        wallets.save(keys, out, None, hd_path)
+    if wallets.kind(out) == "plain":
+        print("warning: no password and no credential store: the key is stored in the clear", file=sys.stderr)
 
 
 def cmd_wallet_create(a):
@@ -254,11 +295,9 @@ def cmd_wallet_create(a):
     words = mnemonic.generate()
     keys = mnemonic.keypair(words, _passphrase(a, confirm=True))
     pw = _new_wallet_password(a)
-    wallets.save(keys, out, pw, mnemonic.PATH)
+    _save_new(keys, out, pw, a, mnemonic.PATH)
     print(f"created {out}\naddress: {checksummed(keys.address)}")
     give_words(words, keys.address, out)
-    if not pw:
-        print("warning: stored unencrypted", file=sys.stderr)
 
 
 def cmd_wallet_restore(a):
@@ -268,10 +307,8 @@ def cmd_wallet_restore(a):
         sys.exit(f"{out} already exists; refusing to overwrite a wallet (restore with --out NEW-FILE)")
     keys = mnemonic.keypair(mnemonic.check(_read_words()), _passphrase(a, confirm=False), a.path)
     pw = _new_wallet_password(a)
-    wallets.save(keys, out, pw, a.path)
+    _save_new(keys, out, pw, a, a.path)
     print(f"restored {out}\naddress: {checksummed(keys.address)}")
-    if not pw:
-        print("warning: stored unencrypted", file=sys.stderr)
 
 
 def cmd_wallet_show(a):
@@ -362,9 +399,20 @@ def _describe_economics(e: econ.Economics) -> str:
             f"(~{span} of {econ.MAINNET_BLOCK_S} s rounds); {fmt(e.total_issuance())} issued in total{cap}")
 
 
+def _loopback(host: str) -> bool:
+    """Whether a --host listens on this computer only: localhost, or a loopback address (not a private network's)."""
+    host = host.strip().strip("[]").lower().split("%")[0]
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def cmd_node(a):
     from .coordinator import CoordinatorConfig
-    from .node import FolderInUse, Node, PhaseTimes, bucket_from_env  # only nodes need the server
+    from .node import HALT_EXIT, RESTART_EXIT, FolderInUse, Node, PhaseTimes, bucket_from_env  # only nodes need the server
     from .ratelimit import Limits
 
     if crypto.BACKEND != "openssl":
@@ -383,13 +431,17 @@ def cmd_node(a):
             compute.use(compute.get_backend(a.device, logging.getLogger("vibehash.node")))
         except RuntimeError as e:
             sys.exit(f"error: {e}")
-    from . import nodeadmin
     try:  # an admin token too short to be safe, or an authenticator key that isn't one: say so before anything starts
         nodeadmin.check_token(a.admin_token)
         if a.admin_mfa and not a.admin_token:
             raise ValueError("--admin-mfa needs --admin-token too")
         if a.admin_mfa:
             nodeadmin.mfa_key(a.admin_mfa)
+        if a.admin_token and not a.admin_mfa and not a.admin_allow_no_mfa and not _loopback(a.host):
+            raise ValueError(f"the admin routes would be reachable from other computers (--host {a.host}) behind a token alone. "
+                             f"Make an authenticator key with `{prog()} admin --new-mfa` and give it to the node with "
+                             "--admin-mfa KEY (or $VIBEHASH_ADMIN_MFA), or bind 127.0.0.1")
+        nodeadmin.parse_allow(os.environ.get(nodeadmin.ALLOW_ENV))  # a network that isn't one, before anything starts
     except ValueError as e:
         sys.exit(f"error: {e}")
     try:
@@ -397,7 +449,8 @@ def cmd_node(a):
                     keep_rounds=a.keep_rounds, limits=limits, tls=context, peers=[normalise_url(p) for p in a.peer or []],
                     announce=normalise_url(a.announce) if a.announce else None, max_job_bytes=int(a.max_job_mb * 2**20),
                     bucket=bucket_from_env(),  # DeepSeek jobs' hand-offs, if $VIBEHASH_BUCKET_* are set
-                    min_client=a.min_client, admin_token=a.admin_token, admin_mfa=a.admin_mfa).start()
+                    min_client=a.min_client, admin_token=a.admin_token, admin_mfa=a.admin_mfa,
+                    onion=a.onion, model_access=a.model_access).start()
     except FolderInUse as e:
         sys.exit(f"error: {e}")
     if context:
@@ -408,13 +461,17 @@ def cmd_node(a):
         for path in a.dataset:
             print(f"dataset {path} -> {node.store.add_dataset(path)}")
     try:
-        while not node.halted:
+        while not node.halted and not getattr(node, "restart_requested", None):
             time.sleep(1)
     except KeyboardInterrupt:
         pass
     node.stop()
     if node.halted:  # a block it couldn't save (Node._halt): it ends, rather than run on serving what isn't on disk
-        sys.exit(f"error: {node.halted}")
+        print(f"error: {node.halted}", file=sys.stderr)
+        sys.exit(HALT_EXIT)  # systemd leaves it down (setup-node.sh: RestartPreventExitStatus): no restart loop
+    if getattr(node, "restart_requested", None):  # an admin's restart (POST /admin/restart): systemd starts it again
+        print(f"restarting: {node.restart_requested}", file=sys.stderr)
+        sys.exit(RESTART_EXIT)
 
 
 def cmd_tls_cert(a):
@@ -497,6 +554,12 @@ def evo_network(node) -> bool:
         return False
 
 
+def deepseek_wanted(a) -> bool:
+    """Whether the worker takes DeepSeek work: `--deepseek yes`, else the saved choice. Frozen, so off unless chosen
+    (the first-run "ask" default only exists under VIBEHASH_DEEPSEEK_PILOT=1)."""
+    return (getattr(a, "deepseek", None) or settings.deepseek_choice()) == "yes"
+
+
 def _mine(a, keys: KeyPair):
     from . import minerui, selftest
     from .wire import MAX_CLOCK_SKEW_S
@@ -514,7 +577,7 @@ def _mine(a, keys: KeyPair):
         _chosen_job(NodeClient(url), job, url)
     if getattr(a, "deepseek", None):
         settings.save(deepseek=a.deepseek)  # remembered: the next `vibehash worker` does the same
-    deepseek = (getattr(a, "deepseek", None) or settings.load().get("deepseek", "ask")) == "yes"
+    deepseek = deepseek_wanted(a)
     try:
         w = WorkerClient(url, keys, a.memory_mb, a.flops, device=a.device, cache_dir=a.cache_dir, deepseek=deepseek,
                          job=job)
@@ -706,6 +769,14 @@ def _setup_gpu(assume_yes: bool) -> bool:
     return any(d["ready"] for d in found if d["id"] != "cpu")
 
 
+def cmd_update(a):
+    from . import update
+
+    code = update.update(reinstall=a.evo, variant="evo" if a.evo else "base")
+    if code:
+        sys.exit(code)
+
+
 def cmd_install_gpu(a):
     print("Graphics card")
     _setup_gpu(a.yes)
@@ -730,6 +801,11 @@ def cmd_setup(a):
     if url:
         url = normalise_url(url, https=bool(a.tls_fingerprint or a.tls_ca))
         settings.save(node=url)
+        if a.tor or a.proxy:  # remembered: every later command goes through it (tor_mode only if chosen)
+            settings.save(**{settings.PROXY_KEY: proxy.active()[0]})
+            print(f"   node traffic goes through {proxy.active()[0]} from now on")
+        if a.tor_mode:
+            settings.save(**{settings.TOR_MODE_KEY: a.tor_mode})
         if a.tls_fingerprint or a.tls_ca:
             settings.save_tls_trust(url, a.tls_ca and str(Path(a.tls_ca).resolve()),
                                     a.tls_fingerprint and tls.normalize_fingerprint(a.tls_fingerprint))
@@ -737,6 +813,9 @@ def cmd_setup(a):
         try:
             status = NodeClient(url, timeout=30).status()
             print(f"   connected to {url}: network {status['chain_id']}, block {status['height']}")
+            hint = proxy.onion_hint(status)
+            if hint:
+                print(f"   {hint}")
         except NodeError as e:
             hint = (advice.explain(e, url) or str(e)).replace("\n", "\n   ")
             print(f"   saved {url}, but {hint}\n   Run setup again once it answers (`{prog()} selftest` checks it).")
@@ -745,7 +824,7 @@ def cmd_setup(a):
 
     print("\n2. Wallet")
     path = settings.wallet_path(a.wallet) or settings.default_wallet()
-    address, pw = ensure_wallet(path, "   ")
+    address, pw, _ = ensure_wallet(path, "   ")
     keys = None if pw is None else wallets.load(path, pw)  # (a wallet made just now: no second password for staking)
     settings.save(wallet=str(path))
     if a.deepseek:
@@ -871,16 +950,161 @@ def cmd_balance(a):
     print(f"tx fee:     {fmt(node.min_fee())} per transaction on this node, paid from the balance")
 
 
+MFA_SCOPE = ("With `wallet mfa on`, a send, stake or unstake from this wallet first asks for the code an authenticator app "
+             "shows (--code, else $VIBEHASH_CODE, else asked for). That stops casual use of an unlocked machine and "
+             "mistaken or scripted sends; it does not stop malware that already reads this user's credential store. "
+             "The worker never needs a code.")
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _last_step_account(address: str) -> str:
+    """The credential-store account (under WALLET_TOTP) holding the last authenticator step this wallet's gate took."""
+    return f"{address}:last"
+
+
+def _take_wallet_code(address: str, key_text: str, code: str) -> bool:
+    """Whether `code` is the authenticator app's code of now (one step either side) and of a later step than any taken
+    before; if so that step is kept in the credential store, so each code is good once across every run of the CLI.
+    Unavailable when the store can't say or keep the last step (the code is then not taken)."""
+    code = re.sub(r"\s", "", str(code or ""))
+    if not (len(code) == nodeadmin.CODE_DIGITS and code.isdigit()):
+        return False
+    last = credstore.get(credstore.WALLET_TOTP, _last_step_account(address))
+    try:
+        floor = int(last) if last is not None else None
+    except ValueError:  # (not something this writes: the store is the user's own, and holds the key itself)
+        floor = None
+    key, step = nodeadmin.mfa_key(key_text), int(_now() // nodeadmin.CODE_STEP)
+    for c in (step - 1, step, step + 1):
+        if (floor is None or c > floor) and nodeadmin.totp(key, c) == code:
+            credstore.put(credstore.WALLET_TOTP, _last_step_account(address), str(c))
+            return True
+    return False
+
+
+def _ask_wallet_code(a, what: str) -> str:
+    """The code from --code, else $VIBEHASH_CODE, else a prompt that doesn't echo; exits when there is none to be had."""
+    code = getattr(a, "code", None) or os.environ.get("VIBEHASH_CODE")
+    if not code and unattended.interactive():
+        code = getpass.getpass(f"Authenticator code to {what}: ")
+    if not code or not code.strip():
+        sys.exit(f"error: this wallet needs an authenticator code to {what}: give --code, set VIBEHASH_CODE, or run this in a "
+                 f"terminal (`{prog()} wallet mfa off` turns the check off)")
+    return code
+
+
+def _wallet_mfa(address: str) -> str | None:
+    return credstore.get(credstore.WALLET_TOTP, address)
+
+
+def _gate(a, keys: KeyPair, what: str) -> None:
+    """The opt-in code check (`wallet mfa on`) before anything is signed: nothing to do without a stored key."""
+    try:
+        key = _wallet_mfa(keys.address)
+    except credstore.Unavailable as e:  # never "off": a broken store must not open a gate the user closed
+        sys.exit(f"error: the credential store can't be read, so the send gate can't be checked; {e}. Fix the store or "
+                 f"turn the gate off with `{prog()} wallet mfa off` from a session where it works. Nothing was sent")
+    if key is None:
+        return
+    code = _ask_wallet_code(a, what)
+    try:
+        taken = _take_wallet_code(keys.address, key, code)
+    except credstore.Unavailable as e:
+        sys.exit(f"error: the credential store can't keep which code was used, so the code isn't taken; {e}. Nothing "
+                 f"was sent")
+    if not taken:
+        sys.exit("error: that authenticator code is wrong, or was used already (each is good once: wait for the next); "
+                 "nothing was sent")
+
+
 def _send(a, kind, recipient, amount, memo=""):
     keys = load_wallet(wallet_of(a))
+    _gate(a, keys, kind)  # before the node is even asked for a fee: nothing is built without it
     node = NodeClient(node_of(a))
     fee = node.min_fee() if a.fee is None else a.fee
     txid = node.send_tx(keys, kind, recipient, amount, memo, fee)
     print(f"submitted {kind} {txid} with a {fmt(fee)} fee; it lands in the next block")
 
 
+def _code_flag(p) -> None:
+    p.add_argument("--code", metavar="CODE", help="the authenticator code, when `wallet mfa on` is set (default "
+                   "$VIBEHASH_CODE, else asked for); each code is good once")
+
+
 def _fee_flag(p) -> None:
     p.add_argument("--fee", type=to_syn, help="transaction fee in VIBE, paid to the block's proposer (default: the node's minimum)")
+
+
+def _qr(text: str) -> str:
+    """A terminal QR code for `text` from qrencode, if installed (fed on stdin, not argv), else ''."""
+    exe = shutil.which("qrencode")
+    if not exe:
+        return ""
+    import subprocess
+    try:
+        return subprocess.run([exe, "-t", "ANSIUTF8"], input=text, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def cmd_wallet_mfa(a):
+    """wallet mfa on|off|status: the opt-in authenticator-code check on this wallet's sends (MFA_SCOPE)."""
+    path = wallet_of(a)
+    try:
+        address = json.loads(Path(path).read_text())["address"]
+    except (OSError, ValueError, KeyError) as e:
+        sys.exit(f"error: can't read the wallet {path}: {e}")
+    shown = checksummed(address)
+    try:
+        key = _wallet_mfa(address)
+    except credstore.Unavailable as e:
+        sys.exit(f"error: the credential store can't be read, so whether the gate is on is unknown; {e}")
+    if a.action == "status":
+        print(f"authenticator code on sends for {shown}: " + ("on" if key else "off"))
+        return
+    if a.action == "off":
+        if key is None:
+            print(f"already off for {shown}")
+            return
+        code = _ask_wallet_code(a, "turn this off")
+        try:
+            taken = _take_wallet_code(address, key, code)
+        except credstore.Unavailable as e:
+            sys.exit(f"error: {e}; it stays on")
+        if not taken:
+            sys.exit("error: that authenticator code is wrong, or was used already; it stays on")
+        try:
+            credstore.delete(credstore.WALLET_TOTP, address)
+        except credstore.Unavailable as e:
+            sys.exit(f"error: {e}; it stays on")
+        try:
+            credstore.delete(credstore.WALLET_TOTP, _last_step_account(address))
+        except credstore.Unavailable:
+            pass  # (the gate is off: a leftover step only refuses codes older than it, should it be turned on again)
+        print(f"off: sends from {shown} no longer ask for a code")
+        return
+    if key is not None:
+        sys.exit(f"error: already on for {shown}; `{prog()} wallet mfa off` first (it asks for a code) to make a new key")
+    if not credstore.available():
+        sys.exit("error: no credential store to keep the key in on this computer (it needs the `keyring` package and a "
+                 "keychain: `pip install keyring`). A headless machine that sends unattended uses VIBEHASH_PASSWORD for "
+                 "its wallet's file and doesn't need this")
+    new = nodeadmin.new_mfa_key()
+    try:
+        credstore.put(credstore.WALLET_TOTP, address, new)
+    except credstore.Unavailable as e:
+        sys.exit(f"error: {e}")
+    uri = nodeadmin.otpauth_uri(new, shown)
+    print(f"on: sends, stakes and unstakes from {shown} now ask for a 6-digit code.\n\n"
+          "Add it to an authenticator app (Google or Microsoft Authenticator, 1Password, ...): scan this or open the link\n"
+          f"    {uri}\n")
+    qr = _qr(uri)
+    if qr:
+        print(qr)
+    print(MFA_SCOPE)
 
 
 def cmd_send(a):
@@ -1503,14 +1727,21 @@ def cmd_job_download(a):
 
     job_id = _job_of(a)
     node = _job_node(a, job_id)
-    if _evo_job(node, job_id):  # an Evo job keeps no weights: its model is worked out from the chain
-        return _evo_export(node, job_id, a.out)
-    info, raw = node.download_model(job_id)
+    if _evo_job(node, job_id):  # an Evo job keeps no weights: its model is worked out from the chain (a whole model)
+        return _evo_export(node, job_id, a.out, dtype="float32" if a.float32 else "bfloat16")
+    try:
+        info, raw = node.download_model(job_id)
+    except NodeError as e:
+        if e.status != 403:
+            raise
+        # A node set to serve a job's model to its owner alone: sign as the wallet (asked for only now, since a node
+        # that serves anyone never needs it).
+        info, raw = node.download_model(job_id, keys=load_wallet(wallet_of(a)))
     job = TrainingJob.from_spec_json(json.dumps(info["spec"]), info["owner"], 0)
     weights = np.frombuffer(raw, dtype=job.wire_dtype).astype(np.float64)
     receipt_path = _job_home(job_id) / "job.json"
     if job.finetune:
-        out = _download_adapter(a, job, info, weights, receipt_path)
+        out = _download_adapter(a, node, job, info, weights, receipt_path)
         return _training_record(node, job_id, info, out, receipt_path)
     n_in, n_out = job.spec.n_in, job.spec.n_out
     if receipt_path.exists():
@@ -1535,31 +1766,96 @@ def cmd_job_download(a):
     _training_record(node, job_id, info, out, receipt_path)
 
 
-def _download_adapter(a, job, info: dict, weights, receipt_path: Path) -> Path:
-    """A fine-tune's result: its LoRA adapter as a PEFT folder (finetune.export_peft)."""
+def _download_adapter(a, node: NodeClient, job, info: dict, weights, receipt_path: Path) -> Path:
+    """A fine-tune's result: its LoRA adapter as a PEFT folder (finetune.export_peft), or with --merged the base
+    model with the adapter folded in (finetune.export_merged)."""
     from . import finetune
 
     spec, rounds = job.spec, info["rounds"]
     source = json.loads(receipt_path.read_text()).get("source") if receipt_path.exists() else None
-    out = Path(a.out or (f"{Path(source).stem}-lora" if source else f"{job.job_id}-lora"))
     loss = rounds[-1]["val_loss"] if rounds else None
-    finetune.export_peft(spec, weights, out, {
-        "job_id": job.job_id, "rounds trained": sum(1 for r in rounds if r.get("accepted_units")),
+    done = sum(1 for r in rounds if r.get("accepted_units"))
+    about = {
+        "job_id": job.job_id, "rounds trained": done,
         "held-back loss": f"{rounds[0]['val_loss']:.4f} for the model the first round started from, {loss:.4f} for "
                           "the one the last scored round started from (a fine-tune's workers score each round's start)"
                           if rounds else None,
-        "data": f"sha256 {job.data_source['sha256']}", "model height": (info.get("model") or {}).get("height")})
-    settings.save(last_model=str(out.resolve()))
-    done = sum(1 for r in rounds if r.get("accepted_units"))
+        "data": f"sha256 {job.data_source['sha256']}", "model height": (info.get("model") or {}).get("height")}
     trained = (f"trained in {done} round{'s' * (done != 1)}; held-back loss {loss:.4f} as the last scored round began "
                "(workers score each round's model in the job's next round)") if done else \
         "not trained yet: B is still zero, so it changes nothing"
+    if a.merged:
+        return _download_merged(a, node, job, weights, about, source, trained)
+    if a.float32:
+        print("note: --float32 is for --merged: an adapter is float32 already", file=sys.stderr)
+    out = Path(a.out or (f"{Path(source).stem}-lora" if source else f"{job.job_id}-lora"))
+    finetune.export_peft(spec, weights, out, about)
+    settings.save(last_model=str(out.resolve()))
     print(f"saved {out}/: a LoRA adapter for {spec.repo} at {spec.commit[:12]}, {trained}\n"
           "Use it with transformers and PEFT:\n\n"
           f"  base = AutoModelForCausalLM.from_pretrained(\"{spec.repo}\", revision=\"{spec.commit}\")\n"
           f"  model = PeftModel.from_pretrained(base, \"{out.as_posix()}\")\n\n"
-          f"or vLLM: vllm serve {spec.repo} --revision {spec.commit} --enable-lora --lora-modules mine={out.as_posix()}")
+          f"or vLLM: vllm serve {spec.repo} --revision {spec.commit} --enable-lora --lora-modules mine={out.as_posix()}\n"
+          f"(or the whole model with the adapter merged in: {prog()} job download {job.job_id} --merged)")
     return out
+
+
+def _download_merged(a, node: NodeClient, job, weights, about: dict, source, trained: str) -> Path:
+    """A fine-tune's base model with its adapter folded in, as a model folder (finetune.export_merged)."""
+    from . import finetune, hub
+
+    spec = job.spec
+    if spec.kind != "lora":
+        sys.exit("error: a DeepSeek job's merged model would be the whole of DeepSeek-V4.1-Flash, hundreds of GB, "
+                 "rewritten with its top layers changed: download its adapter (without --merged), which loads on the "
+                 "base with PEFT or vLLM")
+    out = Path(a.out or (f"{Path(source).stem}-merged" if source else f"{job.job_id}-merged"))
+    try:
+        manifest = _base_manifest(node, job)
+        print(f"Merging the adapter into {spec.repo} ({hub._gb(manifest.total_bytes)} of weights, downloaded once and "
+              "kept in the tensor cache, as a worker's are)", flush=True)
+        made = finetune.export_merged(spec, weights, manifest, out, about, float32=a.float32, progress=_progress())
+    except (NodeError, hub.HubError, hub.IntegrityError, ValueError, FileExistsError, KeyError) as e:
+        sys.exit(f"error: {e}")
+    settings.save(last_model=str(out.resolve()))
+    kept = "" if not made["trained"] or made["dtype"] == "float32" else \
+        (f"\nRounded to {made['dtype']}, the weights are off from base + change by {made['rounding']:.1%} of the change "
+         "(--float32 keeps it whole, at twice the size)")
+    print(f"saved {out}/: {spec.repo} with the adapter merged in, {made['dtype']}, {trained}{kept}\n"
+          "Use it as you would the base model:\n\n"
+          f"  model = AutoModelForCausalLM.from_pretrained(\"{out.as_posix()}\")\n\n"
+          f"or vLLM: vllm serve {out.as_posix()}")
+    return out
+
+
+def _base_manifest(node: NodeClient, job):
+    """The base model's hub.Manifest that the fine-tune pins: this computer's (`train` keeps it), or else the one in
+    the job's dataset, fetched from the node (and kept, for next time)."""
+    import tempfile
+
+    from . import finetune, hub
+    from .blobs import BlobStore
+    from .tasks import load_dataset
+
+    spec = job.spec
+    path = finetune.manifest_path(spec.repo, spec.commit)
+    try:
+        return hub.Manifest.from_bytes(path.read_bytes(), spec.manifest)
+    except (OSError, hub.IntegrityError):
+        pass
+    sha = job.data_source.get("sha256")
+    if not sha:
+        raise ValueError(f"job {job.job_id} names no dataset, so there's no manifest of its base model to merge into")
+    print(f"Fetching job {job.job_id}'s dataset from {node.url}: it holds the base model's manifest (its tensors' "
+          "hashes)", flush=True)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+        data = load_dataset(node.download("dataset", sha, BlobStore(d)))
+        if not isinstance(data, finetune.TokenDataset):
+            raise ValueError(f"job {job.job_id}'s dataset isn't a fine-tune's")
+        manifest = hub.Manifest.from_bytes(data.manifest, spec.manifest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(manifest.to_bytes())
+    return manifest
 
 
 def _evo_job(node: NodeClient, job_id: str) -> bool:
@@ -2257,8 +2553,51 @@ def version() -> str:
     return __version__
 
 
+# The proxy flags every node-facing command shares: (option strings, add_argument keywords), added by _add_tor_flags.
+TOR_FLAGS = [
+    (("--tor",), dict(action="store_true", help="send this command's node traffic through Tor (a local Tor on 9050, or "
+                      "Tor Browser's on 9150), resolving the node's name inside Tor")),
+    (("--proxy",), dict(metavar="URL", help="send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// "
+                        "would resolve the node's name on this computer, so it is refused)")),
+    (("--tor-mode",), dict(choices=proxy.MODES, help="control-only: JSON through the proxy, transfers of over 50 MB "
+                           "(checkpoints) direct; strict: everything through it, big transfers refused (default: strict "
+                           "for wallet, send, stake, unstake and job posting, else control-only)")),
+]
+NODE_COMMANDS = frozenset({"node", "admin", "worker", "app", "setup"})  # (besides any command with --node)
+
+
+class _Parser(argparse.ArgumentParser):
+    """An ArgumentParser that remembers it was made, and whether it was given --node, so _add_tor_flags can find the
+    commands that talk to a node without reaching into argparse's internals."""
+    made: list = []
+
+    def __init__(self, *args, **kwargs):
+        self.takes_node = False
+        super().__init__(*args, **kwargs)
+        _Parser.made.append(self)
+
+    def add_argument(self, *names, **kwargs):
+        self.takes_node = self.takes_node or "--node" in names
+        return super().add_argument(*names, **kwargs)
+
+
+def _add_tor_flags() -> None:
+    """Give TOR_FLAGS to every command made since parser() began that talks to a node: one with a --node option, or one
+    of NODE_COMMANDS. Not again to a command's own subcommands: their defaults would overwrite what was typed before them."""
+    covered: list[str] = []
+    for p in sorted(_Parser.made, key=lambda q: len(q.prog)):
+        words = p.prog.split()
+        if len(words) < 2 or any(p.prog.startswith(c + " ") for c in covered):
+            continue
+        if p.takes_node or words[1] in NODE_COMMANDS:
+            covered.append(p.prog)
+            for names, kwargs in TOR_FLAGS:
+                p.add_argument(*names, **kwargs)
+
+
 def parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="vibehash", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    _Parser.made = []
+    ap = _Parser(prog="vibehash", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-v", "--verbose", action="store_true", help="log every detail (DEBUG), not just what happens (INFO)")
     ap.add_argument("--version", action="version", version=f"vibehash {version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2281,6 +2620,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--tls-fingerprint", metavar="SHA256", help="trust the https node's certificate with this fingerprint "
                    "(how workers trust a self-signed testnet node; ask its operator)")
     p.add_argument("--tls-ca", metavar="FILE", help="verify the https node's certificate with this CA file")
+
+    p = sub.add_parser("update", help="install the latest Vibe Hash release, only if its signature checks out")
+    p.add_argument("--evo", action="store_true", help="also install what Evo Hash needs (transformers, datasets: a few hundred MB)")
+    p.set_defaults(fn=cmd_update)
 
     p = sub.add_parser("install-gpu", help="find your graphics card and install the PyTorch build for it")
     p.add_argument("--yes", action="store_true", help="don't ask before downloading"); p.set_defaults(fn=cmd_install_gpu)
@@ -2324,17 +2667,26 @@ def parser() -> argparse.ArgumentParser:
                        ).add_subparsers(dest="wcmd", required=True)
     p = w.add_parser("create", help="make a wallet and show its 24 recovery words once")
     p.add_argument("--out", help=f"wallet file to write (default {settings.default_wallet()})")
-    p.add_argument("--no-password", action="store_true", help="don't encrypt the file (for unattended machines; anyone "
-                   "who can read it can spend from it)")
+    p.add_argument("--no-password", action="store_true", help="no password: the key is kept in this account's credential "
+                   "store (Windows Credential Manager, macOS Keychain, Secret Service) and the file holds only ciphertext")
+    p.add_argument("--insecure-plaintext", action="store_true", help="write the key into the file in the clear, for tests "
+                   "and throwaway keys only: anyone who can read the file can spend from it")
     p.add_argument("--passphrase", action="store_true", help="add a BIP39 passphrase to the words (asked for; optional)")
     p.set_defaults(fn=cmd_wallet_create)
     p = w.add_parser("restore", help="rebuild a wallet from its recovery words (read from the terminal or $VIBEHASH_MNEMONIC)")
     p.add_argument("--out", help=f"wallet file to write (default {settings.default_wallet()})")
-    p.add_argument("--no-password", action="store_true", help="don't encrypt the file (for unattended machines; anyone "
-                   "who can read it can spend from it)")
+    p.add_argument("--no-password", action="store_true", help="no password: the key is kept in this account's credential "
+                   "store (Windows Credential Manager, macOS Keychain, Secret Service) and the file holds only ciphertext")
+    p.add_argument("--insecure-plaintext", action="store_true", help="write the key into the file in the clear, for tests "
+                   "and throwaway keys only: anyone who can read the file can spend from it")
     p.add_argument("--passphrase", action="store_true", help="the words had a BIP39 passphrase (asked for)")
     p.add_argument("--path", default=mnemonic.PATH, help=f"derivation path (default {mnemonic.PATH})")
     p.set_defaults(fn=cmd_wallet_restore)
+    p = w.add_parser("mfa", help="ask for an authenticator code before this wallet sends, stakes or unstakes (opt-in)",
+                     description=MFA_SCOPE + " The key is kept in this computer's credential store, not in a file.")
+    p.add_argument("action", choices=("on", "off", "status"), help="on: make a key and show how to add it to an "
+                   "authenticator app; off: forget it (asks for a current code); status: whether it is on")
+    p.add_argument("--wallet", help=WALLET); _code_flag(p); p.set_defaults(fn=cmd_wallet_mfa)
     p = w.add_parser("show", help="a wallet's address, whether the file is encrypted, and whether it has recovery words")
     p.add_argument("--wallet", help=WALLET); p.set_defaults(fn=cmd_wallet_show)
 
@@ -2379,6 +2731,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--peer", action="append", metavar="URL",
                    help="another node to sync from and gossip to (validators find each other from the chain anyway)")
     p.add_argument("--announce", metavar="URL", help="the address other nodes reach this one at, if not --host:--port")
+    p.add_argument("--onion", metavar="ADDR.onion", help="this node's Tor hidden-service address, shown in /status")
+    p.add_argument("--model-access", choices=("public", "owner"), default="public",
+                   help="who may download a job's weights from this node: public (anyone; the default), or owner (the "
+                        "job's owner and the validators, by a signed request; starter jobs and jobs whose spec says "
+                        "\"public\": true stay open). While public, the log says which requests owner would refuse")
     p.add_argument("--dataset", action="append", help="add an .npz dataset to this node's store")
     p.add_argument("--device", default="cpu", help="where the node checks work its checkers didn't and scores each round: "
                    "cpu (default), auto, cuda, xpu or mps. Fine-tunes want a GPU here (and PyTorch)")
@@ -2405,6 +2762,9 @@ def parser() -> argparse.ArgumentParser:
                    help="an authenticator app's key (`vibehash admin --new-mfa` makes one and says how to add it): the "
                         "token then also needs the app's 6-digit code, for a sign-in that lasts 12 hours; default "
                         "$VIBEHASH_ADMIN_MFA")
+    p.add_argument("--admin-allow-no-mfa", action="store_true",
+                   help="UNSAFE: serve the admin routes on a --host other than this computer's with the token alone. "
+                        "Without --admin-mfa such a node refuses to start; this is for test rigs only")
     p.add_argument("--tls-cert", metavar="FILE", help="serve HTTPS with this PEM certificate (see `tls cert`)")
     p.add_argument("--tls-key", metavar="FILE", help="the certificate's private key")
 
@@ -2437,8 +2797,8 @@ def parser() -> argparse.ArgumentParser:
                         f"{WATCH_PORT}), read-only and for this computer only, so a window or a script can follow the "
                         "worker step by step: its round, what it is doing, its counts, its account, the latest events")
     p.add_argument("--deepseek", choices=["ask", "yes", "no"], default=None,
-                   help="take DeepSeek work (its ~30 GB of model files): ask once (the default), yes without asking "
-                        "(unattended), or no. Remembered")
+                   help="take DeepSeek work (its ~30 GB of model files): yes, or no (the default; DeepSeek is frozen). "
+                        "ask is only for the pilot (VIBEHASH_DEEPSEEK_PILOT=1). Remembered")
     p.add_argument("--job", default="auto", metavar="JOB", help="mine only this job's rounds and sit the other jobs' out "
                    "(default auto: every job this worker can do). The dashboard's job line changes it while it runs: "
                    "Tab or 0-9")
@@ -2469,7 +2829,7 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--recheck-gpu", action="store_true", help="test the GPU again, even if an earlier run found it ready")
         p.add_argument("--job", metavar="JOB", help="mine only this job, as `worker --job`")
         p.add_argument("--no-password", action="store_true", help="make a first wallet without a password, so nothing is "
-                       "asked (what the downloadable app does); the file is then as safe as your user account")
+                       "asked (what the downloadable app does); the key is kept in your account's credential store")
         p.add_argument("--avatar", action="store_true", help="also show the floating avatar on the desktop (`avatar`), "
                        "which the downloadable app does; needs a screen")
         p.add_argument("--no-window", action="store_true", help="don't open the window (`window`) as it starts; a click "
@@ -2544,20 +2904,21 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("balance", help="an address's balance, stake, coins unbonding and reputation")
     p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
     p.add_argument("address", nargs="?", help="the address to look up (default: your wallet's)"); p.set_defaults(fn=cmd_balance)
-    p = sub.add_parser("send", help="send VIBE to an address")
+    p = sub.add_parser("send", help="send VIBE to an address", description="Send VIBE to an address. " + MFA_SCOPE)
     p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
     p.add_argument("--to", required=True, metavar="ADDRESS", help="where to send it: an address copied from the wallet "
                    "that owns it (vibe1...). Its capital letters are a checksum, so a mistyped one is refused")
     p.add_argument("--amount", type=to_syn, required=True, metavar="VIBE", help="how much to send, e.g. 2.5")
     p.set_defaults(fn=cmd_send)
-    _fee_flag(p)
+    _fee_flag(p); _code_flag(p)
     for name, fn, what in (("stake", cmd_stake, "lock VIBE as stake: what a worker's checks and a validator's votes are "
                             "backed by, and what a cheat loses"),
                            ("unstake", cmd_unstake, f"release staked VIBE; it is spendable after {UNBONDING_ROUNDS} "
                             "rounds, and can still be slashed until then")):
-        p = sub.add_parser(name, help=what); p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
+        p = sub.add_parser(name, help=what, description=f"{what[0].upper()}{what[1:]}. {MFA_SCOPE}")
+        p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
         p.add_argument("--amount", type=to_syn, required=True, metavar="VIBE", help="how much, e.g. 10"); p.set_defaults(fn=fn)
-        _fee_flag(p)
+        _fee_flag(p); _code_flag(p)
     p = sub.add_parser("post-job", help="post a training job from a job file, paying its budget in (`train` writes the "
                        "file for you)", description="Post a job the network trains round by round until its budget is "
                        "spent. The budget leaves your balance now and is paid out only for work that passes its checks; "
@@ -2636,9 +2997,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("job_id", nargs="?", help="default: the last job you trained"); p.add_argument("--node", help=NODE)
     p.add_argument("--plain", action="store_true", help="print a line per event instead of the live dashboard")
     p.set_defaults(fn=cmd_job_watch)
-    p = j.add_parser("download", help="save a job's trained model to use with `predict`, or a fine-tune's LoRA adapter")
+    p = j.add_parser("download", help="save a job's trained model to use with `predict`, a fine-tune's LoRA adapter, or "
+                     "with --merged the whole fine-tuned model")
     p.add_argument("job_id", nargs="?", help="default: the last job you trained")
-    p.add_argument("--out", help="file to save (default JOB.npz), or a fine-tune's folder (default DATA-lora)")
+    p.add_argument("--out", help="file to save (default JOB.npz), or a fine-tune's folder (default DATA-lora, or "
+                   "DATA-merged)")
+    p.add_argument("--merged", action="store_true", help="a fine-tune: the base model with the adapter folded into its "
+                   "weights, a model folder that loads as the base does, no PEFT (downloads the base's weights once)")
+    p.add_argument("--float32", action="store_true", help="with --merged (or an Evo job): save float32 weights, which "
+                   "keep the change whole, not the base's bf16 (twice the size)")
     p.add_argument("--node", help=NODE); p.set_defaults(fn=cmd_job_download)
     p = j.add_parser("history", help="a job's rounds one by one (loss, accuracy, units, VIBE paid, budget left), from the "
                      "node, for any job; saved in ~/.vibehash/jobs/JOB")
@@ -2697,6 +3064,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--receipts", action="append", metavar="FILE",
                    help="a worker's receipts.jsonl to check (default: every worker's on this computer)")
     p.set_defaults(fn=cmd_chain_verify)
+    _add_tor_flags()
     return ap
 
 
@@ -2709,11 +3077,26 @@ def run_command(argv: list[str]) -> None:
             print(e.code if isinstance(e.code, str) else f"stopped with exit code {e.code}")
 
 
+def _activate_proxy(a) -> None:
+    """Set the process's proxy and tor mode (proxy.activate) from the flags and config.json, for the commands that take
+    the flags; any other (a local testnet) talks to its own nodes direct, whatever is saved."""
+    if not hasattr(a, "tor"):
+        return proxy.activate(None, None)
+    cfg = settings.load()
+    command = a.cmd if a.cmd != "job" else f"job {getattr(a, 'jcmd', '')}".strip()
+    try:
+        proxy.activate(proxy.resolve(a, cfg), proxy.tor_mode(a, cfg, command))
+    except ValueError as e:
+        sys.exit(f"error: {e}")
+
+
 def main(argv=None):
     if (sys.argv[1:] if argv is None else argv) == [] and sys.stdin.isatty() and sys.stdout.isatty():
         from . import menu  # plain `vibehash`, typed at a terminal: the menu
+        _activate_proxy(argparse.Namespace(cmd="menu", tor=False, proxy=None, tor_mode=None))  # (what config.json says)
         return menu.run(run_command, prog())
     a = parser().parse_args(argv)
+    _activate_proxy(a)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
     try:
         a.fn(a)

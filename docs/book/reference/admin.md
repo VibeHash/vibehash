@@ -5,7 +5,7 @@ The operators' window: a globe of where devices connect from, the jobs to confir
 The admin app (admin.py): a small server on this computer only, with the nodes behind it, and its page in a window of its own (pywebview, the `app` extra) or the browser. It asks each node's /admin/overview with the token that node was started with (`node --admin-token`; a node without one shows only what its public routes say). Confirm and deny are holds on every node it knows; cancel and post are transactions signed with the admin wallet, unlocked in the page. The nodes, their tokens, the wallet and whether to look up places are kept in config.json under "admin", from the page's Settings or these flags.
 
 ```
-vibehash admin [-h] [--node URL] [--token TOKEN] [--wallet WALLET] [--port PORT] [--browser] [--install-shortcut] [--remove-shortcut] [--new-token] [--new-mfa]
+vibehash admin [-h] [--node URL] [--token TOKEN] [--wallet WALLET] [--port PORT] [--browser] [--install-shortcut] [--remove-shortcut] [--new-token] [--new-mfa] [--tor] [--proxy URL] [--tor-mode {control-only,strict}]
 ```
 
 Flags:
@@ -19,6 +19,9 @@ Flags:
 - `--remove-shortcut`: take that shortcut away again.
 - `--new-token`: print a new random admin token for a node's --admin-token.
 - `--new-mfa`: print a new authenticator key for a node's --admin-mfa, with how to add it to an authenticator app.
+- `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
+- `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
+- `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).
 
 Examples:
 

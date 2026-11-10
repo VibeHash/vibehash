@@ -7,6 +7,19 @@ served only when the node was started with one (`vibehash node --admin-token`, o
     POST /admin/jobs/<id>/release     confirm: the job takes its turns again
     POST /admin/review                {"on": true}: every job posted from now on starts held until an admin confirms it
     POST /admin/login                 {"code": "123456"}: an authenticator app's code for a sign-in good for 12 hours
+    POST /admin/prune                 delete checkpoints no recent round needs (only between rounds): bytes freed
+    POST /admin/backup                ask this server's backup service (setup-node.sh) for a backup now
+    POST /admin/restart               {"force": false}: end the node so systemd starts it again; 409 when that would
+                                      leave the validators online with two thirds of the stake or less
+
+/admin/overview's "ops" is the server's health for the admin app's Infrastructure panel: the release, how long the
+node has run, the disk and what its checkpoints take, the last backup ($DATA/backup/last_backup.json, written by the
+backup service) and health check ($DATA/health.json), whether it halted, and the quorum: which validators signed a
+block lately (from the commit certificates) and whether finality survives this node going away for a restart.
+
+The three operations above act on the server itself, so each needs a fresh authenticator code as well
+(`check(..., fresh=True)`: X-Admin-Code, taken once like a sign-in's code); a node without an authenticator key
+(--admin-mfa) refuses them.
 
 Every request carries `Authorization: Bearer <token>`; without the right one the answer is 401, and a node with no
 token answers 404 to all of them, as if they weren't there. The token is compared in constant time and never logged,
@@ -19,12 +32,25 @@ steps, one step either side for a clock that drifts, each code good once) and gi
 X-Admin-Login; it lasts SESSION_S and is kept in memory only, so a restart signs everyone out. Every admin of a node
 adds the same key to their own app. A stolen token is then not enough: the phone is needed too.
 
+Where from: $VIBEHASH_ADMIN_ALLOW_IPS, a comma-separated list of networks (CIDR), limits the admin routes to clients
+in them, e.g. "100.64.0.0/10,127.0.0.1/32" for a Tailscale tailnet and this computer. Anyone else gets 404, as from a
+node with no admin routes, before the token is looked at and without counting as a wrong try. The address checked is
+the one wrong tries count against (`client_ip`): behind a proxy on this computer it is the client the proxy names, so
+a node reached through a public proxy (Cloudflare) needs its admins to reach it over the tailnet instead (their hosts
+file naming the node's domain at its tailnet address keeps the certificate valid).
+
 Wrong guesses: an address that sends MAX_FAILS wrong tokens or codes within FAIL_WINDOW_S is turned away (403,
 Retry-After) for the rest of that window, before its token is even looked at; and MAX_CODE_FAILS wrong codes from
 anywhere, which take the right token to send, stop codes being taken at all for the window, since someone holding the
 token is trying codes. A wrong token from the open internet can't lock an admin out: it counts against its own address. Behind a reverse
 proxy that holds only if the proxy sets X-Forwarded-For (`client_ip`): without it every client looks like the proxy,
 and anyone's wrong guesses lock everyone out.
+
+The three orders (hold, release, review) change what the network does, so on a node with an authenticator key each
+needs a fresh code on top of the sign-in (`check(..., fresh=True)`: X-Admin-Code, the app's code of now, taken once
+like a sign-in's, so not the one the sign-in just used). /admin/overview and the device list need only the sign-in.
+A node with no key has no code to ask for; one bound beyond this computer refuses to start without a key
+(`vibehash node`; --admin-allow-no-mfa for a test rig).
 
 A hold is this node's own policy, not a rule of the chain: the coordinator skips a held job when it picks what the
 next round trains (Coordinator.policy -> `reason`), and the job's budget stays in escrow untouched. Another validator
@@ -40,14 +66,20 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import json
 import logging
+import os
 import re
 import secrets
+import shutil
 import threading
 import time
+from pathlib import Path
 from urllib.parse import quote
 
-from . import hardware
+from . import __version__, hardware
+from .consensus import quorum
+from .crypto import address_of
 from .ledger import SYSTEM
 
 log = logging.getLogger("vibehash.admin")
@@ -65,6 +97,10 @@ SESSION_S = 12 * 3600  # how long a sign-in with a code lasts
 MAX_SESSIONS = 16
 LOGIN_HEADER = "X-Admin-Login"
 NEED_CODE = "an authenticator code is needed: sign in with POST /admin/login"  # (the admin app looks for these words)
+CODE_HEADER = "X-Admin-Code"  # a fresh authenticator code, for operations on the server itself (check(fresh=True))
+NEED_FRESH = "this needs a fresh authenticator code"  # (the admin app looks for these words)
+SIGNED_WINDOW = 30  # blocks: a validator whose vote is in one of the last this many commit certificates is online
+BACKUP_REQUEST_S = 600  # a backup asked for this recently, and not begun, isn't asked for again
 MAX_FAILS = 10  # wrong tokens or codes from one address within the window: it is turned away for the rest of it
 FAIL_WINDOW_S = 900
 MAX_CODE_FAILS = 30  # wrong codes from anywhere within the window: codes are refused for the rest of it
@@ -77,6 +113,10 @@ class Forbidden(Exception):
 
 class NeedCode(Forbidden):
     """The token is right but the node also wants an authenticator code, and this request has no sign-in (401)."""
+
+
+class Conflict(Exception):
+    """An operation that would do harm now, or can't be done here (409): what to do instead is in the message."""
 
 
 class TooMany(Exception):
@@ -108,6 +148,37 @@ def mfa_key(text: str) -> bytes:
         raise ValueError(f"the authenticator key is too short ({len(key) * 8} bits, at least {MIN_MFA_BYTES * 8}): "
                          "make one with `vibehash admin --new-mfa`")
     return key
+
+
+ALLOW_ENV = "VIBEHASH_ADMIN_ALLOW_IPS"
+
+
+def parse_allow(text: str | None) -> tuple:
+    """The networks $VIBEHASH_ADMIN_ALLOW_IPS names ("100.64.0.0/10,127.0.0.1/32"; a bare address is one host);
+    () for none, which allows every address. ValueError for one that isn't a network."""
+    nets = []
+    for part in str(text or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            raise ValueError(f"{ALLOW_ENV}: {part!r} isn't an address or a network such as 100.64.0.0/10") from None
+    return tuple(nets)
+
+
+def allowed(ip: str | None, nets: tuple) -> bool:
+    """Whether `ip` is in one of `nets` (no networks: every address is)."""
+    if not nets:
+        return True
+    try:
+        addr = ipaddress.ip_address(str(ip or "").split("%")[0])
+    except ValueError:
+        return False
+    if getattr(addr, "ipv4_mapped", None):  # ::ffff:100.64.0.7 is 100.64.0.7
+        addr = addr.ipv4_mapped
+    return any(addr.version == n.version and addr in n for n in nets)
 
 
 def check_token(token: str | None) -> None:
@@ -157,9 +228,11 @@ def client_ip(peer: str, forwarded_for: str | None) -> str:
 
 
 class Admin:
-    def __init__(self, store, token: str | None, now=time.time, mfa: str | None = None):
+    def __init__(self, store, token: str | None, now=time.time, mfa: str | None = None, allow: str | None = None):
+        """`allow`: the networks the admin routes answer (parse_allow); None reads $VIBEHASH_ADMIN_ALLOW_IPS."""
         check_token(token)
         self.store, self.token, self.now = store, token or None, now
+        self.allow = parse_allow(os.environ.get(ALLOW_ENV) if allow is None else allow)
         if mfa and not self.token:
             raise ValueError("an authenticator key (--admin-mfa) needs an admin token (--admin-token) too")
         self.mfa: bytes | None = mfa_key(mfa) if mfa else None
@@ -179,24 +252,48 @@ class Admin:
     def enabled(self) -> bool:
         return bool(self.token)
 
-    def check(self, authorization: str | None, login: str | None = None, ip: str | None = None) -> None:
+    def check(self, authorization: str | None, login: str | None = None, ip: str | None = None,
+              code: str | None = None, fresh: bool = False) -> None:
         """A request for an admin route: KeyError (404) on a node with no token; TooMany (403) from an address with
         too many wrong tries lately; Forbidden (401) with the wrong token; NeedCode (401) when the node wants an
-        authenticator code and `login` (X-Admin-Login) is no sign-in of now."""
+        authenticator code and `login` (X-Admin-Login) is no sign-in of now. `fresh`: an operation on the server
+        itself, which also takes `code` (X-Admin-Code), the authenticator app's code of now, used once; Forbidden on a
+        node with no authenticator key, which can't ask for one."""
         self._token(authorization, ip)
         if self.mfa is None:
+            if fresh:
+                raise Forbidden(f"{NEED_FRESH}, and this node has no authenticator key: start it with --admin-mfa "
+                                "(`vibehash admin --new-mfa` makes one)")
             return
         with self.lock:
             ends = self.sessions.get(login or "")
             if ends is None or ends <= self.now():
                 self.sessions.pop(login or "", None)
                 raise NeedCode(NEED_CODE)
+        if fresh:
+            if not re.sub(r"\s", "", str(code or "")):
+                raise Forbidden(f"{NEED_FRESH} ({CODE_HEADER})")
+            self._take_code(code, ip)
 
     def login(self, authorization: str | None, code, ip: str | None = None) -> dict:
         """POST /admin/login: the token and the authenticator app's code of now give a sign-in for SESSION_S."""
         self._token(authorization, ip)
         if self.mfa is None:
             return {"ok": True, "mfa": False, "session": None, "expires": None}
+        self._take_code(code, ip)
+        with self.lock:
+            now = self.now()
+            session = secrets.token_urlsafe(32)
+            self.sessions = {s: t for s, t in self.sessions.items() if t > now}
+            while len(self.sessions) >= MAX_SESSIONS:  # the one ending soonest goes
+                del self.sessions[min(self.sessions, key=self.sessions.get)]
+            self.sessions[session] = now + SESSION_S
+        log.info("admin: signed in with a code from %s", ip or "?")
+        return {"ok": True, "mfa": True, "session": session, "expires": now + SESSION_S}
+
+    def _take_code(self, code, ip: str | None) -> None:
+        """The authenticator app's code of now (one step either side), taken once: Forbidden if it's wrong or used,
+        TooMany after too many wrong codes. A wrong one counts against its address and against codes as a whole."""
         code = re.sub(r"\s", "", str(code or ""))
         with self.lock:
             now = self.now()
@@ -218,16 +315,9 @@ class Admin:
                 log.warning("admin: a wrong authenticator code from %s, with the right token", ip or "?")
                 raise Forbidden("the authenticator code is wrong")
             self.last_code = taken
-            session = secrets.token_urlsafe(32)
-            self.sessions = {s: t for s, t in self.sessions.items() if t > now}
-            while len(self.sessions) >= MAX_SESSIONS:  # the one ending soonest goes
-                del self.sessions[min(self.sessions, key=self.sessions.get)]
-            self.sessions[session] = now + SESSION_S
-        log.info("admin: signed in with a code from %s", ip or "?")
-        return {"ok": True, "mfa": True, "session": session, "expires": now + SESSION_S}
 
     def _token(self, authorization: str | None, ip: str | None) -> None:
-        if not self.enabled:
+        if not self.enabled or not allowed(ip, self.allow):  # (from elsewhere: as if there were no admin routes)
             raise KeyError("admin")
         with self.lock:
             now = self.now()
@@ -354,7 +444,152 @@ class Admin:
             "peers": [{"url": u, "alive": dead.get(u, 0) <= now} for u in node.peers.urls()],
             "mempool": mempool, "jobs": jobs, "devices": self.device_list(),
             "miners": net.get("miners"), "hardware": net.get("hardware"),
+            "ops": _safe(lambda: ops(node, now)),
         }
+
+
+# --- the server's health, and operations on it -------------------------------------------------------------------
+
+def supervised(env=None) -> bool:
+    """Whether something starts this node again when it ends: systemd sets INVOCATION_ID for its services
+    (setup-node.sh's units); VIBEHASH_SUPERVISED=1 says so for any other supervisor."""
+    env = os.environ if env is None else env
+    return bool(env.get("INVOCATION_ID") or env.get("VIBEHASH_SUPERVISED") == "1")
+
+
+def backup_dir(node) -> Path:
+    """Where the backup service (setup-node.sh) keeps its request and report: $DATA/backup, $DATA being the folder
+    that holds the node's --data-dir; $VIBEHASH_BACKUP_DIR elsewhere."""
+    return Path(os.environ.get("VIBEHASH_BACKUP_DIR") or Path(node.store.dir).resolve().parent / "backup")
+
+
+def _read_json(path: Path, limit: int = 65536) -> dict | None:
+    try:
+        if path.stat().st_size > limit:
+            return None
+        out = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def _dir_bytes(path: Path) -> int:
+    total = 0
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                try:
+                    total += e.stat().st_size if e.is_file(follow_symlinks=False) else 0
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def quorum_view(node) -> dict:
+    """The validators, which of them signed a block lately (their votes in the last SIGNED_WINDOW commit
+    certificates), and whether finality survives this node going away: the others online must hold more than two
+    thirds of the stake (consensus.quorum)."""
+    s = node.chain.state
+    vals = s.validator_set()
+    tip = node.chain.tip.height
+    me = node.keys.address
+    if not vals:
+        return {"bft": False, "validators": 0, "online_pct": None, "safe_to_restart": False,
+                "why": "this node seals the chain's blocks alone: none are made until it's back", "signers": {}}
+    last: dict[str, int | None] = {a: None for a in vals}
+    for height, cert in sorted(node.store.certificates(max(1, tip - SIGNED_WINDOW + 1), tip).items()):
+        for v in (cert.get("votes") or []) if isinstance(cert, dict) else []:
+            try:
+                a = address_of(bytes.fromhex(v["pubkey"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if a in last:
+                last[a] = height
+    total = sum(vals.values())
+    online = {a for a, h in last.items() if h is not None}
+    power = sum(vals[a] for a in online)
+    others = sum(vals[a] for a in online if a != me)
+    if me not in vals:
+        safe, why = True, "this node isn't a validator: blocks go on without it"
+    elif quorum(others, total):
+        safe, why = True, None
+    else:
+        safe = False
+        why = (f"without this node, the validators that signed lately hold {100 * others / total:.0f}% of the stake; "
+               "blocks stop until it's back (more than two thirds must sign)")
+    return {"bft": True, "validators": len(vals), "online": len(online), "online_pct": round(100 * power / total, 1),
+            "quorum_now": quorum(power, total), "safe_to_restart": safe, "why": why, "window": SIGNED_WINDOW,
+            "signers": {a: {"stake": vals[a], "last_signed": last[a], "online": a in online,
+                            "url": s.validators.get(a), "me": a == me} for a in vals}}
+
+
+def ops(node, now: float | None = None) -> dict:
+    """The server's health, for the admin app's Infrastructure panel."""
+    now = time.time() if now is None else now
+    data = Path(node.store.dir)
+    try:
+        du = shutil.disk_usage(data)
+        disk = {"total_bytes": du.total, "used_bytes": du.used, "free_bytes": du.free,
+                "free_pct": round(100 * du.free / du.total, 1) if du.total else None}
+    except OSError:
+        disk = None
+    bdir = backup_dir(node)
+    backup = _read_json(bdir / "last_backup.json")
+    if backup is not None and isinstance(backup.get("timestamp"), (int, float)):
+        backup["age_hours"] = round((now - backup["timestamp"]) / 3600, 2)
+    request = _read_json(bdir / "request")
+    started = getattr(node, "started_at", None)
+    return {"version": __version__, "uptime_s": round(now - started) if started else None, "disk": disk,
+            "blobs_bytes": _dir_bytes(node.blobs.root), "datasets_bytes": _dir_bytes(node.store.datasets.root),
+            "backup": backup, "backup_requested": (request or {}).get("requested_at"),
+            "backups_set_up": bdir.is_dir(), "health": _read_json(bdir.parent / "health.json"),
+            "halted": bool(node.halted), "halted_why": node.halted_public, "supervised": supervised(),
+            "quorum": quorum_view(node)}
+
+
+def prune(node, stale_part_s: float) -> dict:
+    """Delete the checkpoints and dispute evidence no recent round needs, as each round's end does (Node._end_round),
+    now. Only between rounds: a round's own uploads aren't in its records yet, and pruning then would delete them."""
+    before = _dir_bytes(node.blobs.root)
+    with node.coord.lock:  # no round opens while this runs
+        if node.coord.r is not None:
+            raise Conflict("a round is open, and its checkpoints are in use: what it doesn't need is deleted when it "
+                           "ends anyway. Try again between rounds")
+        removed = node.blobs.prune(node._evidence())  # noqa: SLF001
+    removed += node.store.datasets.prune_partial(older_than=stale_part_s)
+    return {"ok": True, "removed": removed, "freed_bytes": max(0, before - _dir_bytes(node.blobs.root))}
+
+
+def request_backup(node, now: float | None = None) -> dict:
+    """Ask this server's backup service for a run: it watches $DATA/backup/request (a systemd path unit) and
+    deletes the file when it starts. The node itself never runs anything as another user."""
+    now = time.time() if now is None else now
+    bdir = backup_dir(node)
+    if not bdir.is_dir():
+        raise Conflict(f"backups aren't set up on this server (no {bdir}): setup-node.sh installs the backup service")
+    pending = (_read_json(bdir / "request") or {}).get("requested_at")
+    if isinstance(pending, (int, float)) and now - pending < BACKUP_REQUEST_S:
+        return {"ok": True, "requested_at": pending, "already": True}
+    tmp = bdir / "request.tmp"
+    tmp.write_text(json.dumps({"requested_at": int(now)}), encoding="utf-8")
+    os.replace(tmp, bdir / "request")
+    log.info("admin: a backup was asked for")
+    return {"ok": True, "requested_at": int(now), "already": False}
+
+
+def restart(node, force: bool = False) -> dict:
+    """End the node so its supervisor starts it again (the `node` command's loop sees `restart_requested`). Refused
+    (Conflict) when nothing would start it again, and, unless `force`, when finality wouldn't survive its absence."""
+    if not supervised():
+        raise Conflict("this node isn't run by systemd (or another supervisor): nothing would start it again")
+    q = quorum_view(node)
+    if not q["safe_to_restart"] and not force:
+        raise Conflict(f"{q['why']}. Send force to restart it anyway")
+    node.restart_requested = "an admin asked" + (" (forced)" if force and not q["safe_to_restart"] else "")
+    log.warning("admin: restart asked for: %s", node.restart_requested)
+    return {"ok": True, "restarting": True, "safe": q["safe_to_restart"]}
 
 
 def _minutes(seconds: float) -> str:

@@ -71,6 +71,10 @@ class TrainingJob:
     max_update_ratio: float = 0.5  # |final - start| / |start| must stay below this (a fine-tune's: LoraSpec.sane)
     compute_s: float = 0.0  # a compute phase the job asks for, in seconds; 0: sized from the job (phase_lengths)
     shards: int = 1  # blocks of layers a unit is split into, one worker each (shards.py, SHARDING.md); 1: whole units
+    # True: nodes serve its model to anyone, even set to owner-only (node.job_model); None: unsaid. MLP specs only:
+    # accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28; until then a
+    # `public` key there would split validators.
+    public: bool | None = None
     _data: Dataset | TokenDataset | None = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -109,7 +113,7 @@ class TrainingJob:
                     "init_seed": self.init_seed, "units_per_round": self.units_per_round, "memory_mb": self.memory_mb}
             if self.compute_s:
                 spec["compute_s"] = self.compute_s
-            return spec
+            return self._with_public(spec)
         if self.finetune:  # a shape of its own, so MLP specs stay exactly as they were
             spec = {"id": self.job_id, "fee_per_round": self.fee_per_round, **self.spec.to_json(),
                     "data": self.data_source, "init_seed": self.init_seed, "lr": self.lr, "batch_size": self.batch_size,
@@ -118,7 +122,7 @@ class TrainingJob:
                     "max_update_ratio": self.max_update_ratio}
             if self.compute_s:
                 spec["compute_s"] = self.compute_s
-            return spec
+            return self._with_public(spec)
         spec = {
             "id": self.job_id, "fee_per_round": self.fee_per_round,
             "model": {"n_in": self.spec.n_in, "n_out": self.spec.n_out,
@@ -133,6 +137,11 @@ class TrainingJob:
             spec["compute_s"] = self.compute_s
         if self.shards > 1:  # likewise
             spec["shards"] = self.shards
+        return self._with_public(spec)
+
+    def _with_public(self, spec: dict) -> dict:
+        if self.public is not None:  # left out when unsaid, so specs posted before it existed hash as they did
+            spec["public"] = self.public
         return spec
 
     def spec_json(self) -> str:
@@ -162,6 +171,9 @@ class TrainingJob:
                 memory_mb=int(d["memory_mb"]), tolerance=float(d["tolerance"]),
                 max_update_ratio=float(d["max_update_ratio"]), compute_s=float(d.get("compute_s", 0)),
                 shards=int(d.get("shards", 1)),
+                # Only a bool is a saying: nodes before 0.5.28 ignore unknown MLP fields, so "yes"/1/[] there is valid
+                # and refusing it would fork validators. Anything else reads as unsaid (not public, not re-emitted).
+                public=d["public"] if isinstance(d.get("public"), bool) else None,
             )
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError, json.JSONDecodeError) as e:
             # (OverflowError: int() of 1e999, JSON's Infinity; RecursionError: JSON nested too deep. Either escaped
@@ -203,6 +215,8 @@ class TrainingJob:
                 raise InvalidJob(msg)
 
         need(isinstance(self.job_id, str) and _JOB_ID.match(self.job_id), "job id must be 1-64 chars of a-z 0-9 . _ -")
+        need(self.public is None or not (self.es or self.finetune or self.deepseek),
+             "a fine-tune's or ES job's spec has no field 'public'")
         if self.es:
             problems = self.spec.problems_list()
             need(not problems, "; ".join(problems))
@@ -406,6 +420,8 @@ def is_finetune_spec(d) -> bool:
 
 
 # Every field a fine-tune's spec may have (TrainingJob.to_spec): anything else is refused rather than ignored.
+# `public` is accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28;
+# until then a `public` key there would split validators.
 FINETUNE_KEYS = {"id", "fee_per_round", "base", "manifest", "model", "lora", "seq_len", "optimizer", "precision", "data",
                  "init_seed", "lr", "batch_size", "steps_per_unit", "checkpoint_every", "units_per_round", "memory_mb",
                  "tolerance", "max_update_ratio", "compute_s"}

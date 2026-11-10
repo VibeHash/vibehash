@@ -3,7 +3,7 @@
 Train a model on a CSV file: posts it as a job for the network to train.
 
 ```
-vibehash train [-h] [--base MODEL] [--rank RANK] [--lr LR] [--max-len MAX_LEN] [--units UNITS] [--yes] [--label LABEL] [--evo] [--budget BUDGET] [--fee FEE] [--hidden HIDDEN] [--id ID] [--node NODE] [--wallet WALLET] [--plain] [data]
+vibehash train [-h] [--base MODEL] [--rank RANK] [--lr LR] [--max-len MAX_LEN] [--units UNITS] [--yes] [--label LABEL] [--evo] [--budget BUDGET] [--fee FEE] [--hidden HIDDEN] [--id ID] [--node NODE] [--wallet WALLET] [--plain] [--tor] [--proxy URL] [--tor-mode {control-only,strict}] [data]
 ```
 
 Arguments:
@@ -27,6 +27,9 @@ Flags:
 - `--node NODE`: node address (default: the one `setup` saved).
 - `--wallet WALLET`: wallet file (default: the one `setup` saved).
 - `--plain`: print the plan and return, instead of following the job on the live training dashboard (piped output does this anyway).
+- `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
+- `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
+- `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).
 
 Examples:
 

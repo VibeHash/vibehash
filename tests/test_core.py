@@ -12,7 +12,7 @@ from vibehash.crypto import KeyPair, h256, merkle_proof, merkle_root, merkle_ver
 from vibehash.ledger import SYSTEM, UNBONDING_ROUNDS, Chain, InvalidBlock, RoundSummary, Tx, canonical
 from vibehash.replay import replay_block
 from vibehash.model import ModelSpec, params_hash, relative_distance
-from vibehash.protocol import Protocol
+from tests.protocol import Protocol
 from vibehash.tasks import SYN_PER_VIBE, TrainingJob, Verdict, WorkUnit
 from vibehash.verification import check_openings, check_sanity, detection_probability, replay_openings, required_openings
 from vibehash.worker import GTX_1060, LOW_END_LAPTOP, NETBOOK, OFFICE_DESKTOP, RTX_3060, HardwareProfile, Worker

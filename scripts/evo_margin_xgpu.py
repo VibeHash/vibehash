@@ -31,6 +31,10 @@ few percent from it, which moves where the logits sit but not how two GPUs round
 
 Needs: this repository installed with the evo extra (pip install -e .[evo]), PyTorch with CUDA (vibehash
 install-gpu), and for the default task mix the `datasets` library (the problems come from Hugging Face datasets).
+
+--device npu (Qwen3.5 only) answers or checks on an NPU through OpenVINO (pip install openvino; vibehash/es_npu.py):
+the model's decode step compiled for the NPU, in its fp16; the shared prompt reading on the CPU in float32. --npu-device
+names another OpenVINO device (GPU: an Intel GPU through OpenVINO; CPU with --npu-precision f32: the reference).
 """
 from __future__ import annotations
 
@@ -47,6 +51,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # this checkout
 MARGINS = (0.1, 0.375, 0.5, 0.75, 1.0)
 DEFAULT_SEED = "5eed0e7a1c3b2d4f"  # any fixed round seed: it draws the problems and every pair's noise
 FORMAT = "vibehash-evo-margin/1"
+
+
+def _npu_facts(a, eng=None) -> dict:
+    import openvino as ov
+    core = ov.Core()
+    dev = a.npu_device
+    out = {"device": "npu", "openvino": ov.__version__, "ov_device": dev, "python": platform.python_version(),
+           "os": platform.platform(), "gpu": core.get_property(dev, "FULL_DEVICE_NAME"),
+           "capability": f"{dev.lower()} via OpenVINO"}
+    if dev == "NPU":
+        out["npu_driver"] = str(core.get_property(dev, "NPU_DRIVER_VERSION"))
+    if eng is not None:
+        out["precision"] = eng.precision
+        out["rows"] = eng.n
+        out["capability"] = f"{dev.lower()} {eng.precision}"
+    try:
+        from vibehash import __version__
+        out["vibehash"] = __version__
+    except ImportError:
+        pass
+    return out
+
+
+def _npu_engine(a, rt, spec, rows):
+    from vibehash import es_npu
+    L = es_npu.cache_slots(rows, spec.max_tokens)
+    cache = Path.home() / ".vibehash" / "cache" / "openvino"
+    return es_npu.Engine(rt, rt.linears, spec.pairs * spec.rank, L, n=a.npu_rows, device=a.npu_device,
+                         precision=a.npu_precision, cache_dir=cache)
 
 
 def _gpu_facts(device: str) -> dict:
@@ -89,7 +122,9 @@ def _label(facts: dict) -> str:
 def _setup(model: str, tasks: tuple, pairs: int, problems: int, max_tokens: int, device: str):
     """The spec, runtime and twist factors a worker or checker would have for this job, built off the chain."""
     from vibehash import compute, es_client, es_local
-    if device != "cpu":
+    if device == "npu":
+        device = "cpu"  # es_npu reads the base from the CPU float32 model; the twisted steps go to the NPU
+    elif device != "cpu":
         # The worker's PyTorch settings (compute.get_backend makes one): TF32 off and deterministic kernels, which
         # also keeps Hopper and Blackwell's attention off cuDNN's kernel, as on a worker
         compute.TorchBackend(device)
@@ -118,7 +153,9 @@ def cmd_answer(a) -> None:
     from vibehash import es_client, es_fast, es_tasks
     tasks = tuple(es_tasks.VIBE) if a.tasks == "vibe" else tuple(t.strip() for t in a.tasks.split(","))
     found, spec, rt = _setup(a.model, tasks, a.pairs, a.problems, a.max_tokens, a.device)
-    facts = _gpu_facts(a.device)
+    npu = a.device == "npu"
+    eng = _npu_engine(a, rt, spec, _rows(rt, spec, int(a.seed[0], 16))) if npu else None
+    facts = _npu_facts(a, eng) if npu else _gpu_facts(a.device)
     print(f"answering on {_label(facts)}: {spec.pairs * 2} members x {spec.problems} problems, up to {spec.max_tokens} "
           f"tokens, model {found.base}", flush=True)
     rounds = []
@@ -128,9 +165,13 @@ def cmd_answer(a) -> None:
         fac = es_client.round_factors(rt, spec, seed)
         members = _members(spec)
         t0 = time.perf_counter()
-        with torch.no_grad():
-            got = es_fast.answer_members(rt, rt.linears, fac, members, rows, spec.max_tokens, spec.sigma, spec.rank,
-                                         max(512, len(rows)))
+        if npu:
+            from vibehash import es_npu
+            got = es_npu.answer(eng, rt, fac, members, rows, spec.max_tokens, spec.sigma, spec.rank)
+        else:
+            with torch.no_grad():
+                got = es_fast.answer_members(rt, rt.linears, fac, members, rows, spec.max_tokens, spec.sigma,
+                                             spec.rank, max(512, len(rows)))
         took = time.perf_counter() - t0
         lengths = [len(x) for m in got for x in m]
         print(f"  seed {seed_hex}: {len(members)} members answered in {took:.0f} s (answers {min(lengths)}-"
@@ -149,9 +190,13 @@ def cmd_answer(a) -> None:
 
 # --- check -----------------------------------------------------------------------------------------------------------
 
-def _gaps(rt, spec, fac, member, rows, answers) -> list[float]:
+def _gaps(rt, spec, fac, member, rows, answers, eng=None) -> list[float]:
     """The checker's numbers for one member (es_client.Es2Work.check): its worst gap on each of its answers."""
     from vibehash import es_fast
+    if eng is not None:
+        from vibehash import es_npu
+        g, _ = es_npu.forced(eng, rt, fac, [tuple(member)], rows, [answers], spec.max_tokens, spec.sigma, spec.rank)
+        return [round(float(x), 6) for x in g[0].tolist()]
     g = es_fast.gaps_items(rt, rt.linears, fac, [tuple(member)], list(zip(rows, answers)), spec.sigma, spec.rank,
                            max_tokens=spec.max_tokens)
     return [round(float(x), 6) for x in g[0].tolist()]
@@ -169,7 +214,9 @@ def cmd_check(a) -> None:
                              a.device)
     if found.base != dump["model"]:
         sys.exit(f"this machine found {found.base}, the dump was answered with {dump['model']}")
-    facts = _gpu_facts(a.device)
+    npu = a.device == "npu"
+    eng = _npu_engine(a, rt, spec, dump["rounds"][0]["rows"]) if npu else None
+    facts = _npu_facts(a, eng) if npu else _gpu_facts(a.device)
     print(f"checking answers from {_label(dump['answered_on'])} on {_label(facts)}", flush=True)
     rounds = []
     for r in dump["rounds"]:
@@ -186,7 +233,7 @@ def cmd_check(a) -> None:
         with torch.no_grad():
             for i, (j, s) in enumerate(members):
                 print(f"\r  seed {r['seed']}: member {i + 1}/{len(members)}", end="", flush=True)
-                honest.append(_gaps(rt, spec, fac, (j, s), rows, answers[i]))
+                honest.append(_gaps(rt, spec, fac, (j, s), rows, answers[i], eng))
                 k = twin.get((j, -s))
                 if k is None:
                     continue
@@ -194,7 +241,7 @@ def cmd_check(a) -> None:
                     identical.append([j, s])
                     continue
                 cheat.append({"member": [j, s], "claims": [j, -s], "gaps": _gaps(rt, spec, fac, (j, s), rows,
-                                                                                  answers[k])})
+                                                                                  answers[k], eng)})
         print(f"\r  seed {r['seed']}: {len(members)} members, {len(cheat)} twin swaps, {len(identical)} identical "
               f"twins, in {time.perf_counter() - t0:.0f} s", flush=True)
         rounds.append({"seed": r["seed"], "members": [list(m) for m in members], "honest": honest, "cheat": cheat,
@@ -271,11 +318,15 @@ def main(argv=None) -> None:
     an.add_argument("--problems", type=int, default=16)
     an.add_argument("--max-tokens", type=int, default=512)
     an.add_argument("--seed", nargs="+", default=[DEFAULT_SEED], help="round seeds in hex (each one a round)")
-    an.add_argument("--device", default="cuda", help="cuda, cuda:1, ... (or cpu, slowly)")
+    an.add_argument("--device", default="cuda", help="cuda, cuda:1, ..., xpu, npu (or cpu, slowly)")
     an.add_argument("--out", required=True, help="the dump to write (.json.gz)")
     ck = sub.add_parser("check", help="teacher-force a dump's answers on this GPU, honest and twin-swapped")
     ck.add_argument("dump")
     ck.add_argument("--device", default="cuda")
+    for sp in (an, ck):
+        sp.add_argument("--npu-device", default="NPU", help="with --device npu: the OpenVINO device (NPU, GPU, CPU)")
+        sp.add_argument("--npu-precision", default=None, help="with --device npu: an inference precision (f16, f32)")
+        sp.add_argument("--npu-rows", type=int, default=16, help="with --device npu: rows a compiled step decodes")
     ck.add_argument("--out", required=True, help="the result to write (.json)")
     rp = sub.add_parser("report", help="one table from several result files")
     rp.add_argument("results", nargs="+")

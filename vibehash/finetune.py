@@ -35,6 +35,7 @@ import hashlib
 import json
 import math
 import re
+import shutil
 import threading
 import zipfile
 from dataclasses import dataclass, field
@@ -630,6 +631,155 @@ def export_peft(spec: LoraSpec, theta: np.ndarray, out: str | Path, about: dict 
               f'model = PeftModel.from_pretrained(base, "{out.name}")', "```", ""]
     (out / "README.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
     return out
+
+
+# --- a merged model: the base with the adapters folded into its weights --------------------------------------------
+
+_FLOAT_BYTES = {"BF16": 2, "F16": 2, "F32": 4}  # the stored dtypes a merge reads and writes (llm.STORED's)
+
+
+def _as_f32(dtype: str, raw: bytes, shape) -> np.ndarray:
+    """A stored float tensor's values as float32: exact, since bf16 and f16 values are all float32 values."""
+    if dtype == "BF16":
+        return (np.frombuffer(raw, "<u2").astype(np.uint32) << 16).view(np.float32).reshape(shape)
+    return np.frombuffer(raw, {"F16": "<f2", "F32": "<f4"}[dtype]).astype(np.float32).reshape(shape)
+
+
+def _stored(a: np.ndarray, dtype: str) -> bytes:
+    """float32 values as `dtype`'s little-endian bytes, rounded to nearest, ties to even (as PyTorch rounds)."""
+    if dtype == "BF16":
+        bits = np.ascontiguousarray(a, dtype=np.float32).view(np.uint32).astype(np.uint64)
+        return ((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16).astype("<u2").tobytes()
+    return np.ascontiguousarray(a, dtype={"F16": "<f2", "F32": "<f4"}[dtype]).tobytes()
+
+
+def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, about: dict | None = None, *,
+                  float32: bool = False, read_file=None, progress=None) -> dict:
+    """The base model with the adapters folded in, W + (alpha/rank)·B·A for every adapted projection, saved as a
+    Hugging Face model folder that loads as the base itself does (AutoModelForCausalLM.from_pretrained, vLLM,
+    llama.cpp's converter, Ollama), with no PEFT. No PyTorch either: it's NumPy, tensor by tensor.
+
+    `manifest` is the base's hub.Manifest, the one the job pins. Every weight comes from the tensor cache, which
+    downloads it once (as a worker's model is) and checks it against the manifest; config.json and the tokenizer come
+    through `read_file(path)` (default hub.fetch_file, which checks them against it too). The files and tensors keep
+    the base's layout and names, so the folder can stand in for the base anywhere.
+
+    Each tensor keeps the base's dtype (bf16, usually: the same size as the base) unless `float32`. Workers train
+    with the adapters beside W in float32, so rounding W + B·A back to bf16 moves the weights off what they trained,
+    by a share of the change that's small for a big change and large for a tiny one: it's measured ("rounding", the
+    rounding error's size over the change's, root-mean-square over every adapted weight) and reported. float32 keeps
+    the change (to float32's precision) at twice the size. Returns what finetune.json says."""
+    from . import hub
+
+    if manifest.sha256 != spec.manifest:
+        raise ValueError("that manifest isn't the base model the job pins")
+    out = Path(out)
+    if out.exists() and any(out.iterdir()) and not (out / "finetune.json").exists():
+        raise FileExistsError(f"{out} has files in it that aren't an earlier merged model: pick another --out")
+    b = np.asarray(theta[spec.parts[0]], dtype=np.float64)
+    changes, i = {}, 0
+    for (name, rows, _), a in zip(spec.modules(), spec.lora_a()):
+        changes[f"{name}.weight"] = (b[i:i + rows * spec.rank].reshape(rows, spec.rank), a.astype(np.float64))
+        i += rows * spec.rank
+    missing = [n for n in changes if n not in manifest.tensors]
+    if missing:
+        raise ValueError(f"the base model has no tensor {missing[0]}, which the adapters change")
+    odd = sorted({e.dtype for e in manifest.tensors.values()} - set(_FLOAT_BYTES))
+    if odd:
+        raise ValueError(f"the base model stores tensors as {', '.join(odd)}: a merge reads BF16, F16 and F32")
+
+    paths = hub.fetch_tensors(manifest, list(manifest.tensors), progress=progress,
+                              label=f"fetching {spec.repo} ({hub._gb(manifest.total_bytes)})")
+    tmp = out.with_name(out.name + ".partial")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    files: dict[str, list[str]] = {}
+    for name, e in sorted(manifest.tensors.items(), key=lambda kv: (kv[1].file, kv[1].offset)):
+        files.setdefault(e.file, []).append(name)
+    dtype_of = {n: "F32" if float32 else e.dtype for n, e in manifest.tensors.items()}
+    err2 = change2 = 0.0
+    weight_map, total = {}, 0
+    for file, names in files.items():
+        header, offset = {}, 0
+        for n in names:
+            size = math.prod(manifest.tensors[n].shape) * _FLOAT_BYTES[dtype_of[n]]
+            header[n] = {"dtype": dtype_of[n], "shape": list(manifest.tensors[n].shape), "data_offsets": [offset, offset + size]}
+            offset += size
+            weight_map[n] = file
+        total += offset
+        header["__metadata__"] = {"format": "pt"}
+        raw_header = json.dumps(header, separators=(",", ":")).encode()
+        raw_header += b" " * (-len(raw_header) % 8)
+        (tmp / file).parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp / file, "wb") as f:  # the header first, then each tensor's bytes: one tensor in memory at a time
+            f.write(len(raw_header).to_bytes(8, "little"))
+            f.write(raw_header)
+            for n in names:
+                e, raw = manifest.tensors[n], paths[n].read_bytes()  # (the cache checked it against the manifest)
+                if n in changes:
+                    bm, a = changes[n]
+                    change = spec.scaling * (bm @ a)
+                    exact = _as_f32(e.dtype, raw, e.shape).astype(np.float64) + change
+                    data = _stored(exact.astype(np.float32), dtype_of[n])
+                    err2 += float(np.sum((_as_f32(dtype_of[n], data, e.shape) - exact) ** 2))
+                    change2 += float(np.sum(change ** 2))
+                else:
+                    data = raw if dtype_of[n] == e.dtype else _stored(_as_f32(e.dtype, raw, e.shape), dtype_of[n])
+                f.write(data)
+    if len(files) > 1 or hub.INDEX_FILE in manifest.files:
+        (tmp / hub.INDEX_FILE).write_text(json.dumps({"metadata": {"total_size": total},
+                                                      "weight_map": dict(sorted(weight_map.items()))}, indent=2) + "\n",
+                                          encoding="utf-8", newline="\n")
+    read_file = read_file or (lambda p: hub.fetch_file(manifest, p))
+    for p in sorted(manifest.files):  # config.json, generation_config.json, the tokenizer and its chat template
+        if p.endswith(".safetensors") or p == hub.INDEX_FILE:
+            continue
+        data = read_file(p)
+        if p == "config.json" and float32:
+            cfg = json.loads(data)
+            cfg["dtype" if "dtype" in cfg else "torch_dtype"] = "float32"  # (newer transformers name it dtype)
+            data = (json.dumps(cfg, indent=2) + "\n").encode()
+        (tmp / p).parent.mkdir(parents=True, exist_ok=True)
+        (tmp / p).write_bytes(data)
+
+    stored = sorted({dtype_of[n] for n in changes})
+    info = {**(about or {}), "base": spec.base, "manifest": spec.manifest, "rank": spec.rank, "alpha": spec.alpha,
+            "targets": list(spec.targets), "projections changed": len(changes),
+            "dtype": {"BF16": "bfloat16", "F16": "float16", "F32": "float32"}[stored[0]] if len(stored) == 1 else stored,
+            "rounding": math.sqrt(err2 / change2) if change2 else 0.0, "trained": change2 > 0}
+    (tmp / "finetune.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8", newline="\n")
+    (tmp / "README.md").write_text(_merged_readme(spec, info, out.name), encoding="utf-8", newline="\n")
+    if out.exists():
+        shutil.rmtree(out)
+    tmp.replace(out)
+    return info
+
+
+def _merged_readme(spec: LoraSpec, info: dict, folder: str) -> str:
+    about = {k: v for k, v in info.items() if k not in ("base", "manifest", "rank", "alpha", "targets", "dtype",
+                                                         "rounding", "trained", "projections changed", "job_id")}
+    if not info["trained"]:
+        kept = "Not trained yet: B is still zero, so these are the base model's own weights."
+    elif info["dtype"] == "float32":
+        kept = "float32, so the fine-tune's change is kept whole (to float32's precision)."
+    else:
+        kept = (f"{info['dtype']}, the base's own precision. Rounding base + change back to it is off by "
+                f"{info['rounding']:.1%} of the change (root-mean-square, over every changed weight); "
+                "`vibehash job download --merged --float32` keeps it whole, at twice the size.")
+    lines = [f"# {spec.repo}, fine-tuned on Vibe Hash", "",
+             f"The base model with job `{info.get('job_id', '?')}`'s LoRA adapter merged into its weights "
+             f"(W + {spec.alpha:g}/{spec.rank}·B·A on {info['projections changed']} projections): an ordinary model "
+             "folder, which loads wherever the base does, with no adapter or PEFT.", "",
+             f"- Base model: [{spec.repo}](https://huggingface.co/{spec.repo}) at commit `{spec.commit}`; its licence "
+             "applies to this model too",
+             f"- Adapter: LoRA rank {spec.rank}, alpha {spec.alpha:g}, on {', '.join(spec.peft_config()['target_modules'])}",
+             f"- Weights: {kept}"]
+    lines += [f"- {k.replace('_', ' ').capitalize()}: {v}" for k, v in about.items() if v is not None]
+    lines += ["", "```python", "from transformers import AutoModelForCausalLM, AutoTokenizer", "",
+              f'model = AutoModelForCausalLM.from_pretrained("{folder}")',
+              f'tokenizer = AutoTokenizer.from_pretrained("{folder}")', "```", "",
+              f"or vLLM: `vllm serve {folder}`", ""]
+    return "\n".join(lines)
 
 
 # --- the poster's side: from chats to tokens -----------------------------------------------------------------------

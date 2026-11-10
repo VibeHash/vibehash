@@ -15,10 +15,10 @@ So what it reports is what a checker on that card would decide.
 
 | Machine | Card | Architecture | Who |
 | --- | --- | --- | --- |
-| A | RTX 4060, 8 GB | Ada, `sm_89` | Caleb |
-| B | RTX 2060, 6 GB | Turing, `sm_75` | Caleb |
+| A | RTX 4060, 8 GB | Ada, `sm_89` | operator 2 |
+| B | RTX 2060, 6 GB | Turing, `sm_75` | operator 2 |
 | C | RTX 3090 or RTX A5000, 24 GB | Ampere, `sm_86` | RunPod |
-| D | RTX 4070 SUPER (and a 4090 if one is free) | Ada, `sm_89` | Cole |
+| D | RTX 4070 SUPER (and a 4090 if one is free) | Ada, `sm_89` | operator 1 |
 
 Every machine answers once and checks every machine's answers, its own included: 4 dumps × 4 checkers = 16 results.
 A machine checking its own answers is the baseline, and should show a worst gap of exactly 0.

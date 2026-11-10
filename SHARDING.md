@@ -4,8 +4,8 @@
 - **The core** (`vibehash/shards.py`, `tests/test_shards.py`): it splits a
   model into shards, trains a unit as a pipeline across them, commits to every
   shard's work and checks one cell at a time.
-- **The coordinator** (`tests/test_sharded_rounds.py`, `python simulate.py
-  --shards 3`) runs sharded jobs whose job spec has a `shards` field:
+- **The coordinator** (`tests/test_sharded_rounds.py`; the old `simulate.py --shards 3` driver was removed, see git history)
+  runs sharded jobs whose job spec has a `shards` field:
   - it forms teams from the round's registrations;
   - the beacon picks cells, and staked checkers who hold no shard of that unit
     check them;
@@ -208,10 +208,10 @@ averaged each round exactly as single workers' are today. With 10 teams,
   one device. Transformer kernels in bf16, attention above all, need
   deterministic modes and measured tolerances, as DESIGN §8 did for MLPs.
 
-## 7. Mixture-of-experts (prototype: moe.py)
+## 7. Mixture-of-experts (prototype: tests/reference/moe.py)
 
 **Status: a tested prototype of the block and its checks.**
-`vibehash/moe.py` is a mixture-of-experts (MoE) feed-forward block in NumPy,
+`tests/reference/moe.py` is a mixture-of-experts (MoE) feed-forward block in NumPy,
 meant to replace a transformer's MLP, together with the checks below.
 `tests/test_moe.py` shows they hold. Nothing uses it yet.
 

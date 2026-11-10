@@ -1,19 +1,22 @@
 # Publishes vibehash to PyPI when a version tag is pushed, e.g.:
 #   git tag v0.4.0 && git push origin v0.4.0
 # PyPI trusts this workflow through a "trusted publisher" (no API token is stored anywhere):
-# project vibehash, owner AlphaChad5000, repository vibehash, workflow publish.yml, environment pypi.
+# project vibehash, owner as recorded in PyPI's trusted-publisher settings, repository vibehash, workflow publish.yml, environment pypi.
 name: Publish to PyPI
 
 on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Check the tag matches the version in pyproject.toml
@@ -22,19 +25,34 @@ jobs:
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME doesn't match version $version in pyproject.toml"; exit 1
           fi
-      - name: Run the fast tests
+      # A release runs the whole suite: every extra (finetune, evo, app) and CPU PyTorch, so the DeepSeek, Evo and window tests import, found by
+      # discovery so no module is ever left out of the list.
+      - name: Install Vibe Hash and CPU PyTorch
         run: |
-          python -m pip install -e .
-          python -m unittest tests.test_core tests.test_consensus tests.test_hardening tests.test_earn_in tests.test_round_length tests.test_record_v2 tests.test_rules_v2 tests.test_rules_v4 tests.test_shards tests.test_minerui tests.test_trainui tests.test_transformer tests.test_moe tests.test_hub tests.test_sharded_rounds tests.test_versions_supply tests.test_genesis_check tests.test_starter_jobs
+          python -m pip install -e ".[finetune,evo,app]"
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Run the tests
+        run: python -m unittest discover -s tests -p "test_*.py"
       - name: Build the wheel and source archive
         run: |
           python -m pip install build twine
           python -m build
           python -m twine check dist/*
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist
           path: dist/
+      # The hash-pinned requirements for the release manifest are compiled here, where there is no signing key and no
+      # environment, with uv installed from a hash-pinned file. They travel in their own artifact, not in dist/, which
+      # the PyPI upload reads; the manifest job signs their hashes after PyPI has the wheel.
+      - name: Compile the hash-pinned requirements (the launcher's set, and the Evo set)
+        run: |
+          python -m pip install --require-hashes -r scripts/uv-requirements.txt
+          python scripts/release_manifest.py compile --out reqs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: requirements
+          path: reqs/
 
   publish:
     needs: build
@@ -45,8 +63,65 @@ jobs:
     permissions:
       id-token: write  # what lets PyPI's trusted publishing recognise this workflow
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+
+  # The signed release manifest, made only after PyPI has the wheel, so a manifest never names a wheel PyPI doesn't have.
+  # It runs in the `pypi` environment because that is where the secret RELEASE_SIGNING_KEY (the hex secret from
+  # scripts/make_release_key.py) lives. The key is in the environment of one step only, the one that runs
+  # scripts/release_manifest.py sign, which needs nothing but the standard library and vibehash/crypto.py: no pip, no
+  # uv, no third-party code runs next to it. It hashes the very wheel the publish job uploaded and the requirements the
+  # build job compiled, signs release.json, and attaches release.json, release.sig and the two requirements files to the
+  # tag's GitHub release, where the launcher and `vibehash update` fetch them. With no key set the step says so and
+  # attaches nothing: the release is still on PyPI, and installers skip updating to a release with no manifest.
+  manifest:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write  # to attach the files to the tag's release; only this job has it
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: requirements
+          path: reqs/
+      - name: Sign the manifest
+        id: sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set +e
+          python scripts/release_manifest.py sign --dist dist --reqs reqs
+          rc=$?
+          if [ $rc -eq 0 ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          elif [ $rc -eq 3 ]; then
+            echo "::warning::RELEASE_SIGNING_KEY is not set in the pypi environment; this release gets no manifest and installers will skip updating to it"
+          else
+            exit $rc
+          fi
+      - name: Attach the manifest to the tag's release (made here if launcher.yml hasn't)
+        if: steps.sign.outputs.signed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          # launcher.yml may be creating the same release at this moment: if ours fails, it is enough that it exists now
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed." || \
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload "$tag" reqs/release.json reqs/release.sig "reqs/requirements-$version.txt" "reqs/requirements-$version-evo.txt" --repo "$GITHUB_REPOSITORY" --clobber

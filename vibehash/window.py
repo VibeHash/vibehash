@@ -24,6 +24,7 @@ and the avatar is clicked, say) sees it and leaves quietly.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -35,14 +36,14 @@ import webbrowser
 from pathlib import Path
 
 from . import app as app_module
-from . import presence, settings
+from . import credstore, presence, settings
 from .settings import WATCH_PORT as DEFAULT_PORT
 
 TITLE = "Vibe Hash"
 SIZE = (1100, 760)
 MIN_SIZE = (760, 520)
 DASHBOARD = Path(__file__).resolve().parent / "data" / "dashboard.html"
-ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off")
+ORDERS = ("pause", "resume", "stop", "avatar-on", "avatar-off", "restart")  # app.ORDERS (app imports this module)
 # The only places the page can send someone, by name (Api.open_link): never a URL the page makes up, so nothing in the
 # page, or put into it, can open an arbitrary address. They open in the system's browser, never inside this window.
 LINKS = {"site": "https://vibehash.org", "whitepaper": "https://vibehash.org/whitepaper.pdf",
@@ -84,11 +85,20 @@ def page(port: int = DEFAULT_PORT) -> str:
 
 def page_file(port: int = DEFAULT_PORT) -> Path:
     """page(port) written to the app's folder, in a folder of its own: pywebview serves the file's folder, and that
-    folder holds nothing else."""
+    folder holds nothing else.
+    The file's name carries a hash of what's in it: the web view caches pages by address, and under the same name an
+    updated app could go on showing the old page."""
     folder = app_module.app_dir() / "window"
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"dashboard-{port}.html"
-    path.write_text(page(port), encoding="utf-8")
+    text = page(port)
+    path = folder / f"dashboard-{port}-{hashlib.sha256(text.encode()).hexdigest()[:12]}.html"
+    for old in folder.glob(f"dashboard-{port}*.html"):
+        if old != path:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -118,13 +128,23 @@ class Api:
     # -- the account --
 
     def wallet(self) -> dict:
-        """The wallet the app runs with: its address and file (from the app's state, which setup writes), and the
-        recovery words while their file is still there (setup saves a new wallet's words to a file only this user can
-        read; the page shows them once and says to keep them somewhere safe)."""
+        """The wallet the app runs with: its address and file (from the app's state, which setup writes), and its
+        recovery words. A new wallet whose key is in the credential store has its words there too (app.hold_words), or
+        in the app's memory when the store refused them: the state says `words_pending` and the port of the app's
+        listener (app.serve_words), and they are fetched from there each time, on every start, until `words_seen()`.
+        An older or headless setup saved them to a file only this user can read, which is parsed here while it is
+        still there; the page shows them once and says to keep them somewhere safe."""
         info = dict((app_module.read_state() or {}).get("wallet") or {})
         words_file = info.get("words_file")
         words: list[str] = []
-        if words_file:
+        port = _words_port(info)
+        if info.get("words_pending") and port:
+            try:
+                with urllib.request.urlopen(_words_request(info, "/wallet/words"), timeout=3) as r:
+                    words = [str(w) for w in json.loads(r.read())["words"]]
+            except (OSError, ValueError, KeyError, TypeError):  # the app is gone, or the words were seen
+                words = []
+        elif words_file:
             try:
                 for line in Path(words_file).read_text(encoding="utf-8").splitlines():
                     parts = line.strip().split(". ", 1)
@@ -135,6 +155,30 @@ class Api:
         info["words"] = words
         return info
 
+    def words_seen(self) -> dict:
+        """The user wrote the recovery words down: tell the app, which forgets them and clears `words_pending`."""
+        info = (app_module.read_state() or {}).get("wallet") or {}
+        if not _words_port(info):
+            return {"ok": False, "why": "no recovery words are waiting"}
+        try:
+            with urllib.request.urlopen(_words_request(info, "/wallet/words/seen", post=True), timeout=3):
+                pass
+        except OSError as e:
+            return {"ok": False, "why": str(e)}
+        return {"ok": True}
+
+    def mfa_status(self) -> dict:
+        """Whether the app's wallet asks for an authenticator code before it sends (`vibehash wallet mfa on`), for a
+        send from the page to call the same gate; {"on": False} with no wallet, {"on": None, "why": ...} when the store can't be read. The page has
+        no send today."""
+        address = str(((app_module.read_state() or {}).get("wallet") or {}).get("address") or "").lower()
+        if not address:
+            return {"on": False}
+        try:
+            return {"on": bool(credstore.get(credstore.WALLET_TOTP, address))}
+        except credstore.Unavailable as e:  # unknown, not off: the page must not offer a send as ungated
+            return {"on": None, "why": str(e)}
+
     # -- settings --
 
     def settings(self) -> dict:
@@ -142,8 +186,9 @@ class Api:
         return {"avatar": bool(cfg.get("avatar", True)), "welcomed": bool(cfg.get("welcomed", False)),
                 "startup": app_module.startup_is_on(), "home": str(settings.home()), "version": _version(),
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
+                "deepseek": settings.deepseek_choice(cfg), "deepseek_pilot": settings.deepseek_pilot(),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
-                "words_file": _words_file_present()}
+                "words_file": _words_file_present(), "words_pending": _words_pending(), **_launcher()}
 
     def set_option(self, name: str, value) -> dict:
         """One of Settings' switches (OPTIONS: the automatic pauses, reduced motion), or idle_minutes. The running app
@@ -157,6 +202,17 @@ class Api:
             return {"ok": False, "why": f"no such setting: {name}"}
         settings.save(**{name: value})
         return {"ok": True, name: value}
+
+    def set_deepseek(self, on: bool) -> dict:
+        """Whether the worker takes DeepSeek work (about 30 GB of model files, deleted when the job ends), as
+        `vibehash worker --deepseek yes|no` would remember it. The worker reads it as it starts, so a running app is
+        told to start its worker again."""
+        if not isinstance(on, bool):
+            return {"ok": False, "why": "on is true or false"}
+        settings.save(deepseek="yes" if on else "no")
+        if app_module.running():
+            app_module.order("restart")
+        return {"ok": True, "deepseek": "yes" if on else "no"}
 
     def set_avatar(self, on: bool) -> dict:
         """The floating avatar: kept in settings for the next start, and told to the running app now."""
@@ -357,6 +413,26 @@ def python(executable: str | None = None, package: Path | None = None, frozen: b
     return Path(executable)
 
 
+def _words_request(wallet: dict, path: str, post: bool = False) -> urllib.request.Request:
+    """A request to the app's recovery-words listener, with the token the app left in its state."""
+    return urllib.request.Request(f"http://127.0.0.1:{_words_port(wallet)}{path}", data=b"" if post else None,
+                                  method="POST" if post else "GET",
+                                  headers={"X-Words-Token": str(wallet.get("words_token") or "")})
+
+
+def _words_port(wallet: dict) -> int | None:
+    """The port of the app's recovery-words listener from the state, only if it is a real port: the state is a file,
+    and the window must only ever ask this computer (127.0.0.1), whatever the file says."""
+    port = wallet.get("words_port")
+    return port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else None
+
+
+def _words_pending() -> bool:
+    """Whether a new wallet's recovery words are waiting to be written down (words_seen), and the app serves them."""
+    wallet = (app_module.read_state() or {}).get("wallet") or {}
+    return bool(wallet.get("words_pending")) and _words_port(wallet) is not None
+
+
 def _words_file_present() -> bool:
     """Whether setup's recovery-words file is still on disk (Settings offers to delete it), without reading it."""
     path = ((app_module.read_state() or {}).get("wallet") or {}).get("words_file")
@@ -397,6 +473,20 @@ def redact(value, home: str | None = None):
             value = value.replace(home, "~").replace(home.replace("\\", "/"), "~")
         return _ADDRESS.sub(r"\1...\2", value)
     return value
+
+
+MIN_LAUNCHER = "1.2"  # the first launcher that installs only signed releases (launcher/vibehash_launcher.py VERSION)
+
+
+def _launcher() -> dict:
+    """Which installer started this app: its version (the launcher exports $VIBEHASH_LAUNCHER_VERSION from 1.2 on), and
+    whether it is one too old to verify releases. An old launcher keeps updating the package but never replaces its own
+    .exe, so the dashboard tells the person to download the new installer. Not under a launcher (pip, a script): not old."""
+    from . import update
+    version = os.environ.get("VIBEHASH_LAUNCHER_VERSION")
+    have = update.parse_version(version)
+    outdated = bool(os.environ.get("VIBEHASH_LAUNCHER")) and (have is None or have < update.parse_version(MIN_LAUNCHER))
+    return {"launcher_version": version, "launcher_outdated": outdated}
 
 
 def _version() -> str:

@@ -156,7 +156,7 @@ is thinking + `</think>` + answer + EOS.
 
 ## The job's size
 
-These figures come from `scripts/deepseek_split_plan.py`'s model (DEEPSEEK.md
+These figures come from `scripts/deepseek_split_plan.py` (removed in 0.5.28; see git history)'s model (DEEPSEEK.md
 §8, "The split prep"), run by the builder on these exact token counts. They
 assume a cut at 36 (K = 4) and prep pieces of G = 4 layers, which makes 9
 pieces and 8 hand-off cuts. Figures in GB.

@@ -1,4 +1,4 @@
-"""The admin app: `vibehash admin`, a window for the people who run the network (Cole and Caleb): a globe of where
+"""The admin app: `vibehash admin`, a window for the people who run the network (the two operators): a globe of where
 devices connect from, with arcs to the nodes they report to; the jobs, to confirm, deny (hold), cancel or post; the
 ledger as blocks land; the devices online; the validators and peers.
 
@@ -24,9 +24,12 @@ asked; each sign-in lasts 12 hours, kept in this process's memory only. A token 
 plainly to this computer or a private network's address: never in the clear across the internet.
 
 Places on the globe come from the devices' connection addresses, which only an admin's node gives out. They are looked
-up in batches at GEO_URL (ip-api.com's free service unless $VIBEHASH_GEO_URL names another; nothing but the addresses
-is sent), cached for a month in ~/.vibehash/admin/geo.json, and never for private or loopback addresses; "geo": false
-in the admin settings sends nothing out, and the globe shows only the nodes' own places from their URLs.
+up in batches at GEO_URL (ipinfo.io's batch service, with the token in $VIBEHASH_GEO_TOKEN, unless $VIBEHASH_GEO_URL
+names another https:// service; nothing but the addresses is sent), cached for a month in ~/.vibehash/admin/geo.json,
+and never for private or loopback addresses. It is off until the operator turns it on ("geo": true in the admin
+settings, or the page's Settings): until then nothing is sent out and the globe shows only the nodes' own places from
+their URLs. A service that is not https:// is refused, and geo is forced off under a proxy (a "proxy" setting, or
+--tor / --proxy) so that no address is looked up outside it.
 
 The shortcut (`--install-shortcut`) is how an operator keeps it as an app: "Vibe Hash Admin" with its own violet icon
 (data/admin.ico) in the Start menu on Windows, the applications menu on Linux, ~/Applications on a Mac. It runs this
@@ -43,6 +46,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -52,6 +56,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -74,11 +79,12 @@ SHORTCUT = "Vibe Hash Admin"
 DEFAULT_PORT = 7546  # beside the worker's feed (7545)
 TITLE = "Vibe Hash admin"
 SIZE, MIN_SIZE = (1280, 820), (900, 600)
-GEO_URL = "http://ip-api.com/batch?fields=status,country,city,lat,lon,query"
+GEO_URL = "https://ipinfo.io/batch"
 GEO_TTL_S = 30 * 86400
 GEO_BATCH = 100
 NODE_TIMEOUT = 15.0
 MAX_BODY = 256 * 1024
+OPS = ("prune", "backup", "restart")  # what POST /api/ops/<op> asks one node for (nodeadmin.py), with a fresh code
 BLOCKS_PAGE = 100
 INSECURE = "the admin token is only sent over https:// (or to this computer or a private network): change the URL"
 RETRY_REFUSED_S = 300  # a node that refused the token is asked again this often, not on every refresh: each refusal
@@ -121,14 +127,46 @@ def is_public_ip(text: str) -> bool:
                 or addr.is_unspecified)
 
 
-def lookup_ip_api(ips: list[str], url: str = GEO_URL) -> dict[str, dict | None]:
-    """ip-api.com's batch lookup: {ip: {"lat", "lon", "city", "country"} or None}."""
-    body = json.dumps([{"query": ip} for ip in ips]).encode()
-    req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json",
-                                                                          "User-Agent": "vibehash-admin"})
-    with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 (the admin's own chosen service)
+def geo_url() -> str:
+    return os.environ.get("VIBEHASH_GEO_URL") or GEO_URL
+
+
+def geo_token() -> str | None:
+    return os.environ.get("VIBEHASH_GEO_TOKEN") or None
+
+
+def _need_https(url: str) -> None:
+    if urlsplit(url).scheme != "https":
+        raise ValueError(f"the geo service must be https:// (addresses are never sent in the clear): {url!r}")
+
+
+def _ipinfo_place(entry) -> dict | None:
+    """One ipinfo entry ({"city", "country", "loc": "lat,lon"}); a string or an entry without a usable loc is no answer."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        lat, lon = str(entry["loc"]).split(",")
+        return {"lat": float(lat), "lon": float(lon), "city": str(entry.get("city") or ""),
+                "country": str(entry.get("country") or "")}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def lookup_batch(url: str, ips: list[str], token: str | None = None) -> dict[str, dict | None]:
+    """A batch lookup of addresses at an https:// service: {ip: {"lat", "lon", "city", "country"} or None}. Reads
+    ipinfo.io's reply (a JSON object keyed by address) and ip-api.com's (a list), told apart by shape. The token goes
+    in the URL as `token=`, as ipinfo's batch API takes it."""
+    _need_https(url)
+    if token:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode({"token": token})
+    req = urllib.request.Request(url, data=json.dumps(list(ips)).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": "vibehash-admin"})
+    with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 (https only, the admin's own chosen service)
         answers = json.loads(resp.read(2**20))
     out: dict[str, dict | None] = dict.fromkeys(ips)
+    if isinstance(answers, dict):
+        for ip in out:
+            out[ip] = _ipinfo_place(answers.get(ip))
     for a in answers if isinstance(answers, list) else []:
         if isinstance(a, dict) and a.get("status") == "success" and a.get("query") in out:
             try:
@@ -141,10 +179,17 @@ def lookup_ip_api(ips: list[str], url: str = GEO_URL) -> dict[str, dict | None]:
 
 class Geo:
     """Places for addresses and host names, cached on disk, looked up in the background so no view waits on the
-    network: `place` answers what is known now and queues the rest."""
+    network: `place` answers what is known now and queues the rest. With `enabled` the service `url` must be https://
+    (ValueError otherwise); `locked` (a proxy is in use) keeps it off whatever `enabled` says."""
 
-    def __init__(self, path: Path, lookup=None, now=time.time, enabled: bool = True):
-        self.path, self.lookup, self.now, self.enabled = path, lookup or lookup_ip_api, now, enabled
+    def __init__(self, path: Path, lookup=None, now=time.time, enabled: bool = True, url: str | None = None,
+                 token: str | None = None):
+        url = url or geo_url()
+        if enabled:
+            _need_https(url)
+        token = token or geo_token()
+        self.path, self.now, self.enabled, self.locked = path, now, enabled, False
+        self.lookup = lookup or (lambda ips: lookup_batch(url, ips, token))
         self.lock = threading.Lock()
         self.cache: dict[str, dict] = {}
         self.names: dict[str, str | None] = {}  # host name -> ip, this run
@@ -179,7 +224,7 @@ class Geo:
             hit = self.cache.get(ip)
             if hit is not None:
                 return hit if "lat" in hit else None
-            if self.enabled:
+            if self.enabled and not self.locked:
                 self.pending.add(ip)
                 if self.thread is None or not self.thread.is_alive():
                     self.thread = threading.Thread(target=self._run, daemon=True, name="geo")
@@ -272,8 +317,12 @@ class NodeLink:
     def admin_get(self, path: str):
         return json.loads(self.client._req("GET", path, headers=self._headers()))  # noqa: SLF001
 
-    def admin_post(self, path: str, body: dict):
-        return json.loads(self.client._req("POST", path, json.dumps(body).encode(), headers=self._headers()))  # noqa: SLF001
+    def admin_post(self, path: str, body: dict, code: str | None = None):
+        """`code`: a fresh authenticator code, for an order or an operation on the server itself (nodeadmin's X-Admin-Code)."""
+        headers = self._headers()
+        if code:
+            headers[nodeadmin.CODE_HEADER] = str(code).strip()
+        return json.loads(self.client._req("POST", path, json.dumps(body).encode(), headers=headers))  # noqa: SLF001
 
     def sign_in(self, code: str) -> dict:
         """The authenticator app's code for a sign-in on this node (POST /admin/login)."""
@@ -386,7 +435,7 @@ class AdminApp:
             # Its place: the address it announces to other nodes (the public one, behind a proxy), else the one we reach it at
             place = self.geo.place(urlsplit(n.get("url") or "").hostname) or self.geo.place(urlsplit(v["url"]).hostname)
             n.update(url=v["url"], announce=n.get("url"), admin=v.get("admin", False), error=v.get("error"), review=v.get("review"),
-                     mfa=bool(v.get("mfa")), login_until=v.get("login_until"),
+                     mfa=bool(v.get("mfa")), login_until=v.get("login_until"), ops=v.get("ops"),
                      place=place, peers=v.get("peers") or [], mempool=len(v.get("mempool") or []), devices=len(v.get("devices") or []))
             nodes.append(n)
         validators = {}
@@ -432,8 +481,8 @@ class AdminApp:
 
     # -- orders --
 
-    def _each_admin(self, fn) -> list[dict]:
-        admins = [l for l in self.links if l.token]
+    def _each_admin(self, fn, urls: list[str] | None = None) -> list[dict]:
+        admins = [l for l in self.links if l.token and (urls is None or l.url in urls)]
         if not admins:
             raise AdminError("no node has an admin token: add one under Settings")
         out = []
@@ -441,14 +490,37 @@ class AdminApp:
             out.append({"url": link.url, **result})
         return out
 
-    def hold(self, job_id: str, why: str = "") -> dict:
-        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/hold", {"why": why}))}
+    def hold(self, job_id: str, why: str = "", code: str | None = None, urls: list[str] | None = None) -> dict:
+        """Hold, release and review take the operator's authenticator code (`code`, typed for this order and kept
+        nowhere), which a node with a key wants on top of the sign-in; `urls`: only those nodes (a retry)."""
+        code = _fresh_code(code)
+        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/hold", {"why": why}, code), urls)}
 
-    def release(self, job_id: str) -> dict:
-        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/release", {}))}
+    def release(self, job_id: str, code: str | None = None, urls: list[str] | None = None) -> dict:
+        code = _fresh_code(code)
+        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post(f"/admin/jobs/{job_id}/release", {}, code), urls)}
 
-    def review(self, on: bool) -> dict:
-        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post("/admin/review", {"on": bool(on)}))}
+    def review(self, on: bool, code: str | None = None, urls: list[str] | None = None) -> dict:
+        code = _fresh_code(code)
+        return {"ok": True, "nodes": self._each_admin(lambda l: l.admin_post("/admin/review", {"on": bool(on)}, code), urls)}
+
+    def operate(self, url: str, op: str, code: str, force: bool = False) -> dict:
+        """One server's operation (OPS: prune, backup, restart), with a fresh authenticator code: on the one node
+        `url` names, never all of them at once (a restart of every validator together stops the chain). A node's
+        refusal comes back as {"ok": False, "status", "error"}: 409 for "not now" (a restart that would stop the
+        chain says so, and the page offers to force it), 401 for a wrong or missing code."""
+        if op not in OPS:
+            raise AdminError(f"no such operation: {op}")
+        link = next((l for l in self.links if l.url == str(url or "").rstrip("/")), None)
+        if link is None or not link.token:
+            raise AdminError("that node isn't one with an admin token here")
+        if not re.fullmatch(r"\d{6}", str(code or "").strip()):
+            raise AdminError("type the 6-digit code from your authenticator app")
+        body = {"force": True} if op == "restart" and force else {}
+        try:
+            return {"ok": True, "url": link.url, "op": op, "result": link.admin_post(f"/admin/{op}", body, code=code)}
+        except NodeError as e:
+            return {"ok": False, "url": link.url, "op": op, "status": e.status, "error": str(e)}
 
     def sign_in(self, code: str, url: str | None = None) -> dict:
         """One authenticator code for every node that asked for one (or the one `url` names): admins of several nodes
@@ -621,12 +693,15 @@ class AdminApp:
                     if not isinstance(body, dict):
                         raise ValueError("expected a JSON object")
                     parts = [p for p in url.path.split("/") if p][1:]
+                    code, urls = body.get("code"), body.get("urls")  # (a fresh code for an order; the nodes to retry)
+                    if urls is not None and not (isinstance(urls, list) and all(isinstance(u, str) for u in urls)):
+                        raise ValueError("urls is a list of node addresses")
                     if parts == ["review"]:
-                        out = app.review(bool(body.get("on")))
+                        out = app.review(bool(body.get("on")), code, urls)
                     elif len(parts) == 3 and parts[0] == "jobs" and parts[2] in ("hold", "release", "cancel"):
                         job_id = _job_id(parts[1])
-                        out = (app.hold(job_id, str(body.get("why") or "")) if parts[2] == "hold"
-                               else app.release(job_id) if parts[2] == "release" else app.cancel(job_id))
+                        out = (app.hold(job_id, str(body.get("why") or ""), code, urls) if parts[2] == "hold"
+                               else app.release(job_id, code, urls) if parts[2] == "release" else app.cancel(job_id))
                     elif parts == ["jobs", "post"]:
                         spec = body.get("spec")
                         if isinstance(spec, str):
@@ -644,6 +719,9 @@ class AdminApp:
                         out = app.unlock(str(body.get("password") or ""))
                     elif parts == ["login"]:
                         out = app.sign_in(str(body.get("code") or ""), str(body.get("url") or "") or None)
+                    elif len(parts) == 2 and parts[0] == "ops":
+                        out = app.operate(str(body.get("url") or ""), parts[1], str(body.get("code") or ""),
+                                          body.get("force") is True)
                     elif parts == ["settings"]:
                         out = app.set_settings(body.get("nodes"), body.get("wallet"), body.get("geo"))
                     else:
@@ -684,6 +762,14 @@ def _try(fn) -> dict:
         return {"ok": True, "result": fn()}
     except (NodeError, AdminError, *BROKEN) as e:
         return {"ok": False, "error": str(e)}
+
+
+def _fresh_code(code) -> str | None:
+    """The code the page typed for an order, trimmed, or None when it sent none; AdminError if it can't be a code."""
+    code = re.sub(r"\s", "", str(code or ""))
+    if code and not re.fullmatch(r"\d{6}", code):
+        raise AdminError("type the 6-digit code from your authenticator app")
+    return code or None
 
 
 def _job_id(text: str) -> str:
@@ -863,11 +949,37 @@ def save_flags(a, save=settings.save, load=settings.load) -> bool:
     return True
 
 
+def _proxied(a, config: dict) -> bool:
+    # --proxy / --tor and the "proxy" setting come with a later change: read defensively until they exist
+    return bool(config.get("proxy") or getattr(a, "proxy", None) or getattr(a, "tor", False))
+
+
+def geo_wanted(cfg: dict, a, config: dict) -> bool:
+    """Whether place lookups are on: only when the admin settings say "geo": true, and never under a proxy (a "proxy"
+    setting, or --proxy / --tor): the addresses would go out around it."""
+    if _proxied(a, config):
+        if cfg.get("geo"):
+            log.info("place lookups are off: a proxy is in use, and the addresses would be sent around it")
+        return False
+    return bool(cfg.get("geo", False))
+
+
+def make_geo(path: Path, enabled: bool, url: str | None = None) -> Geo:
+    """A Geo; a service that is not https:// turns it off, with one warning, rather than stopping the app."""
+    try:
+        return Geo(path, enabled=enabled, url=url)
+    except ValueError as e:
+        log.warning("place lookups are off: %s", e)
+        return Geo(path, enabled=False, url=url)
+
+
 def build(a) -> AdminApp:
     cfg = settings.load().get("admin") or {}
     links = links_from(cfg, list(getattr(a, "node", None) or []), getattr(a, "token", None))
     wallet = settings.wallet_path(getattr(a, "wallet", None)) or (Path(cfg["wallet"]) if cfg.get("wallet") else None)
-    geo = Geo(settings.home() / "admin" / "geo.json", enabled=bool(cfg.get("geo", True)))
+    config = settings.load()
+    geo = make_geo(settings.home() / "admin" / "geo.json", geo_wanted(cfg, a, config))
+    geo.locked = _proxied(a, config)  # the page's Settings can't switch it on around a proxy
     return AdminApp(links, wallet, geo)
 
 

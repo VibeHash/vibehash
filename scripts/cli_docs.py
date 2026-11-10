@@ -31,6 +31,7 @@ PROG = "vibehash"
 EXAMPLES: dict[str, list[str]] = {
     "setup": ["vibehash setup", "vibehash setup --node 192.168.1.20",
               "VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes --deepseek no > setup.log 2>&1"],
+    "update": ["vibehash update", "vibehash update --evo"],
     "install-gpu": ["vibehash install-gpu"],
     "testnet": ["vibehash testnet", "vibehash testnet --validators 4", "vibehash testnet --job none --workers 3 --device cuda",
                 "vibehash testnet --evo2"],
@@ -69,7 +70,8 @@ EXAMPLES: dict[str, list[str]] = {
     "predict": ["vibehash predict new-rows.csv", "vibehash predict fruit-demo.npz new-rows.csv --out predictions.csv"],
     "job status": ["vibehash job status", "vibehash job status fruit-demo"],
     "job watch": ["vibehash job watch"],
-    "job download": ["vibehash job download", "vibehash job download fruit-demo --out fruit.npz"],
+    "job download": ["vibehash job download", "vibehash job download fruit-demo --out fruit.npz",
+                     "vibehash job download my-chats --merged"],
     "job history": ["vibehash job history fruit-demo --csv fruit-demo.csv"],
     "job template": ["vibehash job template --out job.json", "vibehash job template --gpu"],
     "chain verify": ["vibehash chain verify", "vibehash chain verify --genesis genesis.json"],
