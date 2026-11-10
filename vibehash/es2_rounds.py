@@ -42,6 +42,31 @@ def caps(spec, step: int = 0) -> list[int]:
     return [spec.tokens_for(t) for t in task_names(spec, step)]
 
 
+def gold_problems(spec, step: int = 0) -> list[int]:
+    """The round's problems whose gold answers its members are scored on, by index: in a job with `gold`, those of
+    every task but es_tasks.WRITTEN; none in any other job. The step alone says them (no seed, no model), so the node
+    knows what a round's fitness is before it starts."""
+    if not getattr(spec, "gold", False):
+        return []
+    from . import es_tasks
+    return [i for i, t in enumerate(task_names(spec, step)) if t not in es_tasks.WRITTEN]
+
+
+def gold_text(item) -> str:
+    """What a member is scored on writing for a gold problem: a pool task's whole target reply (es_tasks.PoolTask),
+    else its gold answer between the tags, the reply its prompt asks for. (A worker and a checker turn it into tokens
+    the same way, es_client.gold_items.)"""
+    return getattr(item, "target", "") or f"<answer>{item.gold}</answer>"
+
+
+def gold_caps(spec, step: int = 0) -> list[int]:
+    """Each of the round's problems' most gold tokens, the end-of-turn token included: Spec2.target_tokens for a pool
+    task's problems (their targets are whole replies), else the problem's answer cap (caps)."""
+    from . import es_tasks
+    tt = getattr(spec, "target_tokens", 0)
+    return [tt if tt and t in es_tasks.POOL_TASKS else c for t, c in zip(task_names(spec, step), caps(spec, step))]
+
+
 def mix_seed(round_seed: int, i: int) -> int:
     """A mixed round's problem i is drawn from its task with this seed: the round's, told apart by the problem."""
     import hashlib

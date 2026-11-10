@@ -48,6 +48,10 @@ class InvalidJob(ValueError):
     pass
 
 
+NO_VOCAB_MSG = ("an Evo (rule 2) job's spec must record its model's vocab size (model.vocab), so a node can drop "
+                "replay targets the model has no token for")
+
+
 @dataclass
 class TrainingJob:
     job_id: str
@@ -83,6 +87,14 @@ class TrainingJob:
         """Whether it trains by evolution strategies (es.py): rounds of seeds and scores, the update worked out by
         every node from them."""
         return isinstance(self.spec, EsSpec)
+
+    def no_vocab(self) -> bool:
+        """Whether it's a rule-2 Evo job whose spec records no vocab size (dims["vocab"]). Checked only when a job is
+        posted (a node relaying it, the CLI posting it), never when a chain is replayed: a scored reveal with no
+        log-probabilities is fraud to the node, and an honest miner sends none when every replay target has a token id
+        its model lacks, which the node drops (since 0.5.27) only if the job records its vocab."""
+        from . import es2
+        return isinstance(self.spec, es2.Spec2) and not self.spec.model.get("vocab")
 
     @property
     def deepseek(self) -> bool:

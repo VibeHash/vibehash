@@ -2,7 +2,11 @@
 same items, prompts and settings for every model, and ~95% intervals so a real gain can be told from noise.
 
   python scripts/vibe_bench.py Qwen/Qwen3.5-0.8B [FOLDER_OR_REPO ...] [--bench mmlu_pro,ifeval] [--limit 200] [--full]
-      [--out ~/.vibehash/bench] [--engine auto|fast|hf] [--fresh] [--list]
+      [--out ~/.vibehash/bench] [--engine auto|fast|hf] [--fresh] [--list] [--cap 64 --slots 120000]
+
+On a 12 GB card (an RTX 4070 SUPER) pass --cap 64 --slots 120000, and run one --bench at a time: past 12 GB the
+GPU spills into shared memory without a word and a chunk crawls for 10+ minutes, and memory grows across benchmarks
+in one process (2026-11-07).
 
 The first model is the reference: every other one gets a delta against it on the items both answered, with a paired
 95% interval (the per-item differences' standard error), marked `+` when the whole interval is above zero and `-`
@@ -489,7 +493,7 @@ def _shared_in_parts(rt, rows, part_tokens: int = 16_000):
 class Generator:
     """A model on the GPU answering prompts greedily, in non-thinking mode, up to T tokens each."""
 
-    def __init__(self, folder: Path, engine: str, batch: int):
+    def __init__(self, folder: Path, engine: str, batch: int, cap: int | None = None, slots: int | None = None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from vibehash import es_hybrid
@@ -515,6 +519,7 @@ class Generator:
             sys.exit("--engine fast is es_hybrid's engine, for Qwen3.5-style hybrid models only")
         self.engine = "fast" if engine in ("auto", "fast") and hybrid else "hf"
         self.batch = batch
+        self.cap, self.slots = cap, slots  # --cap, --slots: a chunk's most prompts, and rows x (prompt + T) tokens
         if self.engine == "fast":
             from vibehash import es
             es_hybrid._ENGINE.clear()  # another model's engine (its buffers and graphs) must not be reused
@@ -545,10 +550,13 @@ class Generator:
         order = sorted(range(len(rows)), key=lambda i: -len(rows[i]))
         out: list = [None] * len(rows)
         cap = 192 if self.engine == "fast" else self.batch  # fast: 192 prompts' states, ~3.6 GB on Qwen3.5-0.8B
+        cap = min(cap, self.cap) if self.cap else cap
         budget = 10**9 if self.engine == "fast" else 16_000  # prompt tokens a chunk reads at once
         at, done = 0, 0
         while at < len(order):
             n = max(1, min(cap, budget // max(1, len(rows[order[at]]))))
+            if self.slots:  # (the longest prompts come first, so the chunk's first row is its widest)
+                n = max(1, min(n, self.slots // (len(rows[order[at]]) + T)))
             chunk = order[at:at + n]
             at += n
             got = self._fast([rows[i] for i in chunk], T) if self.engine == "fast" else \
@@ -677,6 +685,10 @@ def main():
     p.add_argument("--batch", type=int, default=64, help="rows a batch for --engine hf")
     p.add_argument("--max-new", type=int, help="tokens a reply may have, for every benchmark (default: each one's own)")
     p.add_argument("--fresh", action="store_true", help="run again even when saved results match")
+    p.add_argument("--cap", type=int, help="the most prompts a chunk decodes at once (default 192 with the fast engine;"
+                   " 64 keeps a 12 GB card from spilling into shared memory, where it crawls)")
+    p.add_argument("--slots", type=int, help="the most rows x (prompt + reply) tokens a chunk holds (default: no limit;"
+                   " 120000 on a 12 GB card)")
     p.add_argument("--list", action="store_true", help="list the benchmarks and exit")
     a = p.parse_args()
 
@@ -737,7 +749,7 @@ def main():
                     continue
             if gen is None:
                 t = time.time()
-                gen = Generator(folder, a.engine, a.batch)
+                gen = Generator(folder, a.engine, a.batch, a.cap, a.slots)
                 print(f"  loaded in {time.time() - t:.0f}s; engine: {gen.engine}; stop tokens {gen.eos}", flush=True)
             t = time.time()
             results[label][n] = run_bench(gen, b, items, checkers, path)

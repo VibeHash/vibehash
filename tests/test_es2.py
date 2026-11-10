@@ -291,6 +291,37 @@ class StarterTemplateTests(unittest.TestCase):
         self.assertEqual((rounds, history), (0, []))
         self.assertEqual(es.state_hash(state), es.state_hash(job.spec.init_params()))
 
+    def test_the_template_defaults_and_options(self):
+        from vibehash import cli, es_local
+        with tempfile.TemporaryDirectory() as d:
+            folder = tiny_model(Path(d) / "tiny", seed=3)
+            got = {}
+            for name, extra in (("plain", []), ("old", ["--fixed-step"]), ("off", ["--no-fixed-step"]),
+                                ("wide", ["--problems", "32"])):
+                with mock.patch("sys.stdout"):
+                    cli.main(["job", "template", "--evo", str(folder), "--id", name, "--out", str(Path(d) / name),
+                              *extra])
+                got[name] = json.loads((Path(d) / name).read_text())["es"]
+            for bad in ("0", "-3"):
+                with mock.patch("sys.stdout"), self.assertRaises(SystemExit):
+                    cli.main(["job", "template", "--evo", str(folder), "--out", str(Path(d) / "bad"), "--problems", bad])
+        self.assertEqual(es_local.V2_SETTINGS["lp_tol"], 0.02)
+        self.assertEqual(got["plain"]["lp_tol"], 0.02)
+        self.assertIs(got["plain"]["fixed_step"], True)
+        self.assertEqual(got["old"], got["plain"])
+        self.assertNotIn("fixed_step", got["off"])
+        self.assertEqual(got["plain"]["problems"], 16)
+        self.assertEqual(got["wide"]["problems"], 32)
+
+    def test_a_job_with_no_vocab_is_refused_when_posted_only(self):
+        from vibehash.tasks import TrainingJob
+        from tests.test_loop_stop import spec_json
+        full = {"id": "hand-built", "fee_per_round": 0, "init_seed": 0, "units_per_round": 4, "memory_mb": 4096,
+                **spec_json()}
+        self.assertTrue(TrainingJob.from_spec_json(json.dumps(full), "system", 0).no_vocab())
+        full["model"] = {"family": "qwen3_5_text", "vocab": 1000}
+        self.assertFalse(TrainingJob.from_spec_json(json.dumps(full), "system", 0).no_vocab())
+
     def test_the_vibe_mix_gets_room_to_reason(self):
         from vibehash import cli, es_tasks
         with tempfile.TemporaryDirectory() as d:
@@ -468,7 +499,8 @@ class NetworkTests2(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        spec = tiny_spec2(tiny_model(root / "tiny", seed=1))
+        # fixed_step: the reserve leaves rounds thin, the case it's for (checked on every round below, and replayed)
+        spec = tiny_spec2(tiny_model(root / "tiny", seed=1), fixed_step=True)
         for p in (mock.patch.object(es, "reward", fake_reward), mock.patch.dict(os.environ, {"VIBEHASH_HOME": str(root / "home")}),
                   mock.patch.object(es_client, "SAVE_EVERY", 1), mock.patch("vibehash.es_local.V2_COMPUTE_S", 30)):
             p.start()
@@ -501,6 +533,10 @@ class NetworkTests2(unittest.TestCase):
         mine = [b for b in blocks if b.summary is not None and b.summary.job_id == "evo2-earn"]
         self.assertTrue(mine)
         self.assertTrue(all(records[b.height]["rules"]["newcomer_reserve"] == NEWCOMER_RESERVE for b in mine))
+        stepped = [records[b.height]["es"] for b in mine if records[b.height]["es"].get("update")]
+        self.assertTrue(stepped)
+        for h in stepped:  # every member the round could have, however many landed
+            self.assertEqual(h["scale"], es2.lr_at(spec, int(h["step"])) / (2 * spec.pairs))
         first = next((b for b in mine if new.address in b.summary.accepted), None)
         self.assertIsNotNone(first, "the newcomer's work was never accepted")
         self.assertGreater(st.stake(new.address), 0, "its pay didn't go into its stake")

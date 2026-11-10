@@ -107,7 +107,7 @@ vibehash job history fruit-demo --csv fruit-demo.csv
 Write a starter job file, for full control with post-job.
 
 ```
-vibehash job template [-h] [--out OUT] [--id ID] [--gpu] [--evo MODEL] [--tasks TASKS] [--rounds ROUNDS] [--max-tokens N] [--loop-stop PERIOD,RUN] [--task-tokens TASK=N,...] [--cross-margin X]
+vibehash job template [-h] [--out OUT] [--id ID] [--gpu] [--evo MODEL] [--tasks TASKS] [--rounds ROUNDS] [--max-tokens N] [--loop-stop PERIOD,RUN] [--task-tokens TASK=N,...] [--cross-margin X] [--fixed-step] [--no-fixed-step] [--problems N] [--gold] [--target-tokens N]
 ```
 
 Flags:
@@ -122,6 +122,11 @@ Flags:
 - `--loop-stop PERIOD,RUN`: with --evo: end an answer once RUN tokens in a row each repeat the token up to PERIOD before (a loop), or off (default 32,48 with --tasks vibe, else off).
 - `--task-tokens TASK=N,...`: with --evo: shorter answers for some tasks, such as math=448,gsm8k=384, or off (default math=448,gsm8k=384,ifeval=256 with --tasks vibe, else off).
 - `--cross-margin X`: with --evo: the margin, in logits, between machines that do the arithmetic differently, with 0.1 for alike ones and checkers paired by setup (default 0.5), or off for one margin of 0.5 and no pairing.
+- `--fixed-step`: with --evo: on by default, kept so old commands work.
+- `--no-fixed-step`: with --evo: a round where only some units land takes a full step out of fewer members, instead of a step its share of the size (the default).
+- `--problems N`: with --evo: problems each member answers a round (default 16); more problems a round puts more work into each round without extra noise cost.
+- `--gold`: with --evo: score each round's members on its own problems' right answers, so the model learns from what it gets wrong too, instead of only on answers it already got right (needs nodes on 0.5.28+).
+- `--target-tokens N`: with --evo and a pool task (vibe_reason): the most tokens a problem's target reply is scored on (default 1024; needs nodes on 0.5.28+).
 
 Examples:
 

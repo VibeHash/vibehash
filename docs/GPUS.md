@@ -37,7 +37,7 @@ end), plus measurements on the 4070 SUPER that stand in for other kinds of hardw
 | TF32 | must be off | must be off for the float32 recurrent state | must be off (rule 2 rejects TF32: DESIGN.md §8) |
 | float64 on the device | never | never in rule 2; rule-1 Evo summed weights in float64 on the device (fixed below) | never (rotary tables on the CPU) |
 | Memory | small | Qwen3.5-0.8B: 3.5 GiB peak (bf16, 64-token answers, measured); twice the weights in float32 | 3.5 GiB Qwen3-0.6B, 11.1 GiB Qwen3-4B (measured) |
-| How a checker compares | within `tolerance` (1e-4) and 1% of the update | each committed token within `margin` (0.5) of the greedy logit; replay log-probabilities within `lp_tol` (0.05) | rule 2: B, m, v within their tolerances, Adam's first-step sign flips set aside |
+| How a checker compares | within `tolerance` (1e-4) and 1% of the update | each committed token within `margin` (0.5) of the greedy logit; replay log-probabilities within `lp_tol` (0.02 for new jobs) | rule 2: B, m, v within their tolerances, Adam's first-step sign flips set aside |
 | Measured across machines | 4e-9 to 8e-8, CUDA vs CPU | gaps up to 0.375 (below) | 1e-6 of B's size, CUDA vs CPU |
 
 ## Compatibility matrix
