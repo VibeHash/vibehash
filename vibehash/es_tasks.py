@@ -775,7 +775,8 @@ class PoolTask:
 # problems and Qwen3.5-0.8B's own right answers (median length, at least 2 of 8 twisted copies agreeing) to MMLU's
 # validation and dev questions, MedMCQA's and AQuA's training questions (docs/EVO-POOLS.md, and
 # scripts/build_evo_pool.py, which makes it).
-POOLS = {"vibe_reason": ("evo_pool_vibe_reason.jsonl.gz", "")}
+POOLS = {"vibe_reason": ("evo_pool_vibe_reason.jsonl.gz",
+                         "77f94d44be61fcdfe534c790a2fc52af94ca6ab086c2f319b5061a7dd6564854")}
 # The tasks whose problems carry a whole target reply: a job naming one scores its members on the targets (gold)
 POOL_TASKS = tuple(POOLS)
 # A pool job's defaults (`job template --evo MODEL --tasks vibe_reason`): targets scored up to 1,024 tokens (the most a
