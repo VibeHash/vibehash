@@ -389,12 +389,12 @@ class GameTests(_Tiny):
             def executor(self, prog, honest):
                 return Executor(self.rt, self.spec, prog) if honest else Lazy(self.rt, self.spec, prog)
 
-        old = tracer.Executor
-        tracer.Executor = Lazy
+        old = tracer.FastExecutor  # what finetune.train_segment trains with
+        tracer.FastExecutor = Lazy
         try:
             lazy = self.unit()
         finally:
-            tracer.Executor = old
+            tracer.FastExecutor = old
         self.assertFalse(verification.reproduces(lazy, self.unit(), np.zeros(self.spec.n_params), ft.TOLERANCE,
                                                  self.spec), "the checker rejects it")
         self.assertFalse(verification.adam_reproduces(lazy, self.unit(), np.zeros(self.spec.n_params), ft.TOLERANCE,
