@@ -8,6 +8,33 @@ VibeHash is a Python proof-of-useful-work testnet: workers train models, the cha
 `README.md` (users and node operators), `DESIGN.md` (the protocol spec), `docs/OPERATIONS.md` (how it runs, by role)
 and `docs/CLI.md` (every command).
 
+The business has two halves. This repository is the public one: the open chain, its miners and the open domain
+models they train. Luh Labs LLC's private engine (customer jobs, trained on in-house machines from those open models)
+lives in a separate private repository. The next section says what belongs where.
+
+## Public repository, private business
+
+This repository is public under MIT. Anything pushed here can be copied and used commercially by anyone, for good.
+Treat every commit as published.
+
+Belongs here:
+- The chain, the miner, public jobs, Evo, and the open domain models with their published recipes.
+- The task scorer and the receipt format. Customers trust a scorer they can read and run on their own test set.
+
+Never here (it goes in the private repository, or nowhere):
+- Customer data in any form: records, samples, test fixtures, logs, screenshots. Tests use public or synthetic data.
+- Customer names, contacts, task specs, prices, contracts and sales notes.
+- Business plans, strategy reviews, market research and pricing.
+- Weights of paid or listed models, private training recipes and settings, curated datasets and their generators.
+- Container builds and listing configuration for marketplaces.
+
+Rules:
+- The dependency runs one way. The private repository installs a pinned `vibehash`; nothing here imports private
+  code, names its paths or describes its internals.
+- Customer jobs never run on the public chain. A node that holds a customer's model runs `--model-access owner`
+  (the default is `public`), and customer models are served from the private deployment only.
+- When you can't tell whether something is business IP, leave it out of this repository and ask.
+
 ## Never commit
 
 - Secrets. They are named by env var, never by value: `VIBEHASH_PASSWORD`, `VIBEHASH_ADMIN_TOKEN`,
@@ -75,12 +102,14 @@ and `docs/CLI.md` (every command).
 
 - `HANDOFF.md` is frozen history. Do not append to it. Operations go in `docs/OPERATIONS.md`.
 - No dated "tonight" plans and no machine-specific diaries in the repo.
+- No business documents in the repo: plans, pricing, strategy and research reviews go in the private repository.
 - Label facts and assumptions apart in any report. Say what you ran, not what you expect.
 
 ## `agents/`
 
 - Part of the product: the B2B managed fine-tune pipeline, contributed by Luh Labs LLC, under the root `LICENSE`.
 - Tested by `tests/test_agents.py`. Its LLM keys come from `.env.local` only; git ignores it.
+- It is public. New customer-specific code, prompts, recipes or data go in the private repository, not here.
 
 ## Style
 
