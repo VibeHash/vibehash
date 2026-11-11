@@ -101,6 +101,7 @@ class NoiseThreadsTests(unittest.TestCase):
             self.assertTrue(np.array_equal(es.noise_many(seeds[:2], 9), alone[:2, :9]))
 
 
+@unittest.skipUnless(HAVE_TORCH, "needs PyTorch and transformers")  # es_hybrid imports torch
 class OrderTests(unittest.TestCase):
     def test_longest_first(self):
         from vibehash.es_hybrid import longest_first

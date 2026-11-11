@@ -62,6 +62,7 @@ class ProblemTests(unittest.TestCase):
             self.assertIn("RuntimeError: no kernel image", evo_selftest.problem("y"))
         self.assertIn("wasn't caught", evo_selftest.problem_of("z", {"ok": False, "worst": 0.0, "swap": 0.0}))
 
+    @unittest.skipUnless(HAVE_TORCH, "needs PyTorch and transformers")  # es_client imports torch for the work
     def test_a_worker_takes_no_evo_work_on_a_device_that_fails(self):
         from vibehash.es_client import Es2Work
         work = SimpleNamespace(device=lambda: "cuda:0")

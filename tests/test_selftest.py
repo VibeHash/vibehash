@@ -201,6 +201,7 @@ class SelfTestTests(Home):
         self.assertIn("NOT USABLE", check(report, "device cuda:0")["text"])
         self.assertEqual(check(report, "train")["data"]["device"], "cpu")
 
+    @unittest.skipUnless(compute.torch_available(), "needs PyTorch")
     def test_a_good_gpu_and_what_it_can_take(self):
         with mock.patch.object(selftest, "lora_step", return_value={"ok": True, "seconds": 0.1, "worst": 0.0,
                                                                     "tolerance": 1e-4, "moved": 1e-3, "steps": 4}):
