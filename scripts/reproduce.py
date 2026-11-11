@@ -7,6 +7,9 @@ Sections:
   detection  the whitepaper's §13 table (docs/whitepaper.html): the chance a worker that skips m of a unit's k segments
              is caught by q spot-checked segments, C(k-m, q) / C(k, q) escaped, for k = 8 and k = 4 with q = 3. Checked
              against the values the paper prints, and against its claim that P(caught) is at least the share skipped.
+  deterrence that skipping segments never beats honest work for a risk-neutral worker who forfeits the unit's reward
+             when caught, whenever the reward covers the compute, with no stake at all (DESIGN.md §4's inequality).
+  tradeoff   replay cost q/k against the chance of catching a skip of one segment, a quarter or half of a unit.
   referee    the op-level referee's sum bound (referee.py), as tests/test_dispute.py BoundTests sets it up: on linear
              tiles at K = 1024, 2560 and 4096, honest float32 products pass every tile, while bf16 activations and TF32
              fail every tile, and the allowance stays under 1e-4 of a value (median).
@@ -50,6 +53,35 @@ def detection() -> tuple[dict, list[str]]:
             if p + 1e-12 < m / k:
                 bad.append(f"k={k} m={m}: P(caught) {p:.4f} is below the share skipped {m / k:.4f}")
         out[f"k={k},q=3"] = rows
+    return out, bad
+
+
+def deterrence() -> tuple[dict, list[str]]:
+    """A risk-neutral worker that skips m of k segments and, if caught, forfeits at least that unit's reward R, against
+    an honest one: skipping pays (1 - P) R - (1 - m/k) C, honesty pays R - C. Skipping comes out ahead only when
+    (m/k) C > P R, and since P >= m/k that needs C > R, a job nobody would mine. Checked with no stake at all."""
+    worst, bad = -1.0, []
+    for k in (4, 8, 16, 32, 64, 128):
+        for q in (1, 2, 3, 4):
+            for m in range(1, k + 1):
+                for c in (i / 100 for i in range(1, 101)):  # compute cost as a share of the reward, C / R
+                    worst = max(worst, (1 - p_caught(k, m, q)) - (1 - m / k) * c - (1 - c))
+    if worst > 1e-12:
+        bad.append(f"skipping beat honesty by {worst:.3g} of a reward with C <= R")
+    return {"max advantage of skipping, C <= R, no stake": round(worst, 12)}, bad
+
+
+def tradeoff() -> tuple[dict, list[str]]:
+    """Replay cost (q/k of a unit) against the chance of catching a worker that skipped one segment, a quarter or half
+    of a unit. Catching a one-segment skip with probability p costs replaying p of the work, at any k; finer
+    segments make the large skips cheap to catch."""
+    out = {}
+    for k in (8, 16, 32, 64, 128):
+        for q in (3, 4):
+            out[f"k={k},q={q}"] = {"replay": round(q / k, 4), "one segment": round(p_caught(k, 1, q), 4),
+                                   "quarter": round(p_caught(k, k // 4, q), 4), "half": round(p_caught(k, k // 2, q), 4)}
+    bad = [f"{key}: one-segment catch {v['one segment']} != replay share {v['replay']}"
+           for key, v in out.items() if abs(v["one segment"] - v["replay"]) > 1e-4]
     return out, bad
 
 
@@ -114,7 +146,8 @@ def main() -> int:
     args = ap.parse_args()
 
     results, failures = {}, []
-    for name, fn in (("detection", detection), ("referee", referee_bound)):
+    for name, fn in (("detection", detection), ("deterrence", deterrence), ("tradeoff", tradeoff),
+                     ("referee", referee_bound)):
         got, bad = fn()
         results[name] = got
         failures += [f"{name}: {b}" for b in bad]
