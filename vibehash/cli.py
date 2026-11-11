@@ -2343,7 +2343,7 @@ def _testnet(a, held: list) -> None:
     try:
         for v, port in zip(validators, ports):
             nodes.append(Node(d / ("node-data" if v == "node" else f"{v}-data"), genesis, keys[v], a.host, port, times,
-                              **big))
+                              keep_rounds=a.keep_rounds, **big))
     except (OSError, FolderInUse) as e:
         for n in nodes:
             n.close()
@@ -2642,6 +2642,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--budget", type=to_syn, default="500", help="VIBE per job; a new job is posted when one runs out")
     p.add_argument("--device", default="auto", help="what the workers train on: auto, cpu, cuda, xpu, mps")
     p.add_argument("--rounds", type=int, help="stop after this many rounds (default: run until Ctrl+C)")
+    p.add_argument("--keep-rounds", type=int, default=10,
+                   help="rounds whose opened checkpoints stay downloadable, so their checks can be re-run (default 10)")
     p.add_argument("--reset", action="store_true", help="delete this testnet's chain and wallets and start over")
     p.add_argument("--plain", action="store_true", help="print log lines instead of the live mining dashboard")
     p.add_argument("--watch", nargs="?", const=WATCH_PORT, type=int, metavar="PORT",

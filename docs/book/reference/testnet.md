@@ -3,7 +3,7 @@
 Run a whole network on this computer: node, workers and a job.
 
 ```
-vibehash testnet [-h] [--workers 1-8] [--validators 1-7] [--dir DIR] [--host HOST] [--port PORT] [--job {gpu,small,none}] [--budget BUDGET] [--device DEVICE] [--rounds ROUNDS] [--reset] [--plain] [--watch [PORT]] [--evo] [--evo2] [--evo2-rounds N] [--evo-model MODEL] [--register-s SECONDS] [--compute-s SECONDS] [--reveal-s SECONDS] [--verify-s SECONDS] [--min-fee MIN_FEE]
+vibehash testnet [-h] [--workers 1-8] [--validators 1-7] [--dir DIR] [--host HOST] [--port PORT] [--job {gpu,small,none}] [--budget BUDGET] [--device DEVICE] [--rounds ROUNDS] [--keep-rounds KEEP_ROUNDS] [--reset] [--plain] [--watch [PORT]] [--evo] [--evo2] [--evo2-rounds N] [--evo-model MODEL] [--register-s SECONDS] [--compute-s SECONDS] [--reveal-s SECONDS] [--verify-s SECONDS] [--min-fee MIN_FEE]
 ```
 
 Flags:
@@ -17,6 +17,7 @@ Flags:
 - `--budget BUDGET`: VIBE per job; a new job is posted when one runs out. Default: `500`.
 - `--device DEVICE`: what the workers train on: auto, cpu, cuda, xpu, mps. Default: `auto`.
 - `--rounds ROUNDS`: stop after this many rounds (default: run until Ctrl+C).
+- `--keep-rounds KEEP_ROUNDS`: rounds whose opened checkpoints stay downloadable, so their checks can be re-run (default 10).
 - `--reset`: delete this testnet's chain and wallets and start over.
 - `--plain`: print log lines instead of the live mining dashboard.
 - `--watch PORT`: also serve what the dashboard shows, every worker's, as JSON at http://127.0.0.1:PORT/ (default port 7545), for a window or a script on this computer to follow.
