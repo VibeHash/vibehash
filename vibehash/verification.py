@@ -9,6 +9,8 @@ Layers, cheapest first:
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .crypto import h256, merkle_verify, verify
@@ -274,6 +276,15 @@ def full_replay(job: TrainingJob, unit: WorkUnit, start: np.ndarray, backend=Non
     return theta
 
 
-def detection_probability(fake_fraction: float, q: int) -> float:
-    """Chance a replay spot-check of q segments hits at least one faked segment."""
-    return 1 - (1 - fake_fraction) ** q
+def detection_probability(fake_fraction: float, q: int, n_segments: int | None = None) -> float:
+    """Chance a replay spot-check of q segments hits at least one faked segment.
+
+    challenge_segments draws q distinct segments of a unit's n_segments, so with n_segments given this is the exact
+    chance, 1 - C(k - m, q) / C(k, q) for m = fake_fraction * k faked. Without it, it's 1 - (1 - f)^q, the chance
+    for draws with replacement: never above the exact one, so a safe bound, but loose for small units (33.0% against
+    37.5% for one faked segment of 8)."""
+    if n_segments is None:
+        return 1 - (1 - fake_fraction) ** q
+    faked = round(fake_fraction * n_segments)
+    q = min(q, n_segments)
+    return 1 - math.comb(n_segments - faked, q) / math.comb(n_segments, q)

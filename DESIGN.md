@@ -110,7 +110,7 @@ a small but **steady** income, with no need for a mining pool.
    cap. It is *not* slashed, because to the protocol it is indistinguishable
    from a laptop that crashed or lost Wi-Fi mid-round. Withholding
    selectively still doesn't pay: faking a fraction `f` of a unit gets caught
-   with probability `p = 1 − (1 − f)^q ≥ f`, so backing out loses `p × R` to
+   with probability `p ≥ f` (§4), so backing out loses `p × R` to
    save `f × C`, which only comes out ahead if compute costs more than it
    earns (`C > R`), and then nobody would mine at all.
 6. **Sanity check.** Final weights must be finite, must equal the last
@@ -154,20 +154,23 @@ a small but **steady** income, with no need for a mining pool.
 
 ## 4. Why cheating doesn't pay
 
-If a worker fakes a fraction `f` of its segments and the verifier checks `q`
-random segments, the chance of getting away with it is `(1 − f)^q`. With
-`q = 3` and `f = 0.5` that's 12.5 %, and replication adds a second,
-independent chance of being caught.
+If a worker fakes `m` of a unit's `k` segments and the beacon picks `q`
+distinct segments to check (`challenge_segments`), the chance of getting away
+with it is `C(k − m, q) / C(k, q)`. With `k = 8`, `q = 3` and half faked that's
+7.1 %, and replication adds a second, independent chance of being caught. The
+chance of being caught is never below the share faked, `m / k`.
+(`(1 − f)^q`, the chance for draws with replacement, is a safe but loose bound:
+it gives 12.5 % for the same case. `verification.detection_probability` returns
+either.)
 
 Getting caught costs **50 % of stake** plus the reward for that round, and
-resets reputation. The protocol sets the minimum stake so that
-
-```
-expected_gain_from_cheating  <  P(caught) × (slash + lost_reward)
-```
-
-for any `f` large enough to save meaningful compute. Faking a tiny `f` saves a
-tiny amount of work, so it's not worth the risk either.
+resets reputation. Skipping work loses even before the stake: a worker that
+fakes `m` of `k` segments saves `(m / k) × C` of compute and loses at least the
+unit's reward `R` with probability `p ≥ m / k`, so it comes out ahead only if
+`C > R`, a job nobody would mine (`scripts/reproduce.py`, deterrence section,
+checks this for `k` up to 128 with no stake at all). The stake is what makes
+cheating cost more than the round: it deters verifiers who approve without
+replaying (canaries), false accusations, and identities with nothing to lose.
 
 | Attack | Defence |
 |---|---|

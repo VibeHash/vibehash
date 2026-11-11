@@ -33,14 +33,15 @@ Different chips round numbers very slightly differently, so a GPU's result and a
 
 ## The odds of catching a cheat
 
-Suppose a worker fakes a share `f` of a unit's segments, and the checker replays `q` of them at random. The chance it gets away with it is `(1 − f)^q`.
+Suppose a worker fakes `m` of a unit's `k` segments, and the checker replays `q` different segments picked at random. The chance it gets away with it is `C(k − m, q) / C(k, q)`: the number of ways to pick only honest segments, over all the ways to pick.
 
-| Share faked | Checked segments | Gets away with it |
-|---|---|---|
-| 50% | 3 | 12.5% |
-| 50% | 1 | 50% |
+| Segments in a unit | Faked | Checked segments | Gets away with it |
+|---|---|---|---|
+| 8 | 4 (half) | 3 | 7.1% |
+| 8 | 1 | 3 | 62.5% |
+| 8 | 4 (half) | 1 | 50% |
 
-At the default of 3 checked segments, faking half a unit is caught 87.5% of the time, and duplicate units give a second, independent chance. Getting caught costs half the worker's stake and the whole round's pay. Faking less saves less work but still risks the stake.
+At the default of 8 segments and 3 checked, faking half a unit is caught 92.9% of the time, and duplicate units give a second, independent chance. The chance of being caught is never below the share faked. Getting caught costs half the worker's stake and the whole round's pay. Faking less saves less work but still risks the stake.
 
 ## Disputes and the referee
 
