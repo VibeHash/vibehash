@@ -943,7 +943,14 @@ provable; then a party could supply them, and validators wouldn't need the Hub e
 **The cost** is the training's. Running the program op by op, one sequence at a time, takes 1.62 s a step on
 Qwen3-0.6B at batch 8 and length 192, against 0.72 s for the batched autograd it replaced (2.2×, RTX 4070 SUPER). Most
 of that is kernel launches for small tensors; running a step's sequences together in each op is the follow-up that
-would win it back. A dispute's data is the states of the ranges it splits: tens to hundreds of MB through the node,
+would win it back, and a rule change. What needs none: training and a dispute's re-runs use `tracer.FastExecutor`,
+which gives Executor's bits op for op (`tests/test_tracer.py`) while doing once what Executor repeats, as device memory
+allows. It keeps each projection's weights cast to float32, reuses a layer's forward outputs for the recompute that
+opens its backward (only for the very input tensors the forward read; a re-run that starts inside a layer recomputes),
+reuses each head block's logits from its head_stats in its head_grad, and turns off PyTorch's NaN fill of new memory
+while it runs. The head's gradient also no longer makes the CPU wait for the GPU (`tracer._grad`). On Qwen3-0.6B (the
+everyday chats, batch 8, RTX 4070 SUPER, 2026-11-10): 1.90 s a step against Executor's 2.71 s, 1.42×, at 4.9 GiB peak
+against 1.9. Old and new workers agree bit for bit, so nodes need no upgrade. A dispute's data is the states of the ranges it splits: tens to hundreds of MB through the node,
 for a round that has one.
 
 **False accusations** cost a checker its stake's slash once a round, however many claims it rejects: the ledger

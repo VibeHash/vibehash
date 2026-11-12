@@ -8,6 +8,7 @@ changed in place), so a state is just a dict of tensors and a snapshot of it is 
 """
 from __future__ import annotations
 
+import contextlib
 import threading
 
 import torch
@@ -36,6 +37,10 @@ class Executor:
 
     def w(self, name: str) -> torch.Tensor:
         return self.model.w[name]
+
+    def w32(self, name: str) -> torch.Tensor:
+        """A projection's frozen weights as float32, the exact cast its matmul runs on."""
+        return self.w(name).to(_F32)
 
     def seq(self, i: int):
         """One training sequence: (ids, its target positions, their targets) on the device."""
@@ -108,7 +113,7 @@ def r_rmsnorm(ex, op, st):
 
 
 def r_linear(ex, op, st):
-    y = F.linear(_x(st, op), ex.w(op.attrs["weight"]).to(_F32))
+    y = F.linear(_x(st, op), ex.w32(op.attrs["weight"]))
     bias = op.attrs.get("bias")
     return y + ex.w(bias) if bias else y
 
@@ -177,6 +182,11 @@ def _head(ex, op, st):
 
 def r_head_stats(ex, op, st):
     lo, _, _ = _head(ex, op, st)
+    return _stats(lo, op, st)
+
+
+def _stats(lo, op, st):
+    """A head block's running max and sum for the log-softmax, from its logits."""
     mb = lo.max(-1).values
     if len(op.ins) > 1:
         prev = st[op.ins[1]]
@@ -194,11 +204,20 @@ def r_head_lse(ex, op, st):
 
 def r_head_grad(ex, op, st):
     lo, w, tgt = _head(ex, op, st)
+    return _grad(lo, w, tgt, op, st)
+
+
+def _grad(lo, w, tgt, op, st):
+    """A head block's share of the gradient into the hidden states, from its logits: softmax minus one-hot.
+    Every row subtracts at one column: 1 where its target falls in this block, and 0 elsewhere, which leaves the number
+    as it was (x - 0.0 is x, to the bit). So no row is picked out with .nonzero(), which made the CPU wait for the GPU
+    38 times a sequence."""
     q = torch.exp(lo - st[op.ins[1]])
     b0, b1 = op.attrs["b0"], op.attrs["b1"]
-    rows = ((tgt >= b0) & (tgt < b1)).nonzero()[:, 0]
-    if len(rows):
-        q[rows, tgt[rows] - b0] -= 1
+    hit = ((tgt >= b0) & (tgt < b1)).to(q.dtype)
+    col = (tgt - b0).clamp(0, b1 - b0 - 1)
+    rows = torch.arange(len(tgt), device=q.device)
+    q[rows, col] = q[rows, col] - hit
     return _acc(st, op, 2, (q * op.attrs["ic"]) @ w)
 
 
@@ -221,7 +240,7 @@ def r_rmsnorm_bwd(ex, op, st):
 
 
 def r_linear_bwd(ex, op, st):
-    return _acc(st, op, 1, _x(st, op) @ ex.w(op.attrs["weight"]).to(_F32))
+    return _acc(st, op, 1, _x(st, op) @ ex.w32(op.attrs["weight"]))
 
 
 def r_scale(ex, op, st):
@@ -316,6 +335,203 @@ def r_free(ex, op, st):
 RUN = {name[2:]: fn for name, fn in globals().items() if name.startswith("r_")}
 
 
+# --- a fine-tune's executor, with the work Executor repeats done once ----------------------------------------------
+
+ROOM_SHARE = 0.5  # of the device memory spare when a FastExecutor starts, what its reuse may hold
+CPU_ROOM = 1 << 30  # on the CPU, which has no free-memory query that costs nothing
+
+
+def spare_bytes(device) -> int:
+    """Device memory a FastExecutor could hold: CUDA's free memory plus what PyTorch has cached but isn't using; a
+    fixed GiB on the CPU; none elsewhere."""
+    dev = torch.device(device)
+    if dev.type == "cuda":
+        free, _ = torch.cuda.mem_get_info(dev)
+        return int(free + torch.cuda.memory_reserved(dev) - torch.cuda.memory_allocated(dev))
+    return CPU_ROOM if dev.type == "cpu" else 0
+
+
+@contextlib.contextmanager
+def no_fill():
+    """PyTorch's deterministic mode (compute.TorchBackend) fills every new block of memory with NaN, about 9,000 extra
+    kernels a fine-tune step. A fine-tune's ops write each tensor whole before anything reads it, so the fill changes no
+    number. It's off only while a fine-tune runs, and put back after: DeepSeek's code makes weights with torch.empty
+    and then loads them, and relies on the fill."""
+    det = getattr(torch.utils, "deterministic", None)
+    if det is None or not hasattr(det, "fill_uninitialized_memory"):
+        yield
+        return
+    old = det.fill_uninitialized_memory
+    det.fill_uninitialized_memory = False
+    try:
+        yield
+    finally:
+        det.fill_uninitialized_memory = old
+
+
+def _layer_part(label: str):
+    """("forward" or "backward", layer) for a micro-batch's layer node (program._Micro), else None."""
+    parts = label.split()
+    if len(parts) == 3 and parts[0] == "layer" and parts[2] in ("forward", "backward") and parts[1].isdigit():
+        return parts[2], int(parts[1])
+    return None
+
+
+def _nbytes(t) -> int:
+    return t.numel() * t.element_size() if isinstance(t, torch.Tensor) else 0
+
+
+class FastExecutor(Executor):
+    """A fine-tune's Executor that does once what Executor does again: what finetune.train_segment and a dispute's
+    re-runs (Party) use. It gives the same bits as Executor, op for op (tests/test_tracer.py compares every tensor
+    after several steps), so workers with and without it agree, and the states it reaches in a dispute chain to the
+    checkpoints either way. Measured on Qwen3-0.6B (the everyday chats, batch 8, RTX 4070 SUPER, 2026-11-10): 1.90 s a
+    step against Executor's 2.71 s, 1.42x, the same bits, at 4.9 GiB peak against 1.9.
+
+    What it keeps, while spare device memory allows (`room` bytes, ROOM_SHARE of what's spare when it starts):
+    - each projection's frozen weights cast to float32, once, not on every use (the cast is exact);
+    - a layer's forward outputs, for the recompute that opens the layer's backward. The same op on the very same input
+      tensors gives the same output (nothing is changed in place), so each is looked up instead of run again. Only
+      when the forward ran in this executor and every input is the tensor the forward read: a re-run that starts
+      inside a layer, as a dispute's can, recomputes;
+    - each head block's logits, from its head_stats to its head_grad in the same sequence.
+    With `tamper` (tests' cheating workers) it keeps none of them, so a cheat lands where Executor's would."""
+
+    def __init__(self, rt, spec, program, tamper=None, room=None):
+        super().__init__(rt, spec, program, tamper)
+        if tamper is not None:
+            room = 0
+        self.room = int(spare_bytes(self.device) * ROOM_SHARE) if room is None else room
+        self.used = 0
+        self._w32: dict[str, torch.Tensor] = {}
+        self._fwd: dict[tuple, tuple[list, int]] = {}  # (where, layer) -> ([(op, input tensors, output)], bytes)
+        self._recording: list | None = None
+        self._replay: list | None = None  # [record, index of the next op it has]
+        self._logits: dict[tuple, tuple] = {}  # (sequence, block start) -> (logits, the hidden states, bytes)
+        self._depth = 0
+
+    def _take(self, n: int) -> bool:
+        if self.used + n > self.room:
+            return False
+        self.used += n
+        return True
+
+    def w32(self, name: str) -> torch.Tensor:
+        t = self._w32.get(name)
+        if t is None:
+            t = self.w(name).to(_F32)
+            if self._take(_nbytes(t)):
+                self._w32[name] = t
+        return t
+
+    # --- running ---
+
+    def run_atoms(self, node: Node, lo: int, hi: int, st: dict, where: tuple = ()) -> None:
+        if self._depth:
+            return self._atoms(node, lo, hi, st, where)
+        self._depth = 1
+        try:
+            with no_fill():
+                self._atoms(node, lo, hi, st, where)
+        finally:
+            self._depth = 0
+            for _, n in self._fwd.values():  # a forward whose backward this run didn't reach
+                self.used -= n
+            self._fwd.clear()
+            self._drop_logits()
+
+    def _atoms(self, node: Node, lo: int, hi: int, st: dict, where: tuple) -> None:
+        for i in range(lo, hi):
+            a = node.atoms[i]
+            if isinstance(a, Op):
+                self.where = where
+                self.run(a, st)
+                continue
+            sub = where + (a.label,)
+            part = _layer_part(a.label)
+            if part and part[0] == "forward" and self.room and self._recording is None and self._replay is None:
+                rec = self._recording = []
+                try:
+                    self._atoms(a, 0, len(a.atoms), st, sub)
+                finally:
+                    self._recording = None
+                if rec:
+                    rec.pop()  # the forward's closing add, which the backward's recompute leaves out
+                n = sum(_nbytes(out) for _, _, out in rec)
+                if rec and self._take(n):
+                    self._fwd[(where, part[1])] = (rec, n)
+            elif part and part[0] == "backward" and (where, part[1]) in self._fwd and self._replay is None:
+                rec, n = self._fwd.pop((where, part[1]))
+                self._replay = [rec, 0]
+                try:
+                    self._atoms(a, 0, len(a.atoms), st, sub)
+                finally:
+                    self._replay = None
+                    self.used -= n
+            else:
+                self._atoms(a, 0, len(a.atoms), st, sub)
+            if a.label == "head and loss":
+                self._head = (None, None)
+                self._drop_logits()
+
+    def run(self, op: Op, st: dict) -> None:
+        if self._replay is not None and self._replayed(op, st):
+            return
+        if self.tamper is None and op.kind == "head_stats":
+            return self._head_stats(op, st)
+        if self.tamper is None and op.kind == "head_grad" and self._head_grad(op, st):
+            return
+        ins = tuple(st[n] for n in op.ins) if self._recording is not None else None
+        super().run(op, st)
+        if ins is not None:
+            self._recording.append((op, ins, st[op.out] if op.out else None))
+
+    def _replayed(self, op: Op, st: dict) -> bool:
+        """Puts the forward's output for `op` in place of running it, if `op` is the recompute's next op on the very
+        inputs the forward read; otherwise the recompute is over (or took another way) and the rest runs."""
+        rec, j = self._replay
+        if j < len(rec):
+            was, ins, out = rec[j]
+            if (was.kind, was.out, was.ins) == (op.kind, op.out, op.ins) and all(
+                    st.get(n) is t for n, t in zip(op.ins, ins)):
+                self._replay[1] = j + 1
+                if op.out:
+                    st[op.out] = out
+                for d in op.drops:
+                    del st[d]
+                return True
+        self._replay = None
+        return False
+
+    def _head_stats(self, op: Op, st: dict) -> None:
+        lo, _, _ = _head(self, op, st)
+        n = _nbytes(lo)
+        if self.room and self._take(n):
+            self._logits[(op.attrs["seq"], op.attrs["b0"])] = (lo, st[op.ins[0]], n)
+        st[op.out] = _stats(lo, op, st).contiguous()
+        for d in op.drops:
+            del st[d]
+
+    def _head_grad(self, op: Op, st: dict) -> bool:
+        key = (op.attrs["seq"], op.attrs["b0"])
+        kept = self._logits.get(key)
+        if kept is None or kept[1] is not st[op.ins[0]]:
+            return False
+        lo, _, n = self._logits.pop(key)
+        self.used -= n
+        _, _, tgt = self.seq(op.attrs["seq"])
+        w = self.head32(op.attrs["weight"])[op.attrs["b0"]:op.attrs["b1"]]
+        st[op.out] = _grad(lo, w, tgt, op, st).contiguous()
+        for d in op.drops:
+            del st[d]
+        return True
+
+    def _drop_logits(self) -> None:
+        for _, _, n in self._logits.values():
+            self.used -= n
+        self._logits.clear()
+
+
 # --- disputes: a worker's side (dispute.py has the rules) -------------------------------------------------------------
 
 HARD = 1e-2  # a child whose result is this far (relative) from a recompute is taken at once; else the furthest
@@ -388,7 +604,7 @@ class Party:
         self._sending_lock = threading.Lock()
 
     def executor(self, prog, honest: bool) -> Executor:
-        return Executor(self.rt, self.spec, prog, None if honest else self.tamper)
+        return FastExecutor(self.rt, self.spec, prog, None if honest else self.tamper)
 
     def gpu(self):
         """The device's lock (finetune._Runtime.busy) around a re-run, so a dispute's and a check's never hold two

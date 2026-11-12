@@ -524,13 +524,14 @@ def train_segment(spec: LoraSpec, data: TokenDataset, theta: np.ndarray, unit_se
                   n_steps: int, lr: float, batch_size: int, backend=None, tamper=None) -> np.ndarray:
     """Adam steps [start_step, start_step + n_steps) of a unit, from the state vector `theta` ([B | m | v]). Step t of
     a unit (from 0) uses batch_indices(unit_seed, t) and bias correction for t + 1. Runs program.py's ops one by one
-    (tracer.Executor), the same ones a dispute re-runs and the node's referee checks; the Adam update is a separate,
-    correctly rounded float32 operation at a time, so given the same gradients every device takes the same step.
-    `tamper` is tracer.Executor's, for tests of a worker that cheats in one op."""
+    (tracer.FastExecutor: Executor's bits, with less repeated work), the same ones a dispute re-runs and the node's
+    referee checks; the Adam update is a separate, correctly rounded float32 operation at a time, so given the same
+    gradients every device takes the same step. `tamper` is tracer.Executor's, for tests of a worker that cheats in
+    one op."""
     import torch
 
+    from . import tracer
     from .program import Program, join_theta, split_theta
-    from .tracer import Executor
 
     from .compute import pin_precision
 
@@ -540,7 +541,7 @@ def train_segment(spec: LoraSpec, data: TokenDataset, theta: np.ndarray, unit_se
         pin_precision()  # TF32 off again, in case something turned it on since the model loaded (rule 2 fails TF32)
         # (copies: a checkpoint may be a read-only memory map)
         st = {k: torch.tensor(v, device=rt.device) for k, v in split_theta(spec, theta).items()}
-        ex = Executor(rt, spec, prog, tamper)
+        ex = tracer.FastExecutor(rt, spec, prog, tamper)
         for t in range(start_step, start_step + n_steps):
             node = prog.step(t)
             ex.run_atoms(node, 0, len(node.atoms), st, (node.label,))

@@ -704,6 +704,17 @@ class WorkerClient:
                     sent.add(bid)
         return ids
 
+    def _send_unit(self, rnd: int, job: TrainingJob, arrays, c) -> tuple[float, bool]:
+        """A trained unit's checkpoints up, then its commitment: (seconds the upload took, whether it's committed). Runs
+        in the background beside the next unit's training, so it only sends; the round's records stay with the caller."""
+        t = time.perf_counter()
+        uploaded = self._try(self._upload, rnd, job, arrays) is not None
+        took = time.perf_counter() - t
+        if not uploaded:
+            return took, False
+        return took, bool(self._try(self._signed, "commit", {"round": rnd, "commitment": commitment_out(c)},
+                                    commitment_out(c)))
+
     def _send_reveal(self, rnd: int, job: TrainingJob, rv) -> dict | None:
         """Checkpoints went up during compute, so this is one small message (plus any upload that failed)."""
         ids = self._upload(rnd, job, [rv.final_params, *(a for a, _ in rv.openings.values())])
@@ -905,22 +916,28 @@ class WorkerClient:
                 self.start_blob[rnd] = p["blob"]
                 st.busy = True
                 try:
-                    for i, u in enumerate(units, 1):
-                        st.activity = f"training unit {i} of {len(units)}"
-                        t0 = time.perf_counter()
-                        c = self.worker.compute(u, job, start)
-                        st.trained += 1
-                        t1 = time.perf_counter()
-                        # Upload before committing: the reveal phase then only carries a small message, and uploads
-                        # count toward the compute deadline, so a link too slow to deliver in time gets less work next round.
-                        # Safe to send early: blob ids are content hashes nobody else can guess, and the commitment
-                        # already binds the result before the beacon exists.
-                        work = self.worker._work[u.unit_id]
-                        st.activity = f"uploading unit {i} of {len(units)}"
-                        uploaded = self._try(self._upload, rnd, job, [*work.checkpoints[1:], work.final]) is not None
-                        self.record.add(rnd, trained=1, train_s=t1 - t0, upload_s=time.perf_counter() - t1)
-                        if uploaded:
-                            if self._try(self._signed, "commit", {"round": rnd, "commitment": commitment_out(c)}, commitment_out(c)):
+                    # Upload before committing: the reveal phase then only carries a small message, and uploads count
+                    # toward the compute deadline, so a link too slow to deliver in time gets less work next round. Safe
+                    # to send early: blob ids are content hashes nobody else can guess, and the commitment already binds
+                    # the result before the beacon exists. Each unit goes up while the next one trains (an upload used
+                    # to leave the GPU idle for 3-4 s of a 25-28 s unit on the public node, 2026-11-02); one at a time,
+                    # in the order trained, and a unit is committed only once its own checkpoints are up.
+                    with ThreadPoolExecutor(1, thread_name_prefix="upload") as sender:
+                        sending = []
+                        for i, u in enumerate(units, 1):
+                            st.activity = f"training unit {i} of {len(units)}"
+                            t0 = time.perf_counter()
+                            c = self.worker.compute(u, job, start)
+                            st.trained += 1
+                            self.record.add(rnd, trained=1, train_s=time.perf_counter() - t0)
+                            work = self.worker._work[u.unit_id]
+                            sending.append((u, sender.submit(self._send_unit, rnd, job,
+                                                             [*work.checkpoints[1:], work.final], c)))
+                        st.activity = f"uploading the last of {len(units)} units"
+                        for u, sent in sending:
+                            upload_s, done = sent.result()
+                            self.record.add(rnd, upload_s=upload_s)
+                            if done:
                                 committed.append(u)
                                 st.committed += 1
                                 st.units += 1
