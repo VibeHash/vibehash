@@ -69,6 +69,31 @@ EOF
     vibehash stake --node "$1" --wallet "$2" --amount 10 < /dev/null
 }
 
+wait_done() {
+    # Returns once the GSM8K job on node $1 has spent its budget: less than one round's 10 VIBE left in escrow.
+    until python - "$1" <<'EOF'
+import sys
+from vibehash.client import NodeClient
+from vibehash.tasks import SYN_PER_VIBE
+try:
+    left = NodeClient(sys.argv[1]).get("/job/gsm8k")["escrow"]
+except Exception:  # the node busy or restarting: ask again
+    sys.exit(1)
+sys.exit(0 if left < 10 * SYN_PER_VIBE else 1)
+EOF
+    do sleep 30; done
+}
+
+margins() {
+    # Replays every checked segment on this pod's GPU and prints the table into the pod's log, where it can be read
+    # back with RunPod's tools (they can't copy files off a pod).
+    python /workspace/vibehash/scripts/finetune_margins.py --node "$1" --device cuda \
+        --scratch /workspace/margins-scratch --out /workspace/margins.csv
+    echo "=== MARGINS CSV $(hostname) ==="
+    cat /workspace/margins.csv
+    echo "=== END MARGINS ==="
+}
+
 case "${1:-}" in
 node)
     install
@@ -86,6 +111,20 @@ node)
     stake_from "$LOCAL" "$T/worker-1.json"
     echo "Node pod ready: its worker is staked, and the faucet funds each worker that joins (log: $LOGS/faucet.log)."
     echo "Other pods join with:  bash gpu_run_pod.sh worker https://<this pod's ID>-8545.proxy.runpod.net"
+
+    # When the budget is spent: the adapter, its GSM8K score against the base model's, and this GPU's margins.
+    wait_done "$LOCAL"
+    echo "=== JOB SPENT: finishing ==="
+    cd /workspace
+    vibehash job download gsm8k --node "$LOCAL" < /dev/null
+    BASE_REV=$(python -c "import json, re; from vibehash.client import NodeClient; \
+print(re.search(r'@([0-9a-f]{40})', json.dumps(NodeClient('$LOCAL').get('/job/gsm8k')['spec'])).group(1))")
+    S=/workspace/vibehash/scripts/gsm8k_job.py
+    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32
+    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32 \
+        --adapter /workspace/gsm8k-train-lora
+    margins "$LOCAL"
+    echo "=== RUN COMPLETE ==="
     ;;
 worker)
     NODE=${2:?give the node pod address: https://ID-8545.proxy.runpod.net}
@@ -99,6 +138,13 @@ worker)
     echo "This worker's address: $ADDR. Mining; it stakes once the faucet's money arrives."
     stake_from "$NODE" "$WALLET"
     echo "Staked 10 VIBE."
+
+    # When the budget is spent: stop mining, then replay every checked segment on this GPU.
+    wait_done "$NODE"
+    pkill -f "vibehash worker" || true
+    echo "=== JOB SPENT: measuring margins ==="
+    margins "$NODE"
+    echo "=== RUN COMPLETE ==="
     ;;
 fund)
     shift
