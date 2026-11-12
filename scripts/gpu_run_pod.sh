@@ -94,6 +94,23 @@ margins() {
     echo "=== END MARGINS ==="
 }
 
+finish() {
+    # The adapter, its GSM8K score beside the base model's, and this GPU's margins, all from node $1. Run from a
+    # folder of its own: in /workspace, the clone named vibehash would hide the installed package from Python.
+    mkdir -p /workspace/run && cd /workspace/run
+    vibehash job download gsm8k --node "$1" < /dev/null
+    BASE_REV=$(python -c "import json, re; from vibehash.client import NodeClient; \
+print(re.search(r'@([0-9a-f]{40})', json.dumps(NodeClient('$1').get('/job/gsm8k')['spec'])).group(1))")
+    S=/workspace/vibehash/scripts/gsm8k_job.py
+    echo "=== SCORE base ==="
+    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32
+    echo "=== SCORE adapter ==="
+    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32 \
+        --adapter /workspace/run/gsm8k-train-lora
+    margins "$1"
+    echo "=== RUN COMPLETE ==="
+}
+
 case "${1:-}" in
 node)
     install
@@ -115,16 +132,13 @@ node)
     # When the budget is spent: the adapter, its GSM8K score against the base model's, and this GPU's margins.
     wait_done "$LOCAL"
     echo "=== JOB SPENT: finishing ==="
-    cd /workspace
-    vibehash job download gsm8k --node "$LOCAL" < /dev/null
-    BASE_REV=$(python -c "import json, re; from vibehash.client import NodeClient; \
-print(re.search(r'@([0-9a-f]{40})', json.dumps(NodeClient('$LOCAL').get('/job/gsm8k')['spec'])).group(1))")
-    S=/workspace/vibehash/scripts/gsm8k_job.py
-    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32
-    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32 \
-        --adapter /workspace/gsm8k-train-lora
-    margins "$LOCAL"
-    echo "=== RUN COMPLETE ==="
+    finish "$LOCAL"
+    ;;
+finish)
+    # Scoring and margins on a fresh pod, against a node pod whose job is done (for a node pod that couldn't).
+    NODE=${2:?give the node pod address: https://ID-8545.proxy.runpod.net}
+    install
+    finish "$NODE"
     ;;
 worker)
     NODE=${2:?give the node pod address: https://ID-8545.proxy.runpod.net}
