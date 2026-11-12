@@ -86,15 +86,15 @@ node)
 worker)
     NODE=${2:?give the node pod address: https://ID-8545.proxy.runpod.net}
     install
-    vibehash setup --node "$NODE" --yes < /dev/null | tee "$LOGS/setup.txt"
+    # --gpu skip: keep the template's PyTorch, so every pod in the run computes with the same build.
+    vibehash setup --node "$NODE" --gpu skip --yes < /dev/null | tee "$LOGS/setup.txt"
     WALLET=$(python -c "from vibehash import settings; print(settings.default_wallet())")
     ADDR=$(python -c "import json; print(json.load(open('$WALLET'))['address'])")
-    echo
-    echo "This worker's address: $ADDR   (give it to: bash gpu_run_pod.sh fund ... on the node pod)"
-    echo "Waiting for its stake money…"
+    # Mine first: the node pod's faucet pays workers once they register, and a worker registers by mining.
+    nohup vibehash worker --node "$NODE" --device cuda --plain 2>&1 | tee "$LOGS/worker.log" &
+    echo "This worker's address: $ADDR. Mining; it stakes once the faucet's money arrives."
     stake_from "$NODE" "$WALLET"
-    nohup vibehash worker --node "$NODE" --device cuda --plain > "$LOGS/worker.log" 2>&1 &
-    echo "Mining. Log: $LOGS/worker.log"
+    echo "Staked 10 VIBE."
     ;;
 fund)
     shift
