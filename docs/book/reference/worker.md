@@ -19,7 +19,7 @@ Flags:
 - `--plain`: print log lines instead of the live mining dashboard.
 - `--watch PORT`: also serve what the dashboard shows as JSON at http://127.0.0.1:PORT/ (default port 7545), read-only and for this computer only, so a window or a script can follow the worker step by step: its round, what it is doing, its counts, its account, the latest events.
 - `--deepseek {ask,yes,no}`: take DeepSeek work (its ~30 GB of model files): yes, or no (the default; DeepSeek is frozen). ask is only for the pilot (VIBEHASH_DEEPSEEK_PILOT=1). Remembered.
-- `--job JOB`: mine only this job's rounds and sit the other jobs' out (default auto: every job this worker can do). The dashboard's job line changes it while it runs: Tab or 0-9.
+- `--job JOB`: mine only this job's rounds and sit the other jobs' out, or several jobs' as JOB,JOB (default auto: every job this worker can do). saved: the jobs the app's Pick your vibe chose, followed as they change. The dashboard's job line changes it while it runs: Tab or 0-9.
 - `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
 - `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
 - `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).

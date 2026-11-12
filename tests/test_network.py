@@ -700,6 +700,65 @@ class JobPickerTest(unittest.TestCase):
         self.assertFalse(c.choose("another"))
         self.assertTrue(c.choose(None))
 
+    def test_job_choices_are_read_as_sets_of_ids(self):
+        """One id, "a,b" as `worker --job` spells several, a list as the app saves it; auto, empty or junk is every job."""
+        from vibehash.client import JobChoice, job_ids
+        self.assertIsNone(job_ids(None))
+        self.assertIsNone(job_ids("auto"))
+        self.assertIsNone(job_ids([]))
+        self.assertIsNone(job_ids(" , "))
+        self.assertEqual(job_ids(" pick-a, pick-b ,"), frozenset({"pick-a", "pick-b"}))
+        self.assertEqual(job_ids(["pick-a", 3, None]), frozenset({"pick-a"}))
+        choice = JobChoice("pick-a,pick-b")
+        self.assertIsNone(choice.job_id)  # several: the terminal's one-at-a-time selector shows none of them
+        self.assertTrue(choice.allows("pick-b") and not choice.allows("other"))
+        self.assertEqual(choice.describe(), "pick-a, pick-b")
+        self.assertFalse(choice.set(["pick-b", "pick-a"]))  # the same set, in any order: no change
+        self.assertTrue(choice.drop("pick-a"))
+        self.assertEqual((choice.job_id, choice.describe()), ("pick-b", "pick-b"))
+        self.assertFalse(choice.drop("pick-a"))
+        self.assertTrue(choice.drop("pick-b"))
+        self.assertIsNone(choice.ids)  # the last one gone: every job
+        self.assertTrue(choice.allows("anything"))
+
+    def test_a_worker_set_to_several_jobs_mines_any_of_them_and_lets_spent_ones_go(self):
+        """Pick your vibe (and `worker --job a,b`): a worker set to several jobs registers in any of their rounds and sits
+        the rest out. A chosen job that runs out leaves the choice with one log line, and the last one to go puts the
+        worker back on every job."""
+        from vibehash import client as client_module
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        c = WorkerClient("http://127.0.0.1:9", KeyPair.generate(b"picker"), device="cpu", cache_dir=tmp.name,
+                         job="pick-a,pick-b")
+        status = {"genesis_hash": "g", "height": 4, "round": 5, "attempt": "a", "phase": "register", "phase_ends": 0,
+                  "job_id": "other"}
+        c._follow_leader = lambda: dict(status)
+        for job_id in ("other", "pick-b"):
+            c.jobs[job_id], c.cannot[job_id] = TrainingJob(job_id, "req", 0, 10), f"this test's worker can't run {job_id}"
+        listed = [["pick-a", "pick-b", "other"]]
+        c.home.open_jobs = lambda: listed[0]
+        with self.assertLogs("vibehash.worker", logging.INFO) as logs:
+            c.step()
+            self.assertEqual(c.stats.activity, "sitting out other's round: mining pick-a, pick-b only")
+            status.update(round=6, job_id="pick-b")
+            c.step()  # one of the chosen: not sat out
+            self.assertEqual(c.stats.activity, "this test's worker can't run pick-b")
+            listed[0] = ["pick-b", "other"]  # pick-a ran out
+            status.update(round=7, job_id="other")
+            c._open_asked -= client_module.OPEN_EVERY + 1
+            c.step()
+            self.assertEqual((c.choice.ids, c.stats.activity),
+                             (frozenset({"pick-b"}), "sitting out other's round: mining pick-b only"))
+            listed[0] = ["other"]  # and then pick-b
+            status.update(round=8)
+            c._open_asked -= client_module.OPEN_EVERY + 1
+            c.step()
+            self.assertEqual((c.choice.ids, c.stats.activity), (None, "this test's worker can't run other"))
+        self.assertEqual([m for m in logs.output if "no budget left" in m],
+                         ["INFO:vibehash.worker:job pick-a has no budget left any more: mining pick-b only",
+                          "INFO:vibehash.worker:job pick-b has no budget left any more: mining every job (auto)"])
+
 
 @unittest.skipIf(importlib.util.find_spec("torch") is None, "needs PyTorch")
 class DistantDefenderTest(unittest.TestCase):
