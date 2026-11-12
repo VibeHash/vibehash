@@ -27,6 +27,8 @@ install() {
     # The branch, installed over the template's own PyTorch (pip keeps a PyTorch that's already there).
     if [ ! -d /workspace/vibehash ]; then
         git clone --branch "$BRANCH" https://github.com/VibeHash/vibehash.git /workspace/vibehash
+    else  # a pod restarted with its disk kept: catch up with the branch
+        git -C /workspace/vibehash pull -q --ff-only
     fi
     cd /workspace/vibehash
     # Ubuntu's own cryptography has no pip record, so pip can't replace it; install the newer one beside it first.
