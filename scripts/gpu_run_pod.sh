@@ -102,11 +102,15 @@ finish() {
     BASE_REV=$(python -c "import json, re; from vibehash.client import NodeClient; \
 print(re.search(r'@([0-9a-f]{40})', json.dumps(NodeClient('$1').get('/job/gsm8k')['spec'])).group(1))")
     S=/workspace/vibehash/scripts/gsm8k_job.py
-    echo "=== SCORE base ==="
-    python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32
-    echo "=== SCORE adapter ==="
+    # job download names the folder after the data file where it has one, after the job id where it doesn't.
+    ADAPTER=$(ls -d /workspace/run/*-lora | head -1)
+    if [ -z "${SKIP_BASE:-}" ]; then  # SKIP_BASE=1 on a rerun that already has the base model's score
+        echo "=== SCORE base ==="
+        python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32
+    fi
+    echo "=== SCORE adapter ($ADAPTER) ==="
     python "$S" score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" --revision "$DATA_REV" --batch 32 \
-        --adapter /workspace/run/gsm8k-train-lora
+        --adapter "$ADAPTER"
     margins "$1"
     echo "=== RUN COMPLETE ==="
 }
