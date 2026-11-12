@@ -29,6 +29,8 @@ install() {
         git clone --branch "$BRANCH" https://github.com/VibeHash/vibehash.git /workspace/vibehash
     fi
     cd /workspace/vibehash
+    # Ubuntu's own cryptography has no pip record, so pip can't replace it; install the newer one beside it first.
+    pip install -q --ignore-installed cryptography
     pip install -q -e ".[finetune,evo]" peft
     {
         echo "commit $(git rev-parse HEAD)"
