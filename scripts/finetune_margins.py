@@ -36,6 +36,7 @@ import numpy as np  # noqa: E402  (fast maths on whole arrays of weights)
 
 from vibehash.blobs import BlobStore  # noqa: E402  (a folder of downloaded files, each checked against its hash)
 from vibehash.client import NodeClient, NodeError  # noqa: E402  (the one way node traffic goes, proxy and TLS aware)
+from vibehash.crypto import address_of  # noqa: E402  (a worker's address, from the public key it signed with)
 from vibehash.model import relative_distance, train_segment  # noqa: E402  (the same replay a checker runs)
 from vibehash.tasks import TrainingJob, WorkUnit, load_dataset  # noqa: E402
 from vibehash.verification import (FINETUNE_CHECK, FLIP_SHARE, FRESH_TOLERANCE, MOMENT_TOLERANCE,  # noqa: E402
@@ -168,6 +169,9 @@ def measure(fetch: Fetcher, heights: range, device: str, labels: dict, writer: c
         units = {u.unit_id: u for u in (WorkUnit.make(job, record["round"], i, bytes.fromhex(record["start_hash"]))
                                          for i in range(job.units_per_round))}
         c = job.checkpoint_every
+        # Which GPU each worker said it had, from this round's own signed registrations; --labels wins when given.
+        said = {address_of(bytes.fromhex(e["pubkey"])): e.get("body", {}).get("hardware", {}).get("label", "?")
+                for e in record.get("registrations", []) if isinstance(e, dict) and e.get("pubkey")}
         for rv in record.get("reveals", []):
             if "openings" not in rv or rv.get("unit_id") not in units:
                 continue  # a reveal without checkpoints (rejected before upload) or for another kind of unit
@@ -181,7 +185,8 @@ def measure(fetch: Fetcher, heights: range, device: str, labels: dict, writer: c
                 for r in segment_margins(job, before, after, expected):
                     writer.writerow({"height": height, "round": record["round"], "job": record["job_id"],
                                      "unit": rv["unit_id"], "worker": rv["worker"],
-                                     "trained_on": labels.get(rv["worker"], "?"), "replayed_on": here,
+                                     "trained_on": labels.get(rv["worker"], said.get(rv["worker"], "?")),
+                                     "replayed_on": here,
                                      "segment": seg, **r})
                     rows += 1
         print(f"block {height}: {segments} segments so far")
