@@ -1,7 +1,7 @@
-"""How far honest fine-tune replays drift between GPU generations, against how far a TF32 cheat drifts.
+"""How far honest fine-tune replays drift between GPUs, against how far cheating workers' claims land.
 
     python scripts/xgpu_drift.py make    --data chats.jsonl --base qwen3-0.6b --units 16 --dir /shared/run
-    python scripts/xgpu_drift.py replay  --dir /shared/run --label rtx4090          (on every GPU)
+    python scripts/xgpu_drift.py replay  --dir /shared/run --label rtx4090 --modes honest,tf32   (on every GPU)
     python scripts/xgpu_drift.py compare --dir /shared/run                          (once all have replayed)
 
 A checker accepts a fine-tune segment when its own replay of the segment lands within rule 2 of the worker's claim
@@ -11,9 +11,22 @@ moments, by up to 2.9 times the limit, near the drift verification.py records fo
 measures that question directly, without a network: every GPU starts each segment from the same bytes.
 
 make     trains a warm round start on this device, then N units from it, and saves each segment's input checkpoint.
-replay   trains every segment from those inputs on this device, honestly and with TF32 on, and saves the results.
-compare  scores every claim (each device, honest or TF32) against every device's honest replay by rule 2, writes
-         compare.csv, and prints the distribution of each part's share of its limit, per pair. Needs no GPU.
+replay   trains every segment from those inputs on this device, once per mode, and saves the results.
+compare  scores every claim (each device, each mode) against every device's honest replay by rule 2, writes
+         compare.csv, and prints the verdicts and each part's share of its limit. Needs no GPU.
+
+The modes are what a worker might do with a segment of c steps on b sequences each. `honest` and `tf32` run the
+segment in one call, as a worker does. The rest run it a step at a time, so one step can differ:
+
+    split           honest, a step at a time: the control, which must equal `honest` exactly on the same device
+    tf32            every step with TF32 on (faster matmuls that keep 10 bits of mantissa)
+    tf32-last       TF32 on for the last step only
+    drop-last-step  the last step never run
+    half-batch      every step on the first half of its sequences
+    drop-one        every step without its last sequence
+    drop-one-last   the last step without its last sequence: the smallest cut here, 1/(b*c) of the segment
+    other-batches   every step on the next unit's batches (one unit trained, two claimed)
+    skip            nothing run: the claim is the input
 
 Checkpoints are float32 .npy files, about 27.5 MB each for Qwen3-0.6B at rank 16, in a folder every pod can read.
 """
@@ -22,9 +35,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import platform
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,7 +48,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import numpy as np  # noqa: E402
 
-MODES = ("honest", "tf32")
+WHOLE = ("honest", "tf32")  # run as one call a segment; the others a step at a time (plan_steps)
+STEPPED = ("split", "tf32-last", "drop-last-step", "half-batch", "drop-one", "drop-one-last", "other-batches", "skip")
 WARM_SEGMENTS = 4  # segments of training before the round start, so B is a trained adapter, not zeros
 
 
@@ -78,12 +94,48 @@ def set_tf32(on: bool) -> None:
     compute.pin_precision = cheat if on else set_tf32.honest
 
 
-def segment(job, data, theta, seed, seg, backend):
+def plan_steps(mode: str, c: int, b: int) -> list:
+    """What a worker in a stepped `mode` does at each of a segment's c steps: None for a step it never runs, else
+    (sequences in the batch, TF32 on, how many units along its batches come from). A smaller batch is the honest
+    batch's first sequences (model.batch_indices draws them in order)."""
+    honest, rest = (b, False, 0), c - 1
+    return {
+        "split": [honest] * c,
+        "tf32-last": [honest] * rest + [(b, True, 0)],
+        "drop-last-step": [honest] * rest + [None],
+        "half-batch": [(max(1, b // 2), False, 0)] * c,
+        "drop-one": [(b - 1, False, 0)] * c,
+        "drop-one-last": [honest] * rest + [(b - 1, False, 0)],
+        "other-batches": [(b, False, 1)] * c,
+        "skip": [None] * c,
+    }[mode]
+
+
+def skipped(mode: str, c: int, b: int) -> float:
+    """The share of a segment's sequence-steps a mode never computes on the claimed data. (TF32 computes them all, at
+    lower precision; `other-batches` computes none of the claimed unit's, having trained its neighbour instead.)"""
+    if mode in WHOLE:
+        return 0.0
+    if mode == "other-batches":
+        return 1.0
+    return 1.0 - sum(step[0] for step in plan_steps(mode, c, b) if step) / (c * b)
+
+
+def segment(job, data, theta, seed, seg, backend, mode="honest"):
+    """Segment `seg` of the unit with `seed`, from `theta`, as a worker in `mode` would claim it."""
     from vibehash import finetune
 
-    c = job.checkpoint_every
-    return job.spec.round(finetune.train_segment(job.spec, data, theta, seed, seg * c, c, job.lr, job.batch_size,
-                                                 backend))
+    c, b = job.checkpoint_every, job.batch_size
+    if mode in WHOLE:
+        set_tf32(mode == "tf32")
+        return job.spec.round(finetune.train_segment(job.spec, data, theta, seed, seg * c, c, job.lr, b, backend))
+    for i, step in enumerate(plan_steps(mode, c, b)):
+        if step is None:
+            continue
+        batch, tf32, along = step
+        set_tf32(tf32)
+        theta = finetune.train_segment(job.spec, data, theta, seed + along, seg * c + i, 1, job.lr, batch, backend)
+    return job.spec.round(theta)
 
 
 def save(path: Path, theta) -> None:
@@ -129,6 +181,10 @@ def cmd_replay(a) -> None:
     import torch
     from vibehash import compute
 
+    modes = [m for m in a.modes.split(",") if m]
+    unknown = [m for m in modes if m not in WHOLE + STEPPED]
+    if unknown or "honest" not in modes:
+        sys.exit(f"--modes must include honest, and only name {', '.join(WHOLE + STEPPED)}: got {a.modes}")
     d = Path(a.dir)
     while not (d / "meta.json").exists():  # make runs on another pod; wait for it
         time.sleep(15)
@@ -138,24 +194,28 @@ def cmd_replay(a) -> None:
     device = pick_device(a.device)
     backend = compute.TorchBackend(device)
     out = d / "replays" / a.label
-    for mode in MODES:
-        set_tf32(mode == "tf32")
+    seconds, counts = {}, {}
+    for mode in modes:  # every unit honestly; the cheats on the first --cheat-units of them
+        units = meta["units"] if mode == "honest" else min(meta["units"], a.cheat_units or meta["units"])
         t0 = time.perf_counter()
-        for u in range(meta["units"]):
+        for u in range(units):
             for seg in range(meta["segments"]):
                 theta = load(d / "inputs" / f"u{u:03d}-s{seg}.npy")
-                save(out / mode / f"u{u:03d}-s{seg}.npy", segment(job, data, theta, 1000 + u, seg, backend))
-        print(f"{a.label} {mode}: {meta['units'] * meta['segments']} segments in "
-              f"{time.perf_counter() - t0:.0f} s", flush=True)
+                save(out / mode / f"u{u:03d}-s{seg}.npy", segment(job, data, theta, 1000 + u, seg, backend, mode))
+        seconds[mode], counts[mode] = round(time.perf_counter() - t0, 1), units * meta["segments"]
+        print(f"{a.label} {mode}: {counts[mode]} segments in {seconds[mode]:.0f} s", flush=True)
     set_tf32(False)
-    # Proof the cheat took effect here: on a GPU with TF32, its result must differ from the honest one. (On a CPU, or
-    # a GPU without TF32, they're equal, and this device's TF32 rows measure nothing.)
-    first = [load(out / mode / "u000-s0.npy") for mode in MODES]
-    gap = float(np.linalg.norm(first[1] - first[0]) / (np.linalg.norm(first[0]) + 1e-12))
-    print(f"{a.label}: TF32 vs honest on the first segment, relative distance {gap:.3g}"
-          f"{'' if gap > 0 else '  (TF32 had no effect on this device)'}", flush=True)
+    # Proof each mode took effect here: its first claim's distance from the honest one. `split` must be 0; a cheat
+    # that's 0 measured nothing on this device (TF32 on a CPU, say).
+    honest = load(out / "honest" / "u000-s0.npy")
+    effect = {}
+    for mode in (m for m in modes if m != "honest"):
+        other = load(out / mode / "u000-s0.npy")
+        effect[mode] = float(np.linalg.norm(other - honest) / (np.linalg.norm(honest) + 1e-12))
+        print(f"{a.label}: {mode} vs honest on the first segment, relative distance {effect[mode]:.3g}", flush=True)
     info = {"label": a.label, "device": device_name(device), "torch": torch.__version__,
-            "cuda": torch.version.cuda, "driver": _driver(), "tf32_effect": gap}
+            "cuda": torch.version.cuda, "driver": _driver(), "seconds": seconds, "segments": counts,
+            "effect": effect}
     (out / "done.json").write_text(json.dumps(info, indent=2))
     print(f"replayed on {info['device']}: {json.dumps(info)}")
 
@@ -169,32 +229,48 @@ def _driver() -> str:
         return ""
 
 
-def cmd_compare(a) -> None:
+def compare_segment(task) -> list[dict]:
+    """Every claim on one segment against every device's honest replay of it. One call a process, so `compare` can
+    spread the segments over the machine's cores (each comparison sorts a 6.9M-weight array)."""
     from types import SimpleNamespace
 
     from vibehash import finetune
     from finetune_margins import segment_margins
 
-    d = Path(a.dir)
-    meta = json.loads((d / "meta.json").read_text())
+    d, meta, labels, u, seg = task
+    d = Path(d)
     spec = finetune.LoraSpec.from_json(meta["spec"], 11)
     job = SimpleNamespace(spec=spec, checkpoint_every=meta["steps_per_segment"], tolerance=finetune.TOLERANCE,
                           lr=meta["lr"])
+    name = f"u{u:03d}-s{seg}.npy"
+    before = load(d / "inputs" / name)
+    honest = {lab: load(d / "replays" / lab / "honest" / name) for lab in labels}
+    rows = []
+    for claimant in labels:
+        for mode in WHOLE + STEPPED:
+            path = d / "replays" / claimant / mode / name
+            if not path.exists():  # a mode this device didn't run, or a unit past its --cheat-units
+                continue
+            claim = honest[claimant] if mode == "honest" else load(path)
+            for checker in labels:
+                for r in segment_margins(job, before, claim, honest[checker]):
+                    rows.append({"unit": u, "segment": seg, "claimant": claimant, "mode": mode, "checker": checker,
+                                 **r})
+    return rows
+
+
+def cmd_compare(a) -> None:
+    d = Path(a.dir)
+    meta = json.loads((d / "meta.json").read_text())
     labels = sorted(p.name for p in (d / "replays").iterdir() if (p / "done.json").exists())
     devices = {lab: json.loads((d / "replays" / lab / "done.json").read_text()) for lab in labels}
-    rows = []
-    for u in range(meta["units"]):
-        for seg in range(meta["segments"]):
-            before = load(d / "inputs" / f"u{u:03d}-s{seg}.npy")
-            honest = {lab: load(d / "replays" / lab / "honest" / f"u{u:03d}-s{seg}.npy") for lab in labels}
-            for claimant in labels:
-                for mode in MODES:
-                    claim = honest[claimant] if mode == "honest" else load(
-                        d / "replays" / claimant / mode / f"u{u:03d}-s{seg}.npy")
-                    for checker in labels:
-                        for r in segment_margins(job, before, claim, honest[checker]):
-                            rows.append({"unit": u, "segment": seg, "claimant": claimant, "mode": mode,
-                                         "checker": checker, **r})
+    tasks = [(str(d), meta, labels, u, seg) for u in range(meta["units"]) for seg in range(meta["segments"])]
+    rows, t0 = [], time.perf_counter()
+    with ProcessPoolExecutor(max_workers=a.jobs or max(1, min(10, (os.cpu_count() or 2) - 1))) as pool:
+        for k, part in enumerate(pool.map(compare_segment, tasks), 1):
+            rows.extend(part)
+            if k % 16 == 0 or k == len(tasks):
+                print(f"compared {k}/{len(tasks)} segments, {time.perf_counter() - t0:.0f} s", flush=True)
     with open(d / "compare.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
@@ -202,30 +278,56 @@ def cmd_compare(a) -> None:
     summarize(rows, labels, devices, meta)
 
 
+def _spread(shares) -> str:
+    s = np.array(shares)
+    return f"{s.min():.3g} {np.median(s):.3g} {np.quantile(s, 0.9):.3g} {s.max():.3g}"
+
+
 def summarize(rows, labels, devices, meta) -> None:
-    """One line per (claim, checker, part): how many segments, how many the real check passed, and the share of the
-    limit at the median, 90th percentile and maximum; then the gap between the worst honest and the best TF32."""
-    print(f"=== SUMMARY: {meta['units']} units x {meta['segments']} segments, {meta['base']}, "
-          f"{meta['steps_per_segment']} steps a segment ===")
+    """The verdicts of the real check per mode, then each part's share of its limit (1.0 is at the limit): honest
+    claims between different devices, by pair and by whether the segment started from zero moments, then each cheat.
+    compare.csv keeps every row."""
+    c, b = meta["steps_per_segment"], meta["batch_size"]
+    print(f"=== SUMMARY: {meta['units']} units x {meta['segments']} segments, {meta['base']}, {c} steps a segment, "
+          f"{b} sequences a step ===")
     for lab in labels:
         print(f"device {lab}: {json.dumps(devices[lab])}")
-    print("claim_by mode checker part n passed median p90 max")
-    groups: dict = {}
+    checks: dict = {}  # one verdict per (claim, checker): every part's row carries it
     for r in rows:
-        groups.setdefault((r["claimant"], r["mode"], r["checker"], r["part"]), []).append(r)
-    for (cl, mode, ch, part), rs in sorted(groups.items()):
-        s = np.array([r["allowed_share"] for r in rs])
-        passed = sum(r["check_passes"] for r in rs)
-        print(f"{cl} {mode} {ch} {part} {len(rs)} {passed} {np.median(s):.3g} {np.quantile(s, 0.9):.3g} "
-              f"{s.max():.3g}")
-    print("=== SEPARATION: per part, worst honest cross-device share vs best TF32 share ===")
-    for part in ("B", "m", "v"):
-        honest = [r["allowed_share"] for r in rows if r["part"] == part and r["mode"] == "honest"
-                  and r["claimant"] != r["checker"]]
-        cheat = [r["allowed_share"] for r in rows if r["part"] == part and r["mode"] == "tf32"]
-        if honest and cheat:
-            print(f"{part}: honest cross-device max {max(honest):.3g}, TF32 min {min(cheat):.3g}, "
-                  f"ratio {min(cheat) / max(max(honest), 1e-12):.3g}")
+        checks[(r["unit"], r["segment"], r["claimant"], r["mode"], r["checker"])] = (r["check_passes"],
+                                                                                    r["fresh_moments"])
+    print("=== VERDICTS: mode, share of the segment skipped, checks, passed ===")
+    cross = {k: v for k, v in checks.items() if k[3] == "honest" and k[2] != k[4]}
+    same = [v[0] for k, v in checks.items() if k[3] == "honest" and k[2] == k[4]]
+    print(f"honest same-device 0 {len(same)} {sum(same)}")
+    for name, fresh in (("zero-moments", True), ("built-up-moments", False)):
+        some = [v[0] for v in cross.values() if v[1] == fresh]
+        print(f"honest cross-device {name} 0 {len(some)} {sum(some)}")
+    for mode in WHOLE[1:] + STEPPED:
+        some = [v[0] for k, v in checks.items() if k[3] == mode]
+        if some:
+            print(f"{mode} {skipped(mode, c, b):.3g} {len(some)} {sum(some)}")
+    print("=== HONEST, by pair: claimant checker moments checks passed, then max share of B m v ===")
+    for cl in labels:
+        for ch in labels:
+            for name, fresh in (("zero", True), ("built-up", False)):
+                if cl >= ch:
+                    continue
+                some = [r for r in rows if r["mode"] == "honest" and r["claimant"] == cl and r["checker"] == ch
+                        and r["fresh_moments"] == fresh]
+                verdicts = [r["check_passes"] for r in some if r["part"] == "B"]
+                top = " ".join(f"{max(r['allowed_share'] for r in some if r['part'] == p):.3g}" for p in "Bmv")
+                print(f"{cl} {ch} {name} {len(verdicts)} {sum(verdicts)} {top}")
+    print("=== SHARES: mode moments part, then min median p90 max share of the limit ===")
+    for mode in WHOLE + STEPPED:
+        for name, fresh in (("zero", True), ("built-up", False)):
+            for part in "Bmv":
+                some = [r["allowed_share"] for r in rows if r["mode"] == mode and r["part"] == part
+                        and r["fresh_moments"] == fresh and (mode != "honest" or r["claimant"] != r["checker"])]
+                if some:
+                    print(f"{mode} {name} {part} {_spread(some)}")
+    off = sum(not r["agrees_with_rule"] for r in rows)
+    print(f"rows where this script's shares disagree with the real check: {off} of {len(rows)}")
     print("=== END SUMMARY ===")
 
 
@@ -243,10 +345,14 @@ def main() -> None:
     p = sub.add_parser("replay")
     p.add_argument("--dir", required=True)
     p.add_argument("--label", required=True)
+    p.add_argument("--modes", default="honest,tf32", help="comma-separated, honest first: " + ", ".join(WHOLE + STEPPED))
+    p.add_argument("--cheat-units", type=int, default=0, help="run the modes other than honest on the first N units "
+                                                              "only (default: all)")
     p.add_argument("--device", default="auto")
     p.set_defaults(fn=cmd_replay)
     p = sub.add_parser("compare")
     p.add_argument("--dir", required=True)
+    p.add_argument("--jobs", type=int, default=0, help="processes (default: the cores but one, at most 10)")
     p.set_defaults(fn=cmd_compare)
     a = ap.parse_args()
     a.fn(a)

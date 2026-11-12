@@ -167,7 +167,8 @@ worker)
 xgpu)
     # The cross-GPU drift experiment (scripts/xgpu_drift.py), no network: every pod mounts the same global volume at
     # /shared. `xgpu make LABEL N` on one pod prepares the data, makes the inputs, replays, then compares once N
-    # devices have replayed; `xgpu replay LABEL` on every other pod waits for the inputs and replays.
+    # devices have replayed; `xgpu replay LABEL` on every other pod waits for the inputs and replays. A label names a
+    # device and its software, so the same GPU on another PyTorch image is another label.
     ROLE=${2:?make or replay}; LABEL=${3:?a label for this GPU}; D=/shared/xg
     install
     cd /workspace/vibehash
@@ -178,12 +179,35 @@ xgpu)
         echo "$DATA_SHA  $D/gsm8k-train.jsonl" | sha256sum -c -
         python -u $X make --data "$D/gsm8k-train.jsonl" --base qwen3-0.6b --units "${XG_UNITS:-16}" --dir "$D"
     fi
-    python -u $X replay --dir "$D" --label "$LABEL"
+    # XG_MODES: what this pod's worker does with each segment (xgpu_drift.py lists them), honest first. The cheats run
+    # on the first XG_CHEAT_UNITS units only.
+    python -u $X replay --dir "$D" --label "$LABEL" --modes "${XG_MODES:-honest,tf32}" \
+        --cheat-units "${XG_CHEAT_UNITS:-0}"
+    if [ -n "${XG_SHOTS:-}" ]; then
+        # XG_SHOTS="0 1 4": the base model's GSM8K score shown that many worked examples first (gsm8k_job.py --shots),
+        # which tells what the training format costs apart from what an adapter learned.
+        BASE_REV=$(python -c "import json, re; \
+print(re.search(r'@([0-9a-f]{40})', json.dumps(json.load(open('$D/meta.json'))['spec'])).group(1))")
+        for n in $XG_SHOTS; do
+            echo "=== SCORE base, $n worked examples ==="
+            python scripts/gsm8k_job.py score --base Qwen/Qwen3-0.6B --base-revision "$BASE_REV" \
+                --revision "$DATA_REV" --batch 32 --shots "$n" | grep -v "right so far"
+        done
+    fi
     if [ "$ROLE" = make ]; then
         until [ "$(ls "$D"/replays/*/done.json 2>/dev/null | wc -l)" -ge "${4:?how many devices replay}" ]; do
             sleep 20
         done
-        python -u $X compare --dir "$D"
+        python -u $X compare --dir "$D" | tee /workspace/summary.txt
+        # RunPod's tools can't copy files off a pod, so the results are served on port 8000 (give the pod the port
+        # 8000/http, and fetch https://<pod ID>-8000.proxy.runpod.net/compare.csv). Every row, so nothing rests on
+        # the log alone.
+        O=/workspace/xg-out
+        mkdir -p "$O"
+        cp "$D/compare.csv" "$D/meta.json" /workspace/summary.txt "$O/"
+        for f in "$D"/replays/*/done.json; do cp "$f" "$O/done-$(basename "$(dirname "$f")").json"; done
+        echo "=== XGPU make DONE: results on port 8000 ==="
+        cd "$O" && exec python -m http.server 8000
     fi
     echo "=== XGPU $ROLE DONE ==="
     ;;
