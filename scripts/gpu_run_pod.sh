@@ -16,7 +16,7 @@ set -euo pipefail
 
 BRANCH=gpu-run
 DATA_REV=740312add88f781978c0658806c59bc2815b9866
-DATA_SHA=76ea6dde2bdd0d82e9642fdd3253bb8d440b8c77c3bff50d601ff769a432666b
+DATA_SHA=99911ce45fe50b8e1e70b4288e425591dc9f483e6c94403169f4f23c7405efc7
 LOCAL=http://127.0.0.1:8545  # GSM8K_BUDGET (VIBE, 10 a round) sets the job size; default 200
 export VIBEHASH_HOME=/workspace/.vibehash
 : "${VIBEHASH_PASSWORD:?set VIBEHASH_PASSWORD first: export VIBEHASH_PASSWORD='a password for this run only'}"

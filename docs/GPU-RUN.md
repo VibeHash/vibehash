@@ -49,7 +49,7 @@ second terminal:
 
 ```bash
 python scripts/gsm8k_job.py prepare --revision 740312add88f781978c0658806c59bc2815b9866 --out gsm8k-train.jsonl
-# must print sha256 76ea6dde2bdd0d82e9642fdd3253bb8d440b8c77c3bff50d601ff769a432666b
+# must print sha256 99911ce45fe50b8e1e70b4288e425591dc9f483e6c94403169f4f23c7405efc7
 vibehash train gsm8k-train.jsonl --base qwen3-0.6b --node http://127.0.0.1:8545 \
   --wallet $VIBEHASH_HOME/testnet/requester.json --budget 200 --id gsm8k --yes --plain
 ```
