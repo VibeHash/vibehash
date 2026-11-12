@@ -69,8 +69,9 @@ EOF
 case "${1:-}" in
 node)
     install
+    # Its log also goes to the pod's own log, where RunPod's tools can read it.
     nohup vibehash testnet --host 0.0.0.0 --workers 1 --device cuda --job none --keep-rounds 1000 --plain \
-        > "$LOGS/testnet.log" 2>&1 &
+        2>&1 | tee "$LOGS/testnet.log" &
     until grep -q "node up" "$LOGS/testnet.log" 2>/dev/null; do sleep 2; done
     T=$VIBEHASH_HOME/testnet
     python scripts/gsm8k_job.py prepare --revision "$DATA_REV" --out /workspace/gsm8k-train.jsonl
@@ -78,7 +79,7 @@ node)
     vibehash train /workspace/gsm8k-train.jsonl --base qwen3-0.6b --node "$LOCAL" --wallet "$T/requester.json" \
         --budget "${GSM8K_BUDGET:-200}" --id gsm8k --yes --plain < /dev/null | tee "$LOGS/job.txt"
     # Every worker that registers without stake money is sent some (its own pod stakes it), this pod's own included.
-    nohup python scripts/gpu_run_faucet.py "$LOCAL" "$T/requester.json" > "$LOGS/faucet.log" 2>&1 &
+    nohup python -u scripts/gpu_run_faucet.py "$LOCAL" "$T/requester.json" 2>&1 | tee "$LOGS/faucet.log" &
     stake_from "$LOCAL" "$T/worker-1.json"
     echo "Node pod ready: its worker is staked, and the faucet funds each worker that joins (log: $LOGS/faucet.log)."
     echo "Other pods join with:  bash gpu_run_pod.sh worker https://<this pod's ID>-8545.proxy.runpod.net"
