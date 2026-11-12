@@ -52,9 +52,11 @@ def pick_device(asked: str) -> str:
 
 
 def build(a):
-    """The job as `vibehash train` would plan it: spec, tokenized data, learning rate, batch and segment length."""
-    from vibehash import finetune
+    """The job as `vibehash train` would plan it: spec, tokenized data, learning rate, batch and segment length. A
+    catalog short name becomes its repository here, as `vibehash train` does, so meta.json records the repository."""
+    from vibehash import catalog, finetune
 
+    a.base = catalog.resolve(a.base)[0]
     p = finetune.plan(a.data, a.base, ask=lambda *_: True, max_len=a.max_len)
     return p.job, p.prepared.data
 
