@@ -19,6 +19,7 @@ DATA_REV=740312add88f781978c0658806c59bc2815b9866
 DATA_SHA=99911ce45fe50b8e1e70b4288e425591dc9f483e6c94403169f4f23c7405efc7
 LOCAL=http://127.0.0.1:8545  # GSM8K_BUDGET (VIBE, 10 a round) sets the job size; default 200
 export VIBEHASH_HOME=/workspace/.vibehash
+export PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring  # see install()
 : "${VIBEHASH_PASSWORD:?set VIBEHASH_PASSWORD first: export VIBEHASH_PASSWORD='a password for this run only'}"
 LOGS=/workspace/run-logs
 mkdir -p "$LOGS"
@@ -33,7 +34,9 @@ install() {
     cd /workspace/vibehash
     # Ubuntu's own cryptography has no pip record, so pip can't replace it; install the newer one beside it first.
     pip install -q --ignore-installed cryptography
-    pip install -q -e ".[finetune,evo]" peft
+    # A credential store: sending or staking first checks the wallet's opt-in authenticator gate there, and refuses
+    # when no store can be read. A pod has no desktop keychain, so keyrings.alt's file store stands in (test coins).
+    pip install -q -e ".[finetune,evo]" peft keyring keyrings.alt
     {
         echo "commit $(git rev-parse HEAD)"
         python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
