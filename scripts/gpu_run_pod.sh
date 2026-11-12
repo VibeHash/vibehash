@@ -4,7 +4,11 @@
 #   bash gpu_run_pod.sh node                   the node pod: the private network, its own worker, the GSM8K job
 #   bash gpu_run_pod.sh worker https://ID-8545.proxy.runpod.net
 #                                              every other pod: join, wait for stake money, stake, mine
-#   bash gpu_run_pod.sh fund ADDRESS...        on the node pod: send each worker the 20 VIBE it stakes from
+#   bash gpu_run_pod.sh fund ADDRESS...        on the node pod, by hand: what its faucet does for each worker
+#
+# A pod can run it at boot, as its start command, and keep RunPod's own services (SSH, the web terminal):
+#   bash -c 'curl -fsSLO https://raw.githubusercontent.com/VibeHash/vibehash/gpu-run/scripts/gpu_run_pod.sh &&
+#            (bash gpu_run_pod.sh node &) ; exec /start.sh'
 #
 # Set VIBEHASH_PASSWORD first (a password for this run only: it locks the pod's wallet). Logs go to
 # /workspace/run-logs, which outlives a stopped pod.
@@ -69,14 +73,11 @@ node)
     echo "$DATA_SHA  /workspace/gsm8k-train.jsonl" | sha256sum -c -
     vibehash train /workspace/gsm8k-train.jsonl --base qwen3-0.6b --node "$LOCAL" --wallet "$T/requester.json" \
         --budget 200 --id gsm8k --yes --plain < /dev/null | tee "$LOGS/job.txt"
-    OWN=$(python -c "import json; print(json.load(open('$T/worker-1.json'))['address'])")
-    next_block "$LOCAL"
-    vibehash send --node "$LOCAL" --wallet "$T/requester.json" --to "$OWN" --amount 20 < /dev/null
+    # Every worker that registers without stake money is sent some (its own pod stakes it), this pod's own included.
+    nohup python scripts/gpu_run_faucet.py "$LOCAL" "$T/requester.json" > "$LOGS/faucet.log" 2>&1 &
     stake_from "$LOCAL" "$T/worker-1.json"
-    echo
-    echo "Node pod ready. Its own worker: $OWN"
-    echo "Now run on each other pod:  bash gpu_run_pod.sh worker https://<this pod's ID>-8545.proxy.runpod.net"
-    echo "then here:                  bash gpu_run_pod.sh fund <their addresses>"
+    echo "Node pod ready: its worker is staked, and the faucet funds each worker that joins (log: $LOGS/faucet.log)."
+    echo "Other pods join with:  bash gpu_run_pod.sh worker https://<this pod's ID>-8545.proxy.runpod.net"
     ;;
 worker)
     NODE=${2:?give the node pod address: https://ID-8545.proxy.runpod.net}
@@ -101,7 +102,7 @@ fund)
     done
     ;;
 *)
-    sed -n '2,9p' "$0"
+    sed -n '2,13p' "$0"
     exit 2
     ;;
 esac

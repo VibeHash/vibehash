@@ -74,8 +74,10 @@ Each prints its address when its wallet is made. Collect them, with the node pod
 ## 3b. Stake every worker
 
 A fine-tune trains nothing until at least two staked workers have registered (`FINETUNE_QUORUM`): its work has to be
-checked by workers. A test network's workers start with no stake, so give each some of the requester's coins. On the
-node pod, one block apart (a second transfer sent before the first lands is refused for its nonce):
+checked by workers. A test network's workers start with no stake, so give each some of the requester's coins.
+`scripts/gpu_run_pod.sh` does all of this by itself: the node pod runs `scripts/gpu_run_faucet.py`, which sends 20 VIBE
+to each worker that registers without stake, and each worker's pod stakes 10 once it arrives. By hand, on the node pod,
+one block apart (a second transfer sent before the first lands is refused for its nonce):
 
 ```bash
 vibehash send --node http://127.0.0.1:8545 --wallet $VIBEHASH_HOME/testnet/requester.json --to <worker address> --amount 20
