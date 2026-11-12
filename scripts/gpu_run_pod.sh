@@ -164,6 +164,29 @@ worker)
     margins "$NODE"
     echo "=== RUN COMPLETE ==="
     ;;
+xgpu)
+    # The cross-GPU drift experiment (scripts/xgpu_drift.py), no network: every pod mounts the same global volume at
+    # /shared. `xgpu make LABEL N` on one pod prepares the data, makes the inputs, replays, then compares once N
+    # devices have replayed; `xgpu replay LABEL` on every other pod waits for the inputs and replays.
+    ROLE=${2:?make or replay}; LABEL=${3:?a label for this GPU}; D=/shared/xg
+    install
+    cd /workspace/vibehash
+    X=scripts/xgpu_drift.py
+    if [ "$ROLE" = make ]; then
+        mkdir -p "$D"
+        python scripts/gsm8k_job.py prepare --revision "$DATA_REV" --out "$D/gsm8k-train.jsonl"
+        echo "$DATA_SHA  $D/gsm8k-train.jsonl" | sha256sum -c -
+        python -u $X make --data "$D/gsm8k-train.jsonl" --base qwen3-0.6b --units "${XG_UNITS:-16}" --dir "$D"
+    fi
+    python -u $X replay --dir "$D" --label "$LABEL"
+    if [ "$ROLE" = make ]; then
+        until [ "$(ls "$D"/replays/*/done.json 2>/dev/null | wc -l)" -ge "${4:?how many devices replay}" ]; do
+            sleep 20
+        done
+        python -u $X compare --dir "$D"
+    fi
+    echo "=== XGPU $ROLE DONE ==="
+    ;;
 fund)
     shift
     T=$VIBEHASH_HOME/testnet
