@@ -349,6 +349,29 @@ class ApiTests(Home):
                 self.assertFalse(self.api.set_option("idle_minutes", bad)["ok"], bad)
             self.assertEqual(self.api.settings()["idle_minutes"], 10)
 
+    def test_operator_view_is_a_window_setting(self):
+        """Settings' Operator view: D's panes in place of the cart ride, kept like Reduce motion."""
+        self.assertFalse(self.api.settings()["operator_view"])
+        self.assertEqual(self.api.set_option("operator_view", True), {"ok": True, "operator_view": True})
+        self.assertTrue(self.api.settings()["operator_view"])
+        self.assertFalse(self.api.set_option("operator_view", "yes")["ok"])
+
+    def test_pick_your_vibe_is_saved_for_the_worker(self):
+        """A list of job ids, or None for every open job; anything else is refused and leaves the saved choice alone."""
+        s = self.api.settings()
+        self.assertEqual((s["jobs"], s["jobs_ask"], s["jobs_picked"]), (None, False, False))
+        self.assertEqual(self.api.set_jobs(["pick-b", "pick-a", "pick-b"], True), {"ok": True, "jobs": ["pick-a", "pick-b"]})
+        s = self.api.settings()
+        self.assertEqual((s["jobs"], s["jobs_ask"], s["jobs_picked"]), (["pick-a", "pick-b"], True, True))
+        self.assertEqual(settings.saved_jobs(), ["pick-a", "pick-b"])  # what `worker --job saved` reads
+        for bad in ([], "pick-a", ["Bad Id"], ["../up"], [3], [f"j{i}" for i in range(settings.MAX_SAVED_JOBS + 1)]):
+            self.assertFalse(self.api.set_jobs(bad)["ok"], bad)
+        self.assertFalse(self.api.set_jobs(["pick-a"], "yes")["ok"])
+        self.assertEqual(settings.saved_jobs(), ["pick-a", "pick-b"])
+        self.assertEqual(self.api.set_jobs(None), {"ok": True, "jobs": None})
+        s = self.api.settings()
+        self.assertEqual((s["jobs"], s["jobs_ask"]), (None, True))  # ask is kept when not given (the ride's Change)
+
     def test_the_docs_are_a_named_link(self):
         self.assertEqual(window.LINKS["docs"], "https://docs.vibehash.org")
         page = window.DASHBOARD.read_text(encoding="utf-8")
@@ -488,6 +511,18 @@ class PageTests(unittest.TestCase):
         self.assertIn("!welcomeOffered", self.script)  # a settings reload mid-tour doesn't restart it
         # words not yet written down are offered on every start until the tick, even after the tour was done or skipped
         self.assertIn("(!c.welcomed || c.words_pending) && !welcomeOffered", self.script)
+
+    def test_pick_your_vibe_saves_through_the_app_and_follows_the_tour(self):
+        self.assertIn('id="vibe"', self.page)
+        self.assertIn("api.set_jobs(jobs, ", self.script)
+        self.assertIn('$("vibe-change").addEventListener("click", function () { openVibe("change"); });', self.script)
+        self.assertIn("(!c.jobs_picked || c.jobs_ask)", self.script)  # offered until chosen, or on each start if asked
+        self.assertIn("api.welcomed().then(loadSettings)", self.script)  # so it follows the tour
+
+    def test_operator_view_takes_the_place_of_the_ride(self):
+        self.assertIn('option("operator_view", $("set-operator").checked)', self.script)
+        self.assertIn("body.operator .ride, body.operator .glance", self.page)
+        self.assertIn("body.riding:not(.calm):not(.operator) .below { display: none; }", self.page)  # its panes stay
 
     def test_the_old_launcher_banner_is_one_time_and_dismissible(self):
         self.assertIn('id="launcher-banner"', self.page)

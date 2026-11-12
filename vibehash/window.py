@@ -15,7 +15,8 @@ port of its own), told where the worker's feed is (window.FEED), so it is up bef
 run's setup it shows the progress, the new wallet and its recovery words, and a tour. What the page may ask of the
 app goes through `Api` (pywebview's js_api, reachable from this window only, never from a browser): the app's state
 (~/.vibehash/app/state.json), orders (pause, resume, stop, the avatar on or off, as `vibehash app ...` would give
-them), the wallet's address and words file, and settings (the avatar, start at login, whether the welcome was seen).
+them), the wallet's address and words file, and settings (the avatar, start at login, whether the welcome was seen,
+which jobs to mine).
 
 Closing the window doesn't stop mining: the Stop button, the avatar's menu or `vibehash app stop` does. It is its own
 process (`command`), so a window that is closed, or a web view that fails, never touches the worker. One window per
@@ -53,7 +54,7 @@ OPEN = webbrowser.open  # how a link leaves the app (tests replace it)
 PYPI = "https://pypi.org/pypi/vibehash/json"
 UPDATE_EVERY_S = 6 * 3600.0
 # Switches the Settings tab may set in config.json (and idle_minutes, one of presence.IDLE_CHOICES).
-OPTIONS = presence.OPTIONS + ("reduced_motion",)
+OPTIONS = presence.OPTIONS + ("reduced_motion", "operator_view")  # the last two are the window's own: the ride or not
 CAP_GB = (5, 2000)  # the model store's cap, as Settings' slider allows it
 # Keys whose values a diagnostic report never carries, at any depth (redact).
 SECRET = re.compile(r"word|mnemonic|seed|private|secret|password|passphrase|token|mfa", re.I)
@@ -188,7 +189,9 @@ class Api:
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
                 "deepseek": settings.deepseek_choice(cfg), "deepseek_pilot": settings.deepseek_pilot(),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
-                "words_file": _words_file_present(), "words_pending": _words_pending(), **_launcher()}
+                "words_file": _words_file_present(), "words_pending": _words_pending(), **_launcher(),
+                "jobs": settings.saved_jobs(cfg), "jobs_ask": bool(cfg.get("jobs_ask", False)),
+                "jobs_picked": bool(cfg.get("jobs_picked", False))}
 
     def set_option(self, name: str, value) -> dict:
         """One of Settings' switches (OPTIONS: the automatic pauses, reduced motion), or idle_minutes. The running app
@@ -213,6 +216,20 @@ class Api:
         if app_module.running():
             app_module.order("restart")
         return {"ok": True, "deepseek": "yes" if on else "no"}
+
+    def set_jobs(self, jobs, ask=None) -> dict:
+        """Pick your vibe: the jobs the app's worker mines, a list of job ids, or None for every open job, new ones
+        included. Saved for the worker, which looks every few seconds and takes a new choice up at its next round
+        (`worker --job saved`): no restart, so the units of the round in hand still count. `ask`: offer the picker
+        each time the window opens."""
+        if jobs is not None and (not isinstance(jobs, list) or not jobs or len(jobs) > settings.MAX_SAVED_JOBS
+                                 or not all(isinstance(j, str) and settings.JOB_ID.fullmatch(j) for j in jobs)):
+            return {"ok": False, "why": "jobs is a list of job ids, or null for every open job"}
+        if ask is not None and not isinstance(ask, bool):
+            return {"ok": False, "why": "ask is true or false"}
+        chosen = None if jobs is None else sorted(set(jobs))
+        settings.save(jobs=chosen, jobs_picked=True, **({} if ask is None else {"jobs_ask": ask}))
+        return {"ok": True, "jobs": chosen}
 
     def set_avatar(self, on: bool) -> dict:
         """The floating avatar: kept in settings for the next start, and told to the running app now."""
