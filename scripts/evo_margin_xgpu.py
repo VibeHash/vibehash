@@ -65,6 +65,7 @@ def _npu_facts(a, eng=None) -> dict:
     if eng is not None:
         out["precision"] = eng.precision
         out["rows"] = eng.n
+        out["state"] = "host f32" if eng.host_state else "device"
         out["capability"] = f"{dev.lower()} {eng.precision}"
     try:
         from vibehash import __version__
@@ -79,7 +80,7 @@ def _npu_engine(a, rt, spec, rows):
     L = es_npu.cache_slots(rows, spec.max_tokens)
     cache = Path.home() / ".vibehash" / "cache" / "openvino"
     return es_npu.Engine(rt, rt.linears, spec.pairs * spec.rank, L, n=a.npu_rows, device=a.npu_device,
-                         precision=a.npu_precision, cache_dir=cache)
+                         precision=a.npu_precision, cache_dir=cache, host_state=not a.npu_device_state)
 
 
 def _gpu_facts(device: str) -> dict:
@@ -327,6 +328,9 @@ def main(argv=None) -> None:
         sp.add_argument("--npu-device", default="NPU", help="with --device npu: the OpenVINO device (NPU, GPU, CPU)")
         sp.add_argument("--npu-precision", default=None, help="with --device npu: an inference precision (f16, f32)")
         sp.add_argument("--npu-rows", type=int, default=16, help="with --device npu: rows a compiled step decodes")
+        sp.add_argument("--npu-device-state", action="store_true",
+                        help="with --device npu: update Gated DeltaNet's state on the device, in its precision "
+                             "(the default updates it on the host in float32)")
     ck.add_argument("--out", required=True, help="the result to write (.json)")
     rp = sub.add_parser("report", help="one table from several result files")
     rp.add_argument("results", nargs="+")

@@ -89,3 +89,67 @@ needs float32, so an NPU is unlikely to land inside a bf16 checker's margin as i
 3. If its worst gap is under half the cross margin, an `npu` setup (`hardware.BACKENDS` has it) that answers but
    doesn't check, until the census backs it.
 4. If not, the integer rule (H) is where NPUs fit: int8 with int32 sums is what they're built for, and exact.
+
+### Step 2, first measurement (2026-11-08, Intel AI Boost)
+
+`vibehash/es_npu.py` is the answering path: es_hybrid's decode step as one pure function (every state and every
+twisted linear's factors are inputs), compiled by OpenVINO 2026.4 for the NPU with fixed shapes (16 rows a step; about
+9 minutes the first time, seconds from the compile cache). The shared prompt reading stays on the CPU in float32.
+`scripts/evo_margin_xgpu.py answer --device npu` and `check --device npu` use it. On OpenVINO's CPU in float32 it gives
+es_hybrid's answers and gaps exactly (tests/test_es_npu.py).
+
+The NPU has fp16 and int8 only. As written, its honest answers were rejected outright: a float32 checker found them
+up to 6.0 below its greedy choice, as far as a cheat. The cause was one place. Some Gated DeltaNet heads read out
+values around 1e-5, which are fp16 subnormals. The NPU holds those to a few bits, and the gated RMSNorm after them
+scales the error up to full size: the layer's output came out 3e-2 off float32, 20 times an Intel GPU's fp16. The fix
+computes the read-out `QSCALE * sqrt(Dk)` times larger and takes the factor back out of the norm's epsilon, which
+the norm otherwise ignores. The l2 norms and the gated norm are also written so that nothing squared leaves fp16's
+range. Nothing else needed a change.
+
+Qwen3.5-0.8B, the `vibe` mix, 2 pairs (4 members) x 8 problems, up to 128 tokens, one round, checked by the CPU in
+float32 (the arithmetic of Intel, Apple and CPU checkers):
+
+| | worst honest gap | false rejections at 0.1 / 0.375 / 0.5 / 0.75 / 1 | smallest cheat gap | false acceptances |
+|---|---|---|---|---|
+| before the fix | 6.01 | 4 / 4 / 4 / 4 / 4 | 4.30 | 0 |
+| after | 0.065 | 0 / 0 / 0 / 0 / 0 | 3.96 | 0 |
+
+One step's log-probabilities are now 0.047 off float32 (OpenVINO's Intel GPU in fp16: 0.069). The NPU also agrees
+with itself: its own answers teacher-forced on it have gaps of exactly 0. So step 3's condition (worst gap under half
+the cross margin) holds on this sample. The sample is small, though: a larger round, a CUDA bf16 checker (copy the
+answers dump to a CUDA machine and run `check`), and the NPU as checker of others' work are still to measure.
+
+A larger round turned it around. Same setup, 4 pairs (8 members) x 16 problems, up to 256 tokens:
+
+| | worst honest gap | p99 (answer) | false rejections at 0.1 / 0.375 / 0.5 / 0.75 / 1 | smallest cheat gap | false acceptances |
+|---|---|---|---|---|---|
+| 8 x 16, 256 tokens | 0.522 | 0.313 | 4 / 1 / 1 / 0 / 0 | 4.26 | 0 |
+
+The gaps sit in the long answers. Two problems ran to the 256-token cap for every member, and they hold every gap over
+0.05 (0.52, 0.34, 0.23, 0.14, 0.14). Of the other 14 problems (2 to 19 tokens), all but one answer have gaps of 0,
+and that one has 0.10. The error grows with the answer's length, which points at
+the recurrent state: 18 DeltaNet layers carry it from token to token, and on the NPU it is updated in fp16. That
+is a guess, not yet tested. So step 3's condition fails: an honest NPU worker would be rejected at the template's
+`cross_margin` 0.5. The next things to try are keeping the state update in float32 on the host (the NPU computes
+the step's inputs to it), or splitting the step so the state's part runs on the CPU, then measuring 256-token
+answers again.
+
+The NPU updated each DeltaNet layer's recurrent state itself and rounded it back to fp16 every token, so a 256-token
+answer carried 256 roundings. The conv window and attention cache are only copied, so they don't add up. Now the step
+outputs the update (k, delta, the decay d) and the host applies `S = S * d + k^T delta` in float32 (`es_npu`'s
+default; `--npu-device-state` keeps the old path). The same round again:
+
+| | worst honest gap | p99 (answer) | false rejections at 0.1 / 0.375 / 0.5 / 0.75 / 1 | smallest cheat gap | false acceptances |
+|---|---|---|---|---|---|
+| state in fp16 on the NPU | 0.522 | 0.313 | 4 / 1 / 1 / 0 / 0 | 4.26 | 0 |
+| state in float32 on the host | 0.193 | 0.093 | 1 / 0 / 0 / 0 / 0 | 4.07 | 0 |
+
+The worst gap is under half the cross margin (0.25), so step 3's condition holds again on this round. It still sits
+mostly in the 256-token answers (0.19, 0.07, 0.06), but much lower. The round answered faster, too: 236 s, against
+390 s with the state on the NPU, since the step hands back a small update instead of every layer's whole state.
+
+A second round, seed 9b1c2e7d40a3f615 (same sizes, 12 answers at the 256-token cap), with the state on the host: worst
+honest gap 0.153, p99 (answer) 0.116, false rejections 2 / 0 / 0 / 0 / 0, smallest cheat gap 4.51, no false
+acceptances. Over the two rounds (256 honest answers), the worst is 0.193. Still to measure: a CUDA bf16 checker
+(copy `answers-*.json.gz` to a CUDA machine and run `check`), the NPU as checker of others' work, and more rounds
+before an `npu` setup goes in `hardware.BACKENDS` as answer-only.
