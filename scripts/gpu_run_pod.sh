@@ -17,7 +17,7 @@ set -euo pipefail
 BRANCH=gpu-run
 DATA_REV=740312add88f781978c0658806c59bc2815b9866
 DATA_SHA=76ea6dde2bdd0d82e9642fdd3253bb8d440b8c77c3bff50d601ff769a432666b
-LOCAL=http://127.0.0.1:8545
+LOCAL=http://127.0.0.1:8545  # GSM8K_BUDGET (VIBE, 10 a round) sets the job size; default 200
 export VIBEHASH_HOME=/workspace/.vibehash
 : "${VIBEHASH_PASSWORD:?set VIBEHASH_PASSWORD first: export VIBEHASH_PASSWORD='a password for this run only'}"
 LOGS=/workspace/run-logs
@@ -72,7 +72,7 @@ node)
     python scripts/gsm8k_job.py prepare --revision "$DATA_REV" --out /workspace/gsm8k-train.jsonl
     echo "$DATA_SHA  /workspace/gsm8k-train.jsonl" | sha256sum -c -
     vibehash train /workspace/gsm8k-train.jsonl --base qwen3-0.6b --node "$LOCAL" --wallet "$T/requester.json" \
-        --budget 200 --id gsm8k --yes --plain < /dev/null | tee "$LOGS/job.txt"
+        --budget "${GSM8K_BUDGET:-200}" --id gsm8k --yes --plain < /dev/null | tee "$LOGS/job.txt"
     # Every worker that registers without stake money is sent some (its own pod stakes it), this pod's own included.
     nohup python scripts/gpu_run_faucet.py "$LOCAL" "$T/requester.json" > "$LOGS/faucet.log" 2>&1 &
     stake_from "$LOCAL" "$T/worker-1.json"
