@@ -14,7 +14,8 @@ from vibehash.replay import replay_block
 from vibehash.model import ModelSpec, params_hash, relative_distance
 from tests.protocol import Protocol
 from vibehash.tasks import SYN_PER_VIBE, TrainingJob, Verdict, WorkUnit
-from vibehash.verification import check_openings, check_sanity, detection_probability, replay_openings, required_openings
+from vibehash.verification import (challenge_segments, check_openings, check_sanity, detection_probability,
+                                   replay_openings, required_openings)
 from vibehash.worker import GTX_1060, LOW_END_LAPTOP, NETBOOK, OFFICE_DESKTOP, RTX_3060, HardwareProfile, Worker
 
 RELIABLE = lambda hw: HardwareProfile(hw.name, hw.flops_per_sec, hw.memory_mb, reliability=1.0)
@@ -240,6 +241,22 @@ class VerificationTests(unittest.TestCase):
     def test_detection_probability(self):
         self.assertAlmostEqual(detection_probability(0.5, 3), 0.875)
         self.assertEqual(detection_probability(1.0, 1), 1.0)
+
+    def test_exact_detection_matches_the_challenge_draw(self):
+        """With the unit's segment count, the chance is exact for challenge_segments' draws without replacement:
+        the whitepaper's §13 values, never below the share faked, never below the with-replacement bound."""
+        self.assertAlmostEqual(detection_probability(1 / 8, 3, 8), 0.375)
+        self.assertAlmostEqual(detection_probability(0.5, 3, 8), 0.9286, places=4)
+        self.assertEqual(detection_probability(0.25, 3, 4), 0.75)
+        for k in (4, 8, 16, 128):
+            for m in range(1, k + 1):
+                exact = detection_probability(m / k, 3, k)
+                self.assertGreaterEqual(exact + 1e-12, m / k)
+                self.assertGreaterEqual(exact + 1e-12, detection_probability(m / k, 3))
+        # and it is what the draw actually does: over many beacons, how often 3 of 8 picks hit 4 faked segments
+        faked = {4, 5, 6, 7}
+        hits = sum(bool(faked & set(challenge_segments(i.to_bytes(4, "big"), "u", "w", 8, 3))) for i in range(4000))
+        self.assertAlmostEqual(hits / 4000, detection_probability(0.5, 3, 8), delta=0.02)
 
 
 # A lazy checker too slow to take a unit, so it only ever checks, and two honest workers. A lone worker would hold every

@@ -111,8 +111,9 @@ cell's inputs are what its neighbours really produced.
   edge instead.
 - **Same odds as today.** The beacon picks `q` segments per shard per unit.
   A worker faking a fraction `f` of its cells is caught with probability
-  `1 − (1 − f)^q ≥ f`, the same arithmetic as DESIGN §3–4, so the stake and
-  slashing economics carry over unchanged.
+  at least `f` (exactly `1 − C(k − m, q) / C(k, q)` for `m` of `k` cells),
+  the same arithmetic as DESIGN §3–4, so the stake and slashing economics
+  carry over unchanged.
 - **Floating-point noise doesn't add up across shards.** Every cell is
   replayed from the exact bits its neighbours sent, not from a recomputation
   of them. So the tolerance applies per cell, however many shards the model
