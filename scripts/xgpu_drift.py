@@ -46,6 +46,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+if sys.argv[1:2] == ["compare"]:
+    # compare runs a process a core. Left alone, each process's maths library starts a thread a core as well, and they
+    # fight: on a 12-core pod, 10 processes hadn't finished 16 segments in 20 minutes; with one thread each, 45 s.
+    # Set before numpy loads, which is when the library reads them.
+    for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(_var, "1")
+
 import numpy as np  # noqa: E402
 
 WHOLE = ("honest", "tf32")  # run as one call a segment; the others a step at a time (plan_steps)
