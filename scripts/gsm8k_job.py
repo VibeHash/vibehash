@@ -73,7 +73,8 @@ def prepare(a: argparse.Namespace) -> None:
         for row in rows:
             chat = {"messages": [{"role": "user", "content": row["question"].strip()},
                                  {"role": "assistant", "content": clean_answer(row["answer"])}]}
-            f.write(json.dumps(chat, ensure_ascii=False) + "\n")
+            # ASCII-escaped: a few problems hold U+2028, which Python's line splitting treats as a line break.
+            f.write(json.dumps(chat) + "\n")
     digest = hashlib.sha256(a.out.read_bytes()).hexdigest()
     print(f"wrote {len(rows):,} chats to {a.out}")
     print(f"  from {DATASET} ({CONFIG}) at revision {sha}")
