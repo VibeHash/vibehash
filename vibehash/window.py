@@ -54,7 +54,7 @@ OPEN = webbrowser.open  # how a link leaves the app (tests replace it)
 PYPI = "https://pypi.org/pypi/vibehash/json"
 UPDATE_EVERY_S = 6 * 3600.0
 # Switches the Settings tab may set in config.json (and idle_minutes, one of presence.IDLE_CHOICES).
-OPTIONS = presence.OPTIONS + ("reduced_motion", "operator_view")  # the last two are the window's own: the ride or not
+OPTIONS = presence.OPTIONS + ("reduced_motion", "operator_view")  # the last two are the window's own: less movement, and the panes in place of the ring
 CAP_GB = (5, 2000)  # the model store's cap, as Settings' slider allows it
 # Keys whose values a diagnostic report never carries, at any depth (redact).
 SECRET = re.compile(r"word|mnemonic|seed|private|secret|password|passphrase|token|mfa", re.I)

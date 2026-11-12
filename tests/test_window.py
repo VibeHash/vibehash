@@ -350,7 +350,7 @@ class ApiTests(Home):
             self.assertEqual(self.api.settings()["idle_minutes"], 10)
 
     def test_operator_view_is_a_window_setting(self):
-        """Settings' Operator view: D's panes in place of the cart ride, kept like Reduce motion."""
+        """Settings' Operator view: D's panes in place of the ring, kept like Reduce motion."""
         self.assertFalse(self.api.settings()["operator_view"])
         self.assertEqual(self.api.set_option("operator_view", True), {"ok": True, "operator_view": True})
         self.assertTrue(self.api.settings()["operator_view"])
@@ -370,7 +370,7 @@ class ApiTests(Home):
         self.assertEqual(settings.saved_jobs(), ["pick-a", "pick-b"])
         self.assertEqual(self.api.set_jobs(None), {"ok": True, "jobs": None})
         s = self.api.settings()
-        self.assertEqual((s["jobs"], s["jobs_ask"]), (None, True))  # ask is kept when not given (the ride's Change)
+        self.assertEqual((s["jobs"], s["jobs_ask"]), (None, True))  # ask is kept when not given (the Mining tab's Change)
 
     def test_the_docs_are_a_named_link(self):
         self.assertEqual(window.LINKS["docs"], "https://docs.vibehash.org")
@@ -519,10 +519,19 @@ class PageTests(unittest.TestCase):
         self.assertIn("(!c.jobs_picked || c.jobs_ask)", self.script)  # offered until chosen, or on each start if asked
         self.assertIn("api.welcomed().then(loadSettings)", self.script)  # so it follows the tour
 
-    def test_operator_view_takes_the_place_of_the_ride(self):
+    def test_operator_view_takes_the_place_of_the_ring(self):
         self.assertIn('option("operator_view", $("set-operator").checked)', self.script)
-        self.assertIn("body.operator .ride, body.operator .glance", self.page)
-        self.assertIn("body.riding:not(.calm):not(.operator) .below { display: none; }", self.page)  # its panes stay
+        self.assertIn("body.operator .glance, body.operator #tab-mining .head", self.page)
+        self.assertIn("body.riding:not(.operator) .below { display: none; }", self.page)  # its panes stay
+
+    def test_the_mining_tab_is_the_ring_filling_the_window(self):
+        """The ring is the Mining tab for everyone, with or without Reduce motion: full window, outside the panes that
+        full-window mode hides, with the jobs it mines and the way to change them."""
+        self.assertNotIn('id="mine"', self.page)
+        self.assertNotIn("prefers-reduced-motion: no-preference", self.page)  # nothing to switch between any more
+        glance = self.page.index('id="glance"')
+        self.assertLess(glance, self.page.index('<div class="below">'))
+        self.assertLess(glance, self.page.index('id="vibe-change"'))
 
     def test_the_old_launcher_banner_is_one_time_and_dismissible(self):
         self.assertIn('id="launcher-banner"', self.page)
