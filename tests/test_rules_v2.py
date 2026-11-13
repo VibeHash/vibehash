@@ -434,10 +434,11 @@ class ProposalVersionTests(unittest.TestCase):
         st = self.node.chain.state
         st.jobs[JOB.job_id] = json.dumps(json.loads(job_of().spec_json()) | {"id": JOB.job_id})
         st.job_owner[JOB.job_id] = REQ.address
-        for rules in ({}, {"finetune_check": 1}):
+        for rules in ({}, {"finetune_check": 1}, {"finetune_check": 2}):  # rule 2 failed GPU generations (issue 85)
             with self.assertLogs("vibehash.node", "WARNING") as logs:
                 self.assertFalse(self.node._validate(self.proposal(VERSION, summary(V), {"version": 4, "rules": rules})))
-            self.assertIn(f"compares its replicas by rule {FINETUNE_CHECK}, not 1", logs.output[0])
+            old = rules.get("finetune_check", 1)
+            self.assertIn(f"compares its replicas by rule {FINETUNE_CHECK}, not {old}", logs.output[0])
         with self.assertLogs("vibehash.node", "WARNING") as logs:  # past that: refused for what this record lacks
             self.assertFalse(self.node._validate(self.proposal(VERSION, summary(V), {"version": 4, "rules": {
                 "finetune_check": FINETUNE_CHECK}})))

@@ -758,7 +758,8 @@ class TrainingTests(unittest.TestCase):
         rule 2 (adam_reproduces, replicas_agree) passes them either way round, and still fails a freezer, another
         unit's training (a canary), a sign flipped across much of B, a step past Adam's reach, moments 1% off, and a
         flip from moments built up, where nothing honest flips. At 5e-4, the real job's learning rate (and the largest
-        finetune.settings_for gives): a flip's knock-on through the steps after it grows with the step it took."""
+        finetune.settings_for gives): a flip's knock-on through the steps after it grows with the step it took. Rule
+        3, which lets moments 1% off pass, has its own: tests/test_rules_v5.py."""
         from vibehash.tasks import WorkUnit
         from vibehash.worker import elsewhere
 
@@ -777,11 +778,11 @@ class TrainingTests(unittest.TestCase):
         noisy = s.round(noisy)
         for other in (flipped, noisy):
             self.assertFalse(reproduces(other, honest, start, ft.TOLERANCE, s), "rule 1 failed honest work")
-            self.assertTrue(adam_reproduces(other, honest, start, ft.TOLERANCE, s, lr, 4))
-            self.assertTrue(adam_reproduces(honest, other, start, ft.TOLERANCE, s, lr, 4))
+            self.assertTrue(adam_reproduces(other, honest, start, ft.TOLERANCE, s, lr, 4, rule=2))
+            self.assertTrue(adam_reproduces(honest, other, start, ft.TOLERANCE, s, lr, 4, rule=2))
 
         def fails(claim, expected=honest, begin=start):
-            self.assertFalse(adam_reproduces(s.round(claim), expected, begin, ft.TOLERANCE, s, lr, 4))
+            self.assertFalse(adam_reproduces(s.round(claim), expected, begin, ft.TOLERANCE, s, lr, 4, rule=2))
         fails(start)  # the freezer
         fails(ft.train_segment(s, d, start, unit.seed + 1, 0, 4, lr, 8))  # another unit's batches: a canary
         signs = honest.copy()
@@ -796,7 +797,7 @@ class TrainingTests(unittest.TestCase):
         later = s.round(ft.train_segment(s, d, honest, unit.seed, 4, 4, lr, 8))  # segment 1, from moments built up
         one = later.copy()
         one[b.start] += 2 * lr
-        self.assertTrue(adam_reproduces(later, later, honest, ft.TOLERANCE, s, lr, 4))
+        self.assertTrue(adam_reproduces(later, later, honest, ft.TOLERANCE, s, lr, 4, rule=2))
         fails(one, later, honest)
 
         # Replicas: a whole unit each, from the same start; B alone is compared, with the flips set aside.
@@ -1461,6 +1462,47 @@ class NodeFreeRoundTests(unittest.TestCase):
         self.assertTrue(all(v.verdict.value == "accepted" for k, v in res.items() if k[1] != cheat))
         self.assertFalse([s for s in rep.slashes if s[0] != cheat])
 
+    def withdrawing_twins(self, rule: int):
+        """A round in which one unit's honest twins disagree (as they did on two GPU generations, GitHub issue 85),
+        and each, challenging the other, picks once and then withdraws, as tracer.Party does when it chases a
+        difference down to an op and finds nothing the referee would refuse. Returns (report, the twins)."""
+        from unittest import mock
+
+        from vibehash.coordinator import Coordinator
+
+        self.network([("honest", "honest")] * 4, replication_rate=1.0, canaries_per_round=0, finetune_check=rule)
+        patch = mock.patch.object(Coordinator, "_replicas_agree", lambda c, job, keys: keys[0][0] != min(c.r.holders))
+        patch.start()
+        self.addCleanup(patch.stop)  # (a recheck runs it again, and must get what the record says)
+
+        def moves(g, who):
+            if g["why"] != "replicas" or g["turn"] != "pick":
+                return "default"
+            return {"concede": True} if g["played"] else {"pick": 0}
+        rep = self.round(moves=moves)
+        twins = [g for g in self.games.values() if g.why == "replicas"]
+        self.assertEqual(len(twins), 2, "one unit's twins, each way")
+        self.assertTrue(all(g.outcome == "withdrawn" for g in twins), [g.detail for g in twins])
+        self.assertTrue(all(v.verdict.value == "accepted" for v in self.results(rep).values()))
+        self.replays([rep])
+        return rep, {g.challenger for g in twins}
+
+    def test_a_replica_that_withdrew_is_blameless_from_rule_3(self):
+        """Rule 3 (verification.FINETUNE_CHECK): the node opened the twins' games, neither rejected anything, so
+        neither is marked as missing, and both are paid for their checks."""
+        rep, twins = self.withdrawing_twins(3)
+        self.assertEqual(rep.record["rules"]["finetune_check"], 3)
+        self.assertFalse(twins & set(rep.block.summary.missed))
+        self.assertTrue(twins <= set(rep.block.summary.verifier_flops))
+
+    def test_a_rule_2_round_still_blames_a_replica_that_withdrew(self):
+        """A round recorded by rule 2 settles and replays as it did: a twin that withdrew is unpaid for checking and
+        marked as missing."""
+        rep, twins = self.withdrawing_twins(2)
+        self.assertEqual(rep.record["rules"]["finetune_check"], 2)
+        self.assertTrue(twins <= set(rep.block.summary.missed))
+        self.assertFalse(twins & set(rep.block.summary.verifier_flops))
+
     def test_canaries_catch_a_checker_that_spots_rescaled_updates(self):
         """A lazy checker that knows Adam: it approves without replaying unless a segment breaks what Adam's moments
         must satisfy, which spotted most of the old, rescaled canaries. Today's are real training under another unit's
@@ -1504,15 +1546,17 @@ class NodeFreeRoundTests(unittest.TestCase):
 
     def test_a_worker_on_other_hardware_is_accepted_and_old_rounds_keep_rule_1(self):
         """Round 7280 on the public network: an honest worker whose GPU rounds differently (worker.elsewhere) had its
-        units rejected and its replicas disputed. Under rule 2 (verification.FINETUNE_CHECK) every one of its claims is
-        accepted and no replica disputes, and the round replays. A round under rule 1, recorded as rounds were before
+        units rejected and its replicas disputed. Under rules 2 and 3 (verification.FINETUNE_CHECK) every one of its
+        claims is accepted and no replica disputes, and the round replays. A round under rule 1, recorded as rounds were before
         there was a choice (no "finetune_check" among its rules), still compares its replicas by rule 1 when replayed:
         its twins disagree, and the replay's recheck agrees with that."""
         self.network([("honest", "honest")] * 3 + [("elsewhere", "honest")], replication_rate=1.0, canaries_per_round=0,
                      lr=5e-4)  # (the real job's: see test_another_devices_training_passes_rule_2_and_cheats_dont)
+        from vibehash.verification import FINETUNE_CHECK
+
         there = self.workers[-1].address
         rep = self.round()
-        self.assertEqual(rep.record["rules"]["finetune_check"], 2)
+        self.assertEqual(rep.record["rules"]["finetune_check"], FINETUNE_CHECK)
         mine = [k for k in self.results(rep) if k[1] == there]
         self.assertTrue(mine, "the worker on other hardware trained units")
         self.assertTrue(all(res.verdict.value == "accepted" for res in rep.results), rep.results)

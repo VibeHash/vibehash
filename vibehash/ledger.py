@@ -74,7 +74,11 @@ STARTER_ESCROW = 1
 #      and puts it out of the set for good; joining the set takes economics.VALIDATOR_STAKE; a join or leave takes
 #      effect VALIDATOR_DELAY heights after its block; a validator's stake is bonded (no stake or unstake) while it's
 #      in the set or joining it.
-VERSION = 4
+#   5: a fine-tune round is checked by rule 3 (verification.FINETUNE_CHECK): B decides a segment, Adam's moments are
+#      held to a looser bound, and a replica that challenged its twin and withdrew isn't marked as missing. The ledger's
+#      own rules are version 4's. The version changes because a node from before would refuse a rule-3 round and settle
+#      one differently; now it refuses the block, and its workers are told to upgrade (client.too_old).
+VERSION = 5
 FINETUNE_VERSION = 3
 ACCOUNTABILITY_VERSION = 4
 # A join or leave in block h takes effect at height h + VALIDATOR_DELAY: the validators voting on that block are the

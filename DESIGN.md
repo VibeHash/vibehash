@@ -681,6 +681,31 @@ Checkpoints are three times B's size (27.5 MB for Qwen3-0.6B at rank 16).
   old_rounds_keep_rule_1`). **Its limit:** a flip's knock-on through the steps after it grows with the step it took,
   so the tolerances hold at the learning rates `settings_for` gives (5e-4 at most; the tiny test model at 5e-4 matches
   Qwen3-0.6B), not at any a poster might choose: on the tiny model at 1e-2 one flip moves m 6e-3.
+- **Rule 3: B decides (2026-11-12, block version 5).** A private GSM8K run on two GPU generations (GitHub issue 85:
+  Qwen3-0.6B, rank 16, lr 5e-4, 4-step segments; an RTX PRO 4500 Blackwell and an RTX 4090 Ada on the same PyTorch
+  and driver) failed rule 2 on the moments. Same-type replays were bit-identical; across types, 2 of 101 segment
+  checks failed, at m 1.26e-3 and v 2.9e-3 apart, and 1 of 19 replica pairs disagreed. Its twins each chased the other
+  down to an op, found nothing the referee would refuse, and withdrew, so both were unpaid for checking and marked as
+  missing. Widening the moments alone isn't safe: the same job's segments trained in TF32 (`scripts/xgpu_drift.py` on
+  the `gpu-run` branch, here on an RTX 4070 SUPER) have v 1.4e-3 to 7.5e-3 apart. B separates them:
+
+  | Share of the limit (1.0 fails) | B | m | v |
+  |---|---|---|---|
+  | Honest, Blackwell and Ada, worst of 101 checks | 0.44 | 1.26 (rule 2) / 0.13 (rule 3, from the distance) | 2.89 (rule 2) / 0.29 (rule 3, from the distance) |
+  | TF32, every step, 8 segments | 4.9 to 37 | 3.2 to 12.9 (rule 2) | 1.4 to 7.5 (rule 2) |
+  | TF32 on the last of 4 steps, 8 segments | 0.59 to 2.8 | 1.7 to 3.5 (rule 2) | 0.5 to 1.9 (rule 2) |
+  | Six cheats that skip work (dropped steps, sequences or batches; another unit's batches; nothing run) | 43 and more | 9.5 and more (rule 3) | 3.5 and more (rule 3) |
+
+  So rule 3 (`verification.adam_reproduces` with `rule=3`) keeps rule 2's B and holds m and v only to
+  `MOMENT_BOUND` (1e-2) of their size and `MOMENT_CHANGE` (10%) of their change: three times the honest noise
+  measured, and every cheat that skips work still fails on both. The price is the smallest cut measured: TF32 on one
+  step in four fails 4 of 6 segments from built-up moments and neither from zero moments, where rule 2 failed all 8
+  (and failed honest work with them). A replica that withdrew from its twin's game is blameless, as one that conceded
+  before its first pick was: the node opened the game, and the replica rejected nothing (`_settle_finetune`). Replicas
+  are still compared by rule 2's `replicas_agree`; the run didn't record how far round 11's pair was apart, so it isn't
+  recalibrated here. Validators refuse a new round that isn't rule 3, in a block that isn't version 5; rounds recorded
+  by rules 1 and 2 replay and settle by them (`tests/test_rules_v5.py`, `NodeFreeRoundTests.test_a_replica_that_
+  withdrew_is_blameless_from_rule_3`).
 - Lazy, freezer, shortcut and poisoner workers are all caught, and rounds
   replay and recheck from their records with no disputes
   (`test_finetune.ProtocolTests`).
@@ -983,9 +1008,10 @@ once a round would be a ledger change.
     A node that doesn't have the dataset fetches it from the block's proposer (or the peer that sent the block), then
     any peer, checked on arrival (`node.PeerDatasets`), rather than refusing the block.
   - **Recheck:** besides version 2's, it rebuilds each dispute's root states from the checkpoints.
-  - **Its rules** say how its replicas were compared (`finetune_check`, rule 2 above, since 2026-11-02); a record
-    without it is rule 1. A node from before refuses a record with it (its `CoordinatorConfig` has no such field), so
-    every validator upgrades before the first such round, as with a version.
+  - **Its rules** say how its replicas were compared (`finetune_check`: rule 2 above from 2026-11-02, rule 3 from
+    2026-11-12 with block version 5); a record without it is rule 1. A node from before refuses a record with it
+    (its `CoordinatorConfig` has no such field), so every validator upgrades before the first such round, as with a
+    version.
   - **MLP rounds** stay version 2, unchanged.
 - **What counts as a fine-tune:** a spec with `lora` and a model without `n_in` (`tasks.is_finetune_spec`), a shape
   every earlier node refused. An MLP spec that happens to carry a field named `base` stays an MLP spec, as it was.
@@ -1510,6 +1536,10 @@ chain. A node answers a worker's `register` from a release below its
 `min_client` with a 400 naming the upgrade. It's a nudge, not a rule: a
 client that names no version is taken as before, and anyone can send any
 User-Agent. Validators agreeing on an upgrade is still to do (§9).
+
+Version 5 changes no ledger rule. It comes with fine-tune check rule 3 (§8, "Rule 3: B decides"): a node from before
+would refuse a rule-3 round and settle one differently (a replica that withdrew is blameless now), so it refuses the
+block instead, and its workers are told to upgrade before they check anything by rule 2.
 
 Version 3 lets a post_job be a fine-tune (`tasks.is_finetune_spec`, §8): earlier versions refuse one, as the nodes
 before them did, so a chain holds none until its validators all know them.

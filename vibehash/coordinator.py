@@ -2377,8 +2377,13 @@ class Coordinator:
             if g.outcome == "defender":
                 r.slashes.append([g.challenger, None, "false accusation"])
         # A checker that withdrew its rejection (it found no number the referee would refuse) isn't slashed, but isn't
-        # paid for checking this round either: a rejection costs something even when it's taken back.
-        withdrawn = {g.challenger for g in r.games.values() if g.outcome == "withdrawn"}
+        # paid for checking this round either: a rejection costs something even when it's taken back. From rule 3
+        # (verification.FINETUNE_CHECK) a replica that withdrew is blameless, as one that conceded before its first pick
+        # is: it rejected nothing, the node opened its game when the twins' results differed. On two GPU generations
+        # honest twins differed, each chased the other down to an op, withdrew, and was marked as missing (issue 85).
+        rule = r.record["rules"].get("finetune_check", 1)
+        withdrawn = {g.challenger for g in r.games.values()
+                     if g.outcome == "withdrawn" and not (g.why == "replicas" and rule >= 3)}
         for key in sorted(r.reveals):
             if r.prep and key in r.results:  # found bad already: its outputs aren't its state (_prep_disputes)
                 continue

@@ -86,19 +86,22 @@ def reproduces(claim: np.ndarray, expected: np.ndarray, start: np.ndarray, toler
     return _reproduces(claim, expected, start, tolerance, spec)
 
 
-def _reproduces(claim: np.ndarray, expected: np.ndarray, start: np.ndarray, tolerance: float, spec) -> bool:
+def _reproduces(claim: np.ndarray, expected: np.ndarray, start: np.ndarray, tolerance: float, spec,
+                change: float = UPDATE_TOLERANCE) -> bool:
     if relative_distance(claim, expected) > tolerance:
         return False
     err = np.linalg.norm(claim - expected)
-    return err <= max(UPDATE_TOLERANCE * np.linalg.norm(expected - start), np.finfo(spec.dtype).eps * np.linalg.norm(expected))
+    return err <= max(change * np.linalg.norm(expected - start), np.finfo(spec.dtype).eps * np.linalg.norm(expected))
 
 
 # How a fine-tune's checkpoints are compared, by version: a fine-tune round's record["rules"]["finetune_check"], and 1
 # for rounds recorded before there was a choice, so every round replays by its own rule. Checkers use the newest.
 #   1: reproduces(): B, m and v each within the job's tolerance of its size and 1% of its change; replicas the same, at
 #      finetune.WHOLE_TOLERANCE. Honest workers on different devices failed it (round 7280 on 2026-11-02, below).
-#   2: adam_reproduces() and replicas_agree().
-FINETUNE_CHECK = 2
+#   2: adam_reproduces() and replicas_agree(). Honest workers on two GPU generations failed it on the moments (below).
+#   3: rule 2 with B deciding: the moments held only to MOMENT_BOUND, and a replica that challenged its twin and
+#      withdrew is blameless (coordinator._settle_finetune), as one that conceded at once was.
+FINETUNE_CHECK = 3
 # Rule 2's numbers, measured on round 7280's unit (Qwen3-0.6B, rank 16, 64 tokens, batch 8, lr 5e-4) trained on an RTX
 # 4070 SUPER and replayed on the CPU, against the same unit trained with TF32 on (a cheaper, less precise worker):
 #   - A gradient's cross-device noise depends on the data: about 7e-6 of its size on most batches, 1.3e-4 on the one
@@ -112,19 +115,37 @@ FINETUNE_CHECK = 2
 MOMENT_TOLERANCE = 1e-3  # m and v: of their size (or the job's tolerance, if that's larger), and 1% of their change
 FRESH_TOLERANCE = 1e-3  # B in a segment from zero moments, once its flips are set aside: of the segment's change
 FLIP_SHARE = 1e-4  # B's weights that may land a flip apart from zero moments: 5 times the share measured
+# Rule 3's moments. A GSM8K run (Qwen3-0.6B, rank 16, lr 5e-4, 4-step segments) on an RTX PRO 4500 (Blackwell) and an
+# RTX 4090 (Ada), same PyTorch and driver, found honest m and v up to 1.26e-3 and 2.9e-3 apart across the two, over rule
+# 2's 1e-3 (GitHub issue 85); same-type replays were bit-identical, and honest B used at most 0.44 of its limit. The
+# same job's segments trained with TF32 on an RTX 4070 SUPER (scripts/xgpu_drift.py, on the gpu-run branch) have v
+# 1.4e-3 to 7.5e-3 apart, so no bound on the moments tells TF32 from honest work on another GPU. B does: TF32's used
+# 4.9 to 18 times its limit from moments built up, 29 to 37 times from zero moments (3,000 to 4,700 weights flipped).
+# So B decides, and the moments are held to a bound three times the noise measured, which a worker who forged them or
+# skipped work fails (each of xgpu_drift.py's six skipping cheats had m at least 9 times over it, and B at least 43
+# times over its own).
+# The price: TF32 on one step of four, whose moments came out within three times honest cross-GPU noise (m 1.7e-3 to
+# 3.5e-3, v 5e-4 to 1.9e-3), failed 4 of 6 segments from built-up moments, by B, and none of 2 from zero moments.
+# Rule 2 failed all 8, but it failed honest work across GPU generations too.
+MOMENT_BOUND = 1e-2  # m and v: of their size (or the job's tolerance, if that's larger)
+MOMENT_CHANGE = 0.1  # m and v: of their change, so moments left where they started fail where the size bound is loose
 
 
 def adam_reproduces(claim: np.ndarray, expected: np.ndarray, start: np.ndarray, tolerance: float, spec, lr: float,
-                    steps: int) -> bool:
-    """Rule 2 (FINETUNE_CHECK) for a fine-tune's segment of `steps` Adam steps from `start`, which a replay says ends at
-    `expected`. m and v: within MOMENT_TOLERANCE of their size and 1% of their change. B: from built-up moments, as rule
-    1 has it (the job's tolerance of its size, 1% of its change); from zero moments (a unit's first segment), its
+                    steps: int, rule: int = FINETUNE_CHECK) -> bool:
+    """Rule 2 or 3 (FINETUNE_CHECK) for a fine-tune's segment of `steps` Adam steps from `start`, which a replay says
+    ends at `expected`. m and v: by rule 2, within MOMENT_TOLERANCE of their size and 1% of their change; by rule 3,
+    within MOMENT_BOUND of their size and MOMENT_CHANGE of their change. B, by both: from built-up moments, as rule 1
+    has it (the job's tolerance of its size, 1% of its change); from zero moments (a unit's first segment), its
     FLIP_SHARE furthest weights are set aside, each still no further than two runs of Adam can put it, and the rest
     within FRESH_TOLERANCE of the segment's change. A worker that skipped training (the freezer), trained on other
     batches (a canary) or in TF32 still fails: measured above."""
     b, m, v = spec.parts
-    moments = max(tolerance, MOMENT_TOLERANCE)
-    if not all(_reproduces(claim[p], expected[p], start[p], moments, spec) for p in (m, v)):
+    if rule >= 3:
+        moments, change = max(tolerance, MOMENT_BOUND), MOMENT_CHANGE
+    else:
+        moments, change = max(tolerance, MOMENT_TOLERANCE), UPDATE_TOLERANCE
+    if not all(_reproduces(claim[p], expected[p], start[p], moments, spec, change) for p in (m, v)):
         return False
     if np.any(start[m]) or np.any(start[v]):  # Adam's steps from moments built up are smooth: nothing flips
         return _reproduces(claim[b], expected[b], start[b], tolerance, spec)
@@ -132,11 +153,11 @@ def adam_reproduces(claim: np.ndarray, expected: np.ndarray, start: np.ndarray, 
 
 
 def replicas_agree(claim: np.ndarray, expected: np.ndarray, start: np.ndarray, spec, lr: float, steps: int) -> bool:
-    """Rule 2 for replicas of a fine-tune's unit, `steps` Adam steps from the round's start (zero moments): B alone,
-    its FLIP_SHARE furthest weights set aside (as adam_reproduces), the rest within 1% of the unit's change. The moments
-    are left out: they're zeroed once the round's results are averaged (LoraSpec.fresh), and each replica's are checked
-    segment by segment by its checkers. Over a whole unit the flips' effect on later gradients builds up: measured,
-    replicas' m 2e-2 apart after 16 steps, B 1.6e-3 of its change once the flips are set aside."""
+    """Rules 2 and 3 for replicas of a fine-tune's unit, `steps` Adam steps from the round's start (zero moments): B
+    alone, its FLIP_SHARE furthest weights set aside (as adam_reproduces), the rest within 1% of the unit's change. The
+    moments are left out: they're zeroed once the round's results are averaged (LoraSpec.fresh), and each replica's are
+    checked segment by segment by its checkers. Over a whole unit the flips' effect on later gradients builds up:
+    measured, replicas' m 2e-2 apart after 16 steps, B 1.6e-3 of its change once the flips are set aside."""
     b = spec.parts[0]
     return _flips_aside(claim[b], expected[b], start[b], UPDATE_TOLERANCE, spec, lr, steps)
 
