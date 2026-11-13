@@ -81,7 +81,9 @@ Each release:
    don't update to it. Follow it under the repository's Actions tab, and check that the release lists
    those four files and the installer.
 4. Upgrade the servers by running `deploy/setup-node.sh` again (restart every named node too, so they
-   run the same release).
+   run the same release). A release that raises the block version (`ledger.VERSION`; 5 came with fine-tune
+   check rule 3) must reach every validator before any of them makes a block: older nodes refuse those blocks,
+   and workers of an older release stop until they update.
 
 ## Rotate secrets
 

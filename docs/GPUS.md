@@ -34,10 +34,10 @@ end), plus measurements on the 4070 SUPER that stand in for other kinds of hardw
 | Arithmetic | float32 jobs on the GPU; float64 jobs always on the CPU (`compute.py:101`) | **bf16 on CUDA/ROCm, float32 everywhere else** (`es_client.py:387`, `:413`) | float32, frozen weights stored bf16 and cast up in each matmul |
 | CUDA graphs | no | yes, one per pass on CUDA/ROCm; eager elsewhere (`es_hybrid.py:149`, `:256`) | no |
 | `scaled_dot_product_attention` | no | yes, with a float mask (`es_hybrid.py:210`, `es_fast.py:266`) | no (attention written out) |
-| TF32 | must be off | must be off for the float32 recurrent state | must be off (rule 2 rejects TF32: DESIGN.md §8) |
+| TF32 | must be off | must be off for the float32 recurrent state | must be off (rule 3 rejects TF32 on B: DESIGN.md §8) |
 | float64 on the device | never | never in rule 2; rule-1 Evo summed weights in float64 on the device (fixed below) | never (rotary tables on the CPU) |
 | Memory | small | Qwen3.5-0.8B: 3.5 GiB peak (bf16, 64-token answers, measured); twice the weights in float32 | 3.5 GiB Qwen3-0.6B, 11.1 GiB Qwen3-4B (measured) |
-| How a checker compares | within `tolerance` (1e-4) and 1% of the update | each committed token within `margin` (0.5) of the greedy logit; replay log-probabilities within `lp_tol` (0.02 for new jobs) | rule 2: B, m, v within their tolerances, Adam's first-step sign flips set aside |
+| How a checker compares | within `tolerance` (1e-4) and 1% of the update | each committed token within `margin` (0.5) of the greedy logit; replay log-probabilities within `lp_tol` (0.02 for new jobs) | rule 3: B within its tolerances, Adam's first-step sign flips set aside; m and v within a looser bound |
 | Measured across machines | 4e-9 to 8e-8, CUDA vs CPU | gaps up to 0.375 (below) | 1e-6 of B's size, CUDA vs CPU |
 
 ## Compatibility matrix
@@ -461,7 +461,7 @@ Read 2026-11-07. "Source" means PyTorch's code on GitHub, read but not run.
 - PyTorch on reproducibility across platforms: https://docs.pytorch.org/docs/2.15/notes/randomness.html
 
 **This repository**
-- DESIGN.md §8: classic and fine-tune measurements, and rule 2.
+- DESIGN.md §8: classic and fine-tune measurements, and fine-tune check rules 2 and 3.
 - `vibehash/es_local.py`: the note above `V2_SETTINGS`, with the 4090/4070 SUPER measurement.
 - docs/evo-margin-measurement.md: the cross-GPU margin plan.
 - HANDOFF.md: Evo speed and memory on the 4070 SUPER.
