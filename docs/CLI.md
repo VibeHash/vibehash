@@ -428,7 +428,7 @@ Flags:
 - `--plain`: print log lines instead of the live mining dashboard.
 - `--watch PORT`: also serve what the dashboard shows as JSON at http://127.0.0.1:PORT/ (default port 7545), read-only and for this computer only, so a window or a script can follow the worker step by step: its round, what it is doing, its counts, its account, the latest events.
 - `--deepseek {ask,yes,no}`: take DeepSeek work (its ~30 GB of model files): yes, or no (the default; DeepSeek is frozen). ask is only for the pilot (VIBEHASH_DEEPSEEK_PILOT=1). Remembered.
-- `--job JOB`: mine only this job's rounds and sit the other jobs' out (default auto: every job this worker can do). The dashboard's job line changes it while it runs: Tab or 0-9.
+- `--job JOB`: mine only this job's rounds and sit the other jobs' out, or several jobs' as JOB,JOB (default auto: every job this worker can do). saved: the jobs the app's Pick your vibe chose, followed as they change. The dashboard's job line changes it while it runs: Tab or 0-9.
 - `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
 - `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
 - `--tor-mode {control-only,strict}`: control-only: JSON through the proxy, transfers of over 50 MB (checkpoints) direct; strict: everything through it, big transfers refused (default: strict for wallet, send, stake, unstake and job posting, else control-only).
@@ -462,7 +462,7 @@ Flags:
 - `--watch PORT`: the worker's feed's port (default 7545).
 - `--gpu {auto,skip}`: install PyTorch for the GPU (auto) or not.
 - `--recheck-gpu`: test the GPU again, even if an earlier run found it ready.
-- `--job JOB`: mine only this job, as `worker --job`.
+- `--job JOB`: mine only this job (or JOB,JOB), as `worker --job`; without it, the jobs chosen in the window's Pick your vibe.
 - `--no-password`: make a first wallet without a password, so nothing is asked (what the downloadable app does); the key is kept in your account's credential store.
 - `--avatar`: also show the floating avatar on the desktop (`avatar`), which the downloadable app does; needs a screen.
 - `--no-window`: don't open the window (`window`) as it starts; a click on the avatar or `vibehash window` opens it later. How a start-at-login entry runs.

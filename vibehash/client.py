@@ -434,27 +434,56 @@ class _NoLog:
         return lambda *args, **kwargs: None
 
 
+def job_ids(jobs) -> frozenset[str] | None:
+    """A choice of jobs as a set of ids, or None for every job (auto). Takes None, "auto", one id, "a,b" as
+    `worker --job` spells several, or any iterable of ids. An empty choice is auto: a worker set to mine nothing would
+    sit every round out without saying why."""
+    if jobs is None:
+        return None
+    if isinstance(jobs, str):
+        jobs = jobs.split(",")
+    ids = frozenset(j.strip() for j in jobs if isinstance(j, str) and j.strip())
+    return None if not ids or "auto" in ids else ids
+
+
 class JobChoice:
-    """Which job a worker mines: None for every job it can do (auto), else one job's id, the only job whose rounds it
-    registers in. The dashboard's selector sets it from its own thread while the worker loop reads it, and the workers
-    one dashboard shows share one, so a single selector moves them all."""
+    """Which jobs a worker mines: None for every job it can do (auto), else a set of job ids, the only jobs whose
+    rounds it registers in. The dashboard's selector and the app's saved choice set it from their own threads while
+    the worker loop reads it, and the workers one dashboard shows share one, so a single selector moves them all."""
 
-    def __init__(self, job_id: str | None = None):
+    def __init__(self, jobs=None):
         self._lock = threading.Lock()
-        self.job_id = job_id or None
+        self.ids = job_ids(jobs)
 
-    def set(self, job_id: str | None) -> bool:
+    @property
+    def job_id(self) -> str | None:
+        """The one job chosen, or None: on auto, or with several chosen (the terminal's selector shows one at a time)."""
+        ids = self.ids
+        return next(iter(ids)) if ids is not None and len(ids) == 1 else None
+
+    def allows(self, job_id: str | None) -> bool:
+        ids = self.ids
+        return ids is None or job_id in ids
+
+    def describe(self) -> str:
+        ids = self.ids
+        return "every job" if ids is None else ", ".join(sorted(ids))
+
+    def set(self, jobs) -> bool:
         """Whether that changed it."""
+        new = job_ids(jobs)
         with self._lock:
-            changed, self.job_id = self.job_id != (job_id or None), job_id or None
+            changed, self.ids = self.ids != new, new
             return changed
 
     def drop(self, job_id: str) -> bool:
-        """Back to auto if it's still `job_id` (someone may have picked another since): whether it was."""
+        """Take `job_id` out of the choice if it's still in it (someone may have picked others since), back to auto when
+        it was the last: whether it was in it."""
         with self._lock:
-            if self.job_id != job_id:
+            if self.ids is None or job_id not in self.ids:
                 return False
-            self.job_id = None
+            rest = self.ids - {job_id}
+            self.ids = rest or None
             return True
 
 
@@ -466,10 +495,11 @@ class WorkerClient:
 
     def __init__(self, node_url: str, keys: KeyPair, memory_mb: int | None = None, flops_override: float | None = None,
                  poll_s: float = 0.5, behavior: str = "honest", verifier_behavior: str = "honest", device: str = "auto",
-                 cache_dir: str | Path | None = None, deepseek: bool = False, job: str | None = None):
+                 cache_dir: str | Path | None = None, deepseek: bool = False, job=None):
         """`deepseek`: take DeepSeek jobs' work, whose model files (~30 GB) it fetches into the model store
         (modelstore.py) without asking: the owner said yes (`worker --deepseek yes`, or the menu's item).
-        `job`: mine only that job's rounds (None: every job it can do); `choose` changes it as it runs."""
+        `job`: mine only those jobs' rounds, one id or several (job_ids; None: every job it can do); `choose` changes
+        it as it runs."""
         self.home = self.node = NodeClient(node_url)
         self.deepseek = deepseek
         self.choice = JobChoice(job)
@@ -744,30 +774,35 @@ class WorkerClient:
             s = self.node.status()
         return s
 
-    def choose(self, job_id: str | None) -> bool:
-        """Mine only `job_id`'s rounds from now on, or every job it can do (None). Any thread may call it. A round it
-        already registered in is finished either way. Whether that changed the choice."""
-        return self.choice.set(job_id)
+    def choose(self, jobs) -> bool:
+        """Mine only these jobs' rounds from now on (one id, several, job_ids' forms), or every job it can do (None).
+        Any thread may call it. A round it already registered in is finished either way, so a change takes effect at
+        the next round and the units it has in hand still count. Whether that changed the choice."""
+        return self.choice.set(jobs)
 
     def _sits_out(self, rnd: int, s: dict) -> bool:
-        """Whether this round belongs to another job than the one chosen, and isn't one it registered in: it then
+        """Whether this round belongs to a job other than the ones chosen, and isn't one it registered in: it then
         doesn't register, and says why in its activity line. A chosen job no longer listed with budget left (spent or
-        cancelled), asked about at most every OPEN_EVERY seconds, puts it back on auto, with one log line."""
-        mine = self.choice.job_id
-        if mine is None or s.get("job_id") == mine or (rnd, s.get("attempt"), "register") in self.done:
+        cancelled), asked about at most every OPEN_EVERY seconds, leaves the choice with one log line; when it was the
+        last one, the worker is back on auto."""
+        mine = self.choice.ids
+        if mine is None or s.get("job_id") in mine or (rnd, s.get("attempt"), "register") in self.done:
             return False
         if time.monotonic() - self._open_asked > OPEN_EVERY:
             self._open_asked = time.monotonic()
             try:
-                gone = mine not in self.home.open_jobs()
+                listed = set(self.home.open_jobs())
+                gone = sorted(j for j in mine if j not in listed)
             except NodeError:
-                gone = False  # can't tell (a node from before /network, say): keep the choice
-            if gone and self.choice.drop(mine):
-                log.info("job %s has no budget left any more: mining every job (auto)", mine)
-            if gone:
+                gone = []  # can't tell (a node from before /network, say): keep the choice
+            for job_id in gone:
+                if self.choice.drop(job_id):
+                    log.info("job %s has no budget left any more: mining %s", job_id,
+                             "every job (auto)" if self.choice.ids is None else self.choice.describe() + " only")
+            if self.choice.ids is None:
                 return False
         self.stats.new_round(rnd)
-        self.stats.activity = f"sitting out {s.get('job_id')}'s round: mining {mine} only"
+        self.stats.activity = f"sitting out {s.get('job_id')}'s round: mining {self.choice.describe()} only"
         return True
 
     def step(self) -> None:
@@ -853,8 +888,8 @@ class WorkerClient:
                               kind=("deepseek" if job.deepseek else "es" if job.es else "finetune" if job.finetune
                                     else "mlp"),
                               speed=self.speed[job.job_id], leader=self.node.url)
-            if self.choice.job_id:
-                self.record.note(rnd, mining=self.choice.job_id)
+            if self.choice.ids is not None:
+                self.record.note(rnd, mining=self.choice.describe())
         elif phase == "compute":
             given = self.node.signed(k, "assignment", {"round": rnd})
             units = [unit_in(u) for u in given["units"]]
