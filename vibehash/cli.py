@@ -42,7 +42,7 @@ from . import advice, credstore, crypto, filelock, hardware, mnemonic, modelstor
 from . import economics as econ
 from . import fees
 from . import wallet as wallets
-from .client import MIN_CLIENT, NodeClient, NodeError, WorkerClient, too_old
+from .client import MIN_CLIENT, NodeClient, NodeError, WorkerClient, job_ids, too_old
 from .crypto import AddressError, KeyPair, checksummed, parse_address
 from .ledger import UNBONDING_ROUNDS, Block, Chain, canonical
 from .model import ModelSpec
@@ -572,9 +572,11 @@ def _mine(a, keys: KeyPair):
     problem = too_old(NodeClient(url).get("/status"))
     if problem:
         sys.exit(f"error: {problem}")
-    job = None if getattr(a, "job", None) in (None, "auto") else a.job
-    if job:  # before the GPU's self-test: a mistyped job is said at once
-        _chosen_job(NodeClient(url), job, url)
+    raw = getattr(a, "job", None)
+    follow = raw == "saved"  # the app's worker: the jobs its window saved, and whatever they're changed to
+    job = job_ids(settings.saved_jobs() if follow else None if raw in (None, "auto") else raw)
+    if job and not follow:  # before the GPU's self-test: a mistyped job is said at once. A saved one that has since
+        _chosen_job(NodeClient(url), job, url)  # run out is dropped as the worker runs instead (WorkerClient._sits_out)
     if getattr(a, "deepseek", None):
         settings.save(deepseek=a.deepseek)  # remembered: the next `vibehash worker` does the same
     deepseek = deepseek_wanted(a)
@@ -583,7 +585,9 @@ def _mine(a, keys: KeyPair):
                          job=job)
     except RuntimeError as e:
         sys.exit(f"error: {e}")
-    mining = f"mining {job} only (--job): other jobs' rounds are sat out" if job else None
+    mining = f"mining {', '.join(sorted(job))} only (--job): other jobs' rounds are sat out" if job else None
+    if follow:
+        _follow_saved_jobs(w)
     status = w.node.status()
     skew = selftest.clock_skew(w.node)  # every message is signed with this clock, and refused if it's too far off
     if skew is not None and abs(skew) > MAX_CLOCK_SKEW_S - 2:
@@ -666,25 +670,53 @@ def cmd_admin(a):
     admin.main(a)
 
 
-def _chosen_job(api: NodeClient, job: str, url: str) -> None:
-    """`worker --job JOB`: the node must list JOB among its jobs with budget left, or the worker stops here naming
-    the ones it does. A node from before /network is asked about JOB alone."""
+SAVED_JOBS_S = 2.0  # how often the app's worker looks for a new Pick your vibe choice
+
+
+def _follow_saved_jobs(w, every: float = SAVED_JOBS_S, stop: threading.Event | None = None) -> threading.Thread:
+    """`worker --job saved`: watch the choice the app's window saves (settings.saved_jobs) and hand each new one to the
+    worker, which takes it up at its next round, so a change never costs the units of the round in hand. Only a
+    change is handed over: a saved job that ran out, and that the worker dropped, isn't put back every few seconds."""
+    stop = stop or threading.Event()  # (the worker's own process ends it otherwise: the thread is a daemon)
+
+    def run():
+        seen = settings.saved_jobs()
+        while not stop.wait(every):
+            now = settings.saved_jobs()
+            if now != seen:
+                seen = now
+                if w.choose(now):
+                    logging.getLogger("vibehash.worker").info(  # (the feed's own logger: the window's activity shows it)
+                        "mining %s from the next round, as chosen in the window",
+                        "every job" if now is None else ", ".join(now))
+    t = threading.Thread(target=run, daemon=True, name="saved-jobs")
+    t.start()
+    return t
+
+
+def _chosen_job(api: NodeClient, jobs, url: str) -> None:
+    """`worker --job JOB[,JOB]`: the node must list each JOB among its jobs with budget left, or the worker stops here
+    naming the ones it does. A node from before /network is asked about each JOB alone."""
+    jobs = sorted(job_ids(jobs) or ())
     try:
         listed = api.open_jobs()
     except NodeError as e:
         if e.status != 404:
             raise
-        try:
-            listed = [job] if api.get(f"/job/{job}").get("escrow", 0) > 0 else []
-        except NodeError as e:
-            if e.status != 404:
-                raise
-            listed = []
-    if job not in listed:
+        listed = []
+        for job in jobs:
+            try:
+                if api.get(f"/job/{job}").get("escrow", 0) > 0:
+                    listed.append(job)
+            except NodeError as e:
+                if e.status != 404:
+                    raise
+    missing = [j for j in jobs if j not in listed]
+    if missing:
         there = (f"its jobs with budget left are {', '.join(listed)}" if listed else
                  "it has no jobs with budget left right now")
-        sys.exit(f"error: {url} has no job {job} with budget left: {there}. Leave out --job (or --job auto) to mine "
-                 "every job")
+        sys.exit(f"error: {url} has no job {', '.join(missing)} with budget left: {there}. Leave out --job (or --job "
+                 "auto) to mine every job")
 
 
 def cmd_devices(a):
@@ -2799,8 +2831,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--deepseek", choices=["ask", "yes", "no"], default=None,
                    help="take DeepSeek work (its ~30 GB of model files): yes, or no (the default; DeepSeek is frozen). "
                         "ask is only for the pilot (VIBEHASH_DEEPSEEK_PILOT=1). Remembered")
-    p.add_argument("--job", default="auto", metavar="JOB", help="mine only this job's rounds and sit the other jobs' out "
-                   "(default auto: every job this worker can do). The dashboard's job line changes it while it runs: "
+    p.add_argument("--job", default="auto", metavar="JOB", help="mine only this job's rounds and sit the other jobs' out, "
+                   "or several jobs' as JOB,JOB (default auto: every job this worker can do). saved: the jobs the app's "
+                   "Pick your vibe chose, followed as they change. The dashboard's job line changes it while it runs: "
                    "Tab or 0-9")
     p.set_defaults(fn=cmd_worker)
 
@@ -2827,7 +2860,8 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--watch", type=int, metavar="PORT", help=f"the worker's feed's port (default {WATCH_PORT})")
         p.add_argument("--gpu", choices=["auto", "skip"], default=auto, help="install PyTorch for the GPU (auto) or not")
         p.add_argument("--recheck-gpu", action="store_true", help="test the GPU again, even if an earlier run found it ready")
-        p.add_argument("--job", metavar="JOB", help="mine only this job, as `worker --job`")
+        p.add_argument("--job", metavar="JOB", help="mine only this job (or JOB,JOB), as `worker --job`; without it, the "
+                       "jobs chosen in the window's Pick your vibe")
         p.add_argument("--no-password", action="store_true", help="make a first wallet without a password, so nothing is "
                        "asked (what the downloadable app does); the key is kept in your account's credential store")
         p.add_argument("--avatar", action="store_true", help="also show the floating avatar on the desktop (`avatar`), "

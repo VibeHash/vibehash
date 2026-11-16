@@ -25,7 +25,7 @@ Flags:
 - `--watch PORT`: the worker's feed's port (default 7545).
 - `--gpu {auto,skip}`: install PyTorch for the GPU (auto) or not.
 - `--recheck-gpu`: test the GPU again, even if an earlier run found it ready.
-- `--job JOB`: mine only this job, as `worker --job`.
+- `--job JOB`: mine only this job (or JOB,JOB), as `worker --job`; without it, the jobs chosen in the window's Pick your vibe.
 - `--no-password`: make a first wallet without a password, so nothing is asked (what the downloadable app does); the key is kept in your account's credential store.
 - `--avatar`: also show the floating avatar on the desktop (`avatar`), which the downloadable app does; needs a screen.
 - `--no-window`: don't open the window (`window`) as it starts; a click on the avatar or `vibehash window` opens it later. How a start-at-login entry runs.

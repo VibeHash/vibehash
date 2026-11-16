@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 WATCH_PORT = 7545  # the worker's feed (watch.py): a thousand below a node's 8545, so a testnet's validators never land on it
@@ -80,6 +81,21 @@ def deepseek_pilot() -> bool:
 def deepseek_choice(cfg: dict | None = None) -> str:
     """The saved DeepSeek choice, "yes" or "no", or "ask" (not chosen yet, and only in the pilot). The default is "no"."""
     return (load() if cfg is None else cfg).get("deepseek", "ask" if deepseek_pilot() else "no")
+
+
+JOB_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")  # tasks.py's rule for job ids, kept here so settings stays light
+MAX_SAVED_JOBS = 32
+
+
+def saved_jobs(cfg: dict | None = None) -> list[str] | None:
+    """The jobs the app's Pick your vibe saved for its worker to mine (`worker --job saved`): a sorted list of job
+    ids, or None for every open job, new ones included. None is the default, and what anything unreadable means: a
+    hand-edited file can't leave the worker sitting every round out."""
+    v = (load() if cfg is None else cfg).get("jobs")
+    if not isinstance(v, list):
+        return None
+    ids = sorted({j for j in v if isinstance(j, str) and JOB_ID.fullmatch(j)})[:MAX_SAVED_JOBS]
+    return ids or None
 
 
 def save(**updates) -> None:

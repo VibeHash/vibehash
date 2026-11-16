@@ -573,6 +573,12 @@ class RateLimitNetworkTests(unittest.TestCase):
         self.assertEqual(code, 503)
         self.assertIn("too many connections from your address", body["error"])
         self.assertEqual(NodeClient(node.url).status()["chain_id"], "limits-net")  # once the idle ones time out
+        # A connection's thread lets go of its slot after the client has its answer. Waiting for 1 below while the
+        # status call's thread (or an idle one's) still held it saw that stale slot, `hold` was turned away, and the
+        # last request got a 200 (a CI run, 2026-11-13). So every earlier slot is let go of first, and `hold` gets
+        # long enough to keep its own on a slow machine.
+        wait_for(lambda: node.server._open_total == 0)
+        node.server.limits.header_timeout = 30
         node.server.limits.max_connections_per_ip = 100
         node.server.limits.max_connections = 1
         hold = socket.create_connection((host, port), timeout=10)

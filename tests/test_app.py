@@ -790,5 +790,48 @@ class WordsOnceTests(AppHome):
         self.assertTrue(any(f.get("wallet", {}).get("words_pending") for f in facts))
 
 
+class PickYourVibeTests(AppHome):
+    """The jobs the window's Pick your vibe saves reach the app's worker without a restart."""
+
+    def wait_for(self, done, seconds=5.0):
+        deadline = time.time() + seconds
+        while not done() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(done())
+
+    def test_the_apps_worker_mines_the_saved_jobs_unless_told_otherwise(self):
+        cmd = app.worker_command("https://node.example", Path("w.json"), 7545)
+        self.assertEqual(cmd[cmd.index("--job") + 1], "saved")
+        cmd = app.worker_command("https://node.example", Path("w.json"), 7545, job="pick-a,pick-b")  # `app --job`
+        self.assertEqual(cmd[cmd.index("--job") + 1], "pick-a,pick-b")
+
+    def test_a_new_choice_is_handed_to_the_running_worker_once(self):
+        """Only a change is handed over: what it started with isn't, and a job the worker dropped since (spent) isn't
+        put back every few seconds by a choice that still names it."""
+        from vibehash import cli
+        chose = []
+        worker = SimpleNamespace(choose=lambda jobs: chose.append(jobs) or True)
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        settings.save(jobs=["pick-a"])
+        cli._follow_saved_jobs(worker, every=0.02, stop=stop)
+        time.sleep(0.15)
+        self.assertEqual(chose, [])
+        settings.save(jobs=["pick-b", "pick-a"])
+        self.wait_for(lambda: chose == [["pick-a", "pick-b"]])
+        settings.save(jobs=None)
+        self.wait_for(lambda: chose == [["pick-a", "pick-b"], None])
+        time.sleep(0.15)
+        self.assertEqual(len(chose), 2)
+
+    def test_a_saved_choice_that_cant_be_read_is_every_job(self):
+        self.assertIsNone(settings.saved_jobs())
+        for junk in ("pick-a", [], [3, None], ["Not An Id", "../up"], {"pick-a": True}):
+            settings.save(jobs=junk)
+            self.assertIsNone(settings.saved_jobs(), junk)
+        settings.save(jobs=["pick-b", "Bad Id", "pick-a", "pick-b"])
+        self.assertEqual(settings.saved_jobs(), ["pick-a", "pick-b"])
+
+
 if __name__ == "__main__":
     unittest.main()

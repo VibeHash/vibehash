@@ -317,11 +317,10 @@ def stop_words() -> None:
 # --- running the worker --------------------------------------------------------------------------------------------
 
 def worker_command(url: str, wallet: Path, port: int, device: str = "auto", job: str | None = None) -> list[str]:
-    cmd = [sys.executable, "-m", "vibehash", "worker", "--plain", "--watch", str(port), "--node", url,
-           "--wallet", str(wallet), "--device", device]
-    if job:
-        cmd += ["--job", job]
-    return cmd
+    """The app's worker. Without `app --job` it mines the jobs the window's Pick your vibe saved, and follows a new
+    choice as it runs (`worker --job saved`), so changing it never restarts the worker mid-round."""
+    return [sys.executable, "-m", "vibehash", "worker", "--plain", "--watch", str(port), "--node", url,
+            "--wallet", str(wallet), "--device", device, "--job", job or "saved"]
 
 
 class Supervisor:
