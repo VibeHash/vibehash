@@ -12,7 +12,7 @@ Write a genesis file: chain id, starting balances, stakes, validators and the is
 Write the genesis file every node of a new network starts from. Addresses come from `wallet create`. A validator named here needs stake of at least the minimum, from --stake or --bootstrap; a worker needs none when --no-earn-in isn't given, since its first pay becomes its stake. The file's hash identifies the network, so give every node the same file.
 
 ```
-vibehash genesis create [-h] --chain-id CHAIN_ID [--alloc ADDR=VIBE] [--stake ADDR=VIBE] [--validator ADDR=URL] --out OUT [--economics {mainnet,testnet}] [--bootstrap ADDR=VIBE] [--no-earn-in] [--es] [--starter-job SPEC.json]
+vibehash genesis create [-h] --chain-id CHAIN_ID [--alloc ADDR=VIBE] [--stake ADDR=VIBE] [--validator ADDR=URL] --out OUT [--economics {mainnet,testnet}] [--bootstrap ADDR=VIBE] [--no-earn-in] [--es] [--decision] [--starter-job SPEC.json]
 ```
 
 Flags:
@@ -26,6 +26,7 @@ Flags:
 - `--bootstrap ADDR=VIBE`: stake for a first validator that votes but can never be withdrawn or spent; burned if it leaves.
 - `--no-earn-in`: require workers to be given stake; by default they can start with none and earn it.
 - `--es`: let Evo jobs run on this network ("es": true); it can't be turned on later.
+- `--decision`: let fine-tunes of System 1 decision models like Laya run on this network ("decision": true), a prototype for test networks; it can't be turned on later.
 - `--starter-job SPEC.json`: a job on chain from block one, owned by nobody, paying only new coins (fee 0), so the network can mine with no starting coins; a spec as `vibehash job template` writes.
 
 Examples:

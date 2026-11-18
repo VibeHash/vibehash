@@ -126,7 +126,17 @@ class Program:
         if getattr(job, "deepseek", False):  # a DeepSeek top-layers job's units (deepseek_program.py)
             from .deepseek_program import DeepSeekProgram
             cls = DeepSeekProgram
+        else:
+            cls = cls.for_spec(job.spec)
         return cls(job.spec, job.data, job.lr, job.batch_size, seed, job.n_segments, job.checkpoint_every)
+
+    @classmethod
+    def for_spec(cls, spec) -> type:
+        """The program class a fine-tune's spec trains by: a decision model's (decision_program.py), else this one."""
+        if getattr(spec, "kind", None) == "decision":
+            from .decision_program import DecisionProgram
+            return DecisionProgram
+        return cls
 
     # --- the levels ---
 
@@ -364,6 +374,9 @@ def dispute_size(spec, batch_size: int, segments: int, per_segment: int) -> tupl
 
     A DeepSeek spec's program (deepseek_program.py) is built from the job's records, so until it counts its own, its
     step is taken as five rounds deep (inputs, a layer, its attention by sequence, ops) and a split as its adapters'."""
+    if getattr(spec, "kind", None) == "decision":  # a decision model's program (decision_program.py)
+        from .decision_program import dispute_size as decision_size
+        return decision_size(spec, batch_size, segments, per_segment)
     if hasattr(spec, "cut"):  # deepseek_job.DeepSeekSpec
         def levels(n):
             k = 1
@@ -379,7 +392,12 @@ def dispute_size(spec, batch_size: int, segments: int, per_segment: int) -> tupl
     data = types.SimpleNamespace(parsed_config=lambda: config, n_train=1, train_len=np.array([T]),
                                  train_mask=np.ones((1, T), dtype=np.uint8))
     p = Program(spec, data, 1e-4, 1, 0)
+    micros = [_Micro(p, 0, T, first).atoms() for first in (True, False)]
+    return tree_size(p, micros, spec, batch_size, segments, per_segment)
 
+
+def tree_size(p: Program, micros: list, spec, batch_size: int, segments: int, per_segment: int) -> tuple[int, int]:
+    """dispute_size's arithmetic, from a program and the atoms of its first and later micro-batches."""
     def rounds(n):
         k = 1
         while n > K:
@@ -402,7 +420,6 @@ def dispute_size(spec, batch_size: int, segments: int, per_segment: int) -> tupl
                 alive = {}
         return total
 
-    micros = [_Micro(p, 0, T, first).atoms() for first in (True, False)]
     adam = p.adam_step(0).atoms
     moves = 2 * (rounds(segments) + rounds(per_segment) + rounds(batch_size + 1)
                  + max(*(below(m) for m in micros), below(adam))) + 1

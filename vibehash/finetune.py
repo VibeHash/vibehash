@@ -493,7 +493,12 @@ def runtime(spec: LoraSpec, data: TokenDataset, device: str, progress=None) -> _
             from . import compute, hub, llm
 
             compute.TorchBackend(device)  # TF32 off, deterministic kernels: the settings replays depend on
-            manifest, arch = data.parsed_manifest(), llm.Arch.from_hf_config(data.parsed_config())
+            manifest, code = data.parsed_manifest(), llm
+            if spec.kind == "decision":  # a Laya decision model (decision.py): its weights, loaded as llm.load does
+                from . import decision_tracer as code
+                arch = data.arch()
+            else:
+                arch = llm.Arch.from_hf_config(data.parsed_config())
             arch.check(spec.seq_len)
             names = arch.tensor_names()
             paths = hub.fetch_tensors(manifest, names, progress=progress,
@@ -502,7 +507,7 @@ def runtime(spec: LoraSpec, data: TokenDataset, device: str, progress=None) -> _
             def read(name):
                 e = manifest.tensors[name]
                 return e.dtype, list(e.shape), paths[name].read_bytes()  # the cache checked them against the manifest
-            rt = _runtimes[key] = _Runtime(llm.load(arch, read, device), device)
+            rt = _runtimes[key] = _Runtime(code.load(arch, read, device), device)
         if spec not in rt.lora:
             import torch
 
@@ -536,12 +541,12 @@ def train_segment(spec: LoraSpec, data: TokenDataset, theta: np.ndarray, unit_se
     from .compute import pin_precision
 
     rt = runtime(spec, data, device_of(backend))
-    prog = Program(spec, data, lr, batch_size, unit_seed)
+    prog = Program.for_spec(spec)(spec, data, lr, batch_size, unit_seed)
     with rt.busy, torch.no_grad():
         pin_precision()  # TF32 off again, in case something turned it on since the model loaded (rule 2 fails TF32)
         # (copies: a checkpoint may be a read-only memory map)
         st = {k: torch.tensor(v, device=rt.device) for k, v in split_theta(spec, theta).items()}
-        ex = tracer.FastExecutor(rt, spec, prog, tamper)
+        ex = tracer.executor(rt, spec, prog, tamper)
         for t in range(start_step, start_step + n_steps):
             node = prog.step(t)
             ex.run_atoms(node, 0, len(node.atoms), st, (node.label,))
@@ -550,9 +555,13 @@ def train_segment(spec: LoraSpec, data: TokenDataset, theta: np.ndarray, unit_se
 
 def evaluate(spec: LoraSpec, data: TokenDataset, theta: np.ndarray, backend=None) -> tuple[float, float]:
     """(mean cross-entropy, share of tokens the model ranks first) over the held-back replies, with the adapters in
-    `theta`. For people following the job, not part of any check."""
+    `theta`. For people following the job, not part of any check. A decision model's: its mean log loss over the
+    held-back items, and the share whose most likely option is right (decision.evaluate)."""
     import torch
 
+    if spec.kind == "decision":
+        from . import decision
+        return decision.evaluate(spec, data, theta, backend)
     rt = runtime(spec, data, device_of(backend))
     b = torch.tensor(np.asarray(theta[spec.parts[0]], dtype=np.float32), device=rt.device)
     adapters = {name: (a, b[s].view(shape)) for name, a, s, shape in rt.lora[spec]}
@@ -655,7 +664,8 @@ def _stored(a: np.ndarray, dtype: str) -> bytes:
 
 
 def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, about: dict | None = None, *,
-                  float32: bool = False, read_file=None, progress=None) -> dict:
+                  float32: bool = False, read_file=None, progress=None, edit_file=None, edit_tensor=None,
+                  readme=None) -> dict:
     """The base model with the adapters folded in, W + (alpha/rank)·B·A for every adapted projection, saved as a
     Hugging Face model folder that loads as the base itself does (AutoModelForCausalLM.from_pretrained, vLLM,
     llama.cpp's converter, Ollama), with no PEFT. No PyTorch either: it's NumPy, tensor by tensor.
@@ -669,7 +679,12 @@ def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, 
     with the adapters beside W in float32, so rounding W + B·A back to bf16 moves the weights off what they trained,
     by a share of the change that's small for a big change and large for a tiny one: it's measured ("rounding", the
     rounding error's size over the change's, root-mean-square over every adapted weight) and reported. float32 keeps
-    the change (to float32's precision) at twice the size. Returns what finetune.json says."""
+    the change (to float32's precision) at twice the size. Returns what finetune.json says.
+
+    A model of another layout (decision.export_merged's Laya checkpoints) names an adapted module's weight with
+    `spec.weight_of`, and may change a small file (`edit_file(path, bytes)`), an unadapted tensor
+    (`edit_tensor(name, float32 values)`, returning the same array to keep the stored bytes) and the README
+    (`readme(info, folder name)`)."""
     from . import hub
 
     if manifest.sha256 != spec.manifest:
@@ -678,9 +693,10 @@ def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, 
     if out.exists() and any(out.iterdir()) and not (out / "finetune.json").exists():
         raise FileExistsError(f"{out} has files in it that aren't an earlier merged model: pick another --out")
     b = np.asarray(theta[spec.parts[0]], dtype=np.float64)
+    weight_of = getattr(spec, "weight_of", None) or (lambda module: f"{module}.weight")
     changes, i = {}, 0
     for (name, rows, _), a in zip(spec.modules(), spec.lora_a()):
-        changes[f"{name}.weight"] = (b[i:i + rows * spec.rank].reshape(rows, spec.rank), a.astype(np.float64))
+        changes[weight_of(name)] = (b[i:i + rows * spec.rank].reshape(rows, spec.rank), a.astype(np.float64))
         i += rows * spec.rank
     missing = [n for n in changes if n not in manifest.tensors]
     if missing:
@@ -726,6 +742,11 @@ def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, 
                     change2 += float(np.sum(change ** 2))
                 else:
                     data = raw if dtype_of[n] == e.dtype else _stored(_as_f32(e.dtype, raw, e.shape), dtype_of[n])
+                    if edit_tensor is not None:
+                        values = _as_f32(e.dtype, raw, e.shape)
+                        edited = edit_tensor(n, values)
+                        if edited is not values:
+                            data = _stored(np.asarray(edited, dtype=np.float32).reshape(e.shape), dtype_of[n])
                 f.write(data)
     if len(files) > 1 or hub.INDEX_FILE in manifest.files:
         (tmp / hub.INDEX_FILE).write_text(json.dumps({"metadata": {"total_size": total},
@@ -736,6 +757,8 @@ def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, 
         if p.endswith(".safetensors") or p == hub.INDEX_FILE:
             continue
         data = read_file(p)
+        if edit_file is not None:
+            data = edit_file(p, data)
         if p == "config.json" and float32:
             cfg = json.loads(data)
             cfg["dtype" if "dtype" in cfg else "torch_dtype"] = "float32"  # (newer transformers name it dtype)
@@ -749,7 +772,8 @@ def export_merged(spec: LoraSpec, theta: np.ndarray, manifest, out: str | Path, 
             "dtype": {"BF16": "bfloat16", "F16": "float16", "F32": "float32"}[stored[0]] if len(stored) == 1 else stored,
             "rounding": math.sqrt(err2 / change2) if change2 else 0.0, "trained": change2 > 0}
     (tmp / "finetune.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8", newline="\n")
-    (tmp / "README.md").write_text(_merged_readme(spec, info, out.name), encoding="utf-8", newline="\n")
+    (tmp / "README.md").write_text((readme or (lambda i, f: _merged_readme(spec, i, f)))(info, out.name),
+                                   encoding="utf-8", newline="\n")
     if out.exists():
         shutil.rmtree(out)
     tmp.replace(out)
