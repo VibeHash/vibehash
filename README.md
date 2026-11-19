@@ -384,6 +384,16 @@ replies are learned. Workers need PyTorch and a GPU, and fetch the weights
 from Hugging Face once. [FINETUNING.md](FINETUNING.md) has the details, a run's
 results, and what the public network still needs.
 
+System 1 decision models like Laya fine-tune the same way, on a CSV of
+`text,label` rows, on a local test network for now:
+
+```bash
+python -m vibehash train tickets.csv --base convaiinnovations/laya --node http://127.0.0.1:8545 --wallet ~/.vibehash/testnet/requester.json
+python -m vibehash job download           # a Laya checkpoint for laya.Agent, the adapters merged in
+```
+
+[FINETUNING.md](FINETUNING.md), "System 1 decision models", says how.
+
 Disclaimer: All product names, logos, and brands are property of their
 respective owners and are used purely for identification. Vibe Hash isn't
 affiliated with or endorsed by them.
@@ -1076,6 +1086,9 @@ rule; `tests/test_setup.py` runs `setup` and `worker` with no terminal.
 | `vibehash/catalog.py` | The open-weight models `models` lists and `train --base` describes: live facts from Hugging Face, cached, the GPUs a team would need, and which are ready to fine-tune. `scripts/bake_models.py` writes them into the guide |
 | `vibehash/llm.py` | Pretrained Llama, Mistral, Qwen2, Qwen3 and SmolLM3 models in PyTorch, with LoRA: what fine-tunes train |
 | `vibehash/finetune.py` | Fine-tune jobs: the spec, token datasets, chats through the model's chat template, Adam on the adapters, PEFT export |
+| `vibehash/decision.py` | Fine-tunes of System 1 decision models like Laya: the spec, items in Laya's layout, scoring with calibration, the merged checkpoint |
+| `vibehash/decision_program.py` | A decision model's unit, op by op: the ModernBERT encoder, the decision head and the loss over the options |
+| `vibehash/decision_tracer.py` | Those ops in PyTorch, and the model's frozen weights on a device |
 | `vibehash/hub.py` | Hugging Face: pinned commits, manifests of tensor hashes, verified downloads by range into a cache |
 | `vibehash/data/` | The `fruit.csv` sample `vibehash example` writes, and the BIP39 word list |
 | `vibehash/storage.py` | SQLite chain and weights, content-addressed datasets |

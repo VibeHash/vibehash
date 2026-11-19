@@ -79,6 +79,55 @@ Cost      10 VIBE a round · a budget of 100 VIBE buys 10 rounds (3.3 epochs), p
   while another program on the machine was downloading 8 GB; they retried and
   that round accepted 5 units.
 
+## System 1 decision models, like Laya
+
+A System 1 decision model reads a question, its options and a case in one
+pass and gives each option a probability, in about 20 ms. It doesn't write
+text. [Laya](https://huggingface.co/convaiinnovations/laya) is one: a
+ModernBERT-large encoder with a small decision head, 421M weights, Apache-2.0.
+The network fine-tunes it with the same jobs, units, checks and averaging as
+a language model (DESIGN.md §8, "Decision models"). For now it runs on local
+test networks only: their genesis says `"decision": true`, and a new
+`vibehash testnet` has it. Disputes over its units can't be refereed yet,
+which is why.
+
+```bash
+vibehash testnet --job none --workers 3 --device cuda
+vibehash train tickets.csv --base convaiinnovations/laya --node http://127.0.0.1:8545 --wallet ~/.vibehash/testnet/requester.json
+vibehash job download
+```
+
+- **The data** is a CSV with `text` and `label` columns, or JSON lines of
+  `{"text": ..., "label": ...}`. The rows become one question whose options
+  are the labels, in the order they first appear. `--labels labels.json`
+  gives the order and a description for each (`{"label": "description"}`),
+  which Laya reads as "label: description". `--instructions` gives the
+  question, which defaults to Laya's "Classify the input into the correct
+  category." `--label` names another label column.
+- **The layout** is Laya's own, made with the checkpoint's tokenizer at its
+  own budgets: `[CLS] choice question: ... [SEP] [MASK] option ... [SEP] text
+  [SEP]`. It matches `laya`'s `build_sequence` token for token. Too many
+  options for Laya's 192-token question budget get cut. If two come out the
+  same, `train` says so and stops.
+- **Training** puts LoRA rank 16 on every linear layer of the encoder and the
+  head, with A frozen and Adam on B at 2e-4, 16 items a step. The loss is
+  cross-entropy over the options. A tenth of the rows (at most 128) are held
+  back, and each round reports their mean log loss and the share answered
+  right.
+- **The result** of `job download` is a folder in Laya's layout, the base
+  with the adapters merged in, which `laya.Agent("folder")` loads as it loads
+  the base. The base's fitted temperatures are reset to 1, because they were
+  fitted to the base and not to the fine-tune.
+
+What isn't done yet:
+- The referee has no arithmetic for these ops. A cheat that stays inside
+  Adam's bound is rejected by its checkers but keeps its stake: its dispute
+  ends unchecked. That is the step before the public network.
+- Laya's default `rlcd` loss isn't here. Its random noise would have to be
+  drawn the same way in every replay.
+- Nobody has measured a fine-tune of the real Laya on a test network
+  against Laya's own single-GPU recipe yet.
+
 ## Principles
 
 1. **One command on each side.** A fine-tune is one `train` command, and a

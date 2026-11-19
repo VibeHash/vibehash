@@ -334,6 +334,8 @@ def cmd_genesis_create(a):
         g["earn_in"] = True
     if a.es:
         g["es"] = True
+    if a.decision:
+        g["decision"] = True
     starters = []
     for path in a.starter_job or []:
         try:
@@ -356,6 +358,8 @@ def cmd_genesis_create(a):
         print(f"workers can start with no stake: their first {fmt(econ.MIN_STAKE)} of pay becomes their stake")
     if a.es:
         print("Evo jobs can run on it (\"es\": true)")
+    if a.decision:
+        print("fine-tunes of decision models like Laya can run on it (\"decision\": true)")
     for spec in starters:
         print(f"starter job {spec.get('id')}: on chain from block one, owned by nobody, paying miners new coins in "
               "rounds no paid job wants")
@@ -1448,6 +1452,8 @@ def _finetune(a) -> None:
     src = Path(a.data)
     if not src.is_file():
         sys.exit(f"error: {src} doesn't exist")
+    if _decision_base(ref):
+        return _decision(a, ref)
     facts, _ = catalog.lookup([ref])
     f = facts.get(ref)
     if f is not None and f.architecture is not None and not catalog.ready(f):  # needs a team, or isn't one we train
@@ -1465,7 +1471,7 @@ def _finetune(a) -> None:
     print(f"Reading {src.name} with {ref}'s tokenizer and chat template…", file=sys.stderr)
     try:
         p = finetune.plan(src, ref, job_id=job_id, budget=a.budget, fee=a.fee, rank=a.rank, lr=a.lr,
-                          max_len=a.max_len, units_per_round=a.units, ask=check_weights, progress=_progress(),
+                          max_len=a.max_len or 512, units_per_round=a.units, ask=check_weights, progress=_progress(),
                           licence=f.licence if f else None)
     except (finetune.DataError, hub.HubError, hub.IntegrityError, ValueError, OSError) as e:
         sys.exit(f"error: {e}")
@@ -1497,6 +1503,78 @@ def _finetune(a) -> None:
     else:
         print(f"\nWatch it train:     {prog()} job watch\n"
               f"When it's trained:  {prog()} job download   (a LoRA adapter for transformers, PEFT and vLLM)")
+
+
+def _decision_base(ref: str) -> bool:
+    """Whether `ref` names a Laya checkpoint (decision.is_decision_repo): asked of the Hub, and False if it can't say
+    (the language-model path then says what's wrong)."""
+    from . import decision, hub
+    try:
+        h = hub.Hub()
+        return decision.is_decision_repo(h.list_files(*h.resolve(ref)))
+    except (hub.HubError, hub.IntegrityError, ValueError, OSError):
+        return False
+
+
+def _decision(a, ref: str) -> None:
+    """`train DATA --base <a Laya checkpoint>`: fine-tune a System 1 decision model on labelled text (decision.py), one
+    choice over the labels. As _finetune: the weights are streamed once to pin their hashes only if the poster agrees,
+    then one question before anything is uploaded, posted or spent."""
+    from . import decision, hub, trainui
+    from .blobs import file_sha256
+
+    src = Path(a.data)
+    job_id = a.id or f"{re.sub(r'[^a-z0-9._-]+', '-', src.stem.lower()).strip('-._')[:40] or 'labels'}-{secrets.token_hex(2)}"
+    home = _job_home(job_id)
+    if home.exists():
+        sys.exit(f"you already have a job called {job_id}; pick another name with --id")
+
+    def check_weights(total: int) -> bool:
+        print(f"To pin the model, its weights are checked first: {total / 1e9:.1f} GB streamed once from Hugging Face "
+              "and hashed tensor by tensor (nothing is kept; done once per model).")
+        return ask("Check them now?", a.yes)
+    url = node_of(a)
+    node = NodeClient(url)
+    if node.get("/genesis").get("decision") is not True:  # checked first: on any other network nothing is fetched
+        sys.exit(f"error: {url}'s network doesn't take decision models' fine-tunes yet: they're a prototype, for test "
+                 f"networks whose genesis says \"decision\": true (a new `{prog()} testnet` does)")
+    print(f"Reading {src.name} with {ref}'s tokenizer, in Laya's layout…", file=sys.stderr)
+    try:
+        descriptions = decision.read_descriptions(a.labels) if a.labels else None
+        p = decision.plan(src, ref, job_id=job_id, budget=a.budget, fee=a.fee, rank=a.rank, lr=a.lr,
+                          units_per_round=a.units, instructions=a.instructions or decision.DEFAULT_INSTRUCTIONS,
+                          descriptions=descriptions, label_column=a.label or "label", max_len=a.max_len,
+                          ask=check_weights,
+                          progress=_progress())
+    except (decision.DataError, hub.HubError, hub.IntegrityError, ValueError, OSError) as e:
+        sys.exit(f"error: {e}")
+    p.workers = _recent_workers(node)
+    print("\n" + p.describe(src.name) + "\n")
+    if not ask("Post it?", a.yes):
+        print("Nothing was posted, and nothing was spent.")
+        return
+    job, spec = p.job, p.job.spec
+    npz = p.prepared.data.save(home / "dataset.npz")
+    job.data_source = {"kind": "tokens", "sha256": file_sha256(npz)}
+    job.validate()
+    (home / "job.json").write_text(json.dumps({
+        "job_id": job_id, "node": url, "source": str(src.resolve()), "kind": "decision", "base": spec.base,
+        "labels": p.prepared.labels, "train_rows": len(p.prepared.data.train_len),
+        "val_rows": len(p.prepared.data.val_len), "budget": a.budget, "fee": a.fee}, indent=2))
+    keys = load_wallet(wallet_of(a))
+    try:
+        node.upload_dataset(keys, npz)
+        node.send_tx(keys, "post_job", "system", a.budget, job.spec_json())
+    except NodeError:
+        shutil.rmtree(home, ignore_errors=True)
+        raise
+    settings.save(last_job=job_id)
+    print(f"Posted job {job_id}: fine-tuning {spec.repo} on {src.name}")
+    if trainui.supported(a.plain):
+        _follow(job_id, url, budget=a.budget, posted=True)
+    else:
+        print(f"\nWatch it train:     {prog()} job watch\n"
+              f"When it's trained:  {prog()} job download   (a Laya checkpoint, for laya.Agent)")
 
 
 def _evo(a) -> None:
@@ -1689,7 +1767,8 @@ def cmd_job_status(a):
           + (f", in round {now['round']} right now" if now.get("job_id") == job_id else ""))
     if rounds:
         acc = [r["val_acc"] for r in rounds]
-        held = "of held-back reply tokens predicted" if info["spec"].get("base") else "on held-back rows"
+        model = info["spec"].get("model") if isinstance(info["spec"].get("model"), dict) else {}
+        held = "of held-back items answered right" if model.get("family") == "laya" else             "of held-back reply tokens predicted" if info["spec"].get("base") else "on held-back rows"
         print(f"  rounds     {len(rounds)} done, {sum(r['accepted_units'] for r in rounds):,} units of training accepted")
         print(f"  accuracy   {acc[-1]:.1%} {held} (started at {acc[0]:.1%}; best {max(acc):.1%})")
         if len(acc) > 1:
@@ -1816,6 +1895,8 @@ def _download_adapter(a, node: NodeClient, job, info: dict, weights, receipt_pat
     trained = (f"trained in {done} round{'s' * (done != 1)}; held-back loss {loss:.4f} as the last scored round began "
                "(workers score each round's model in the job's next round)") if done else \
         "not trained yet: B is still zero, so it changes nothing"
+    if job.decision:  # a Laya checkpoint with the adapters merged in: what `laya` loads
+        return _download_decision(a, node, job, weights, about, source, trained)
     if a.merged:
         return _download_merged(a, node, job, weights, about, source, trained)
     if a.float32:
@@ -1857,6 +1938,28 @@ def _download_merged(a, node: NodeClient, job, weights, about: dict, source, tra
           "Use it as you would the base model:\n\n"
           f"  model = AutoModelForCausalLM.from_pretrained(\"{out.as_posix()}\")\n\n"
           f"or vLLM: vllm serve {out.as_posix()}")
+    return out
+
+
+def _download_decision(a, node: NodeClient, job, weights, about: dict, source, trained: str) -> Path:
+    """A decision model's fine-tune: the base Laya checkpoint with its adapters merged in (decision.export_merged),
+    which `laya.Agent(folder)` loads as it loads the base."""
+    from . import decision, hub
+
+    spec = job.spec
+    out = Path(a.out or (f"{Path(source).stem}-laya" if source else f"{job.job_id}-laya"))
+    try:
+        manifest = _base_manifest(node, job)
+        print(f"Merging the adapters into {spec.repo} ({hub._gb(manifest.total_bytes)} of weights, downloaded once and "
+              "kept in the tensor cache, as a worker's are)", flush=True)
+        made = decision.export_merged(spec, weights, manifest, out, about, float32=a.float32, progress=_progress())
+    except (NodeError, hub.HubError, hub.IntegrityError, ValueError, FileExistsError, KeyError) as e:
+        sys.exit(f"error: {e}")
+    settings.save(last_model=str(out.resolve()))
+    print(f"saved {out}/: {spec.repo} with the adapters merged in, {made['dtype']}, {trained}\n"
+          "Its temperatures are reset to 1: the probabilities the job trained and was scored on.\n"
+          "Use it as you would the base:\n\n"
+          f"  import laya\n  agent = laya.Agent(\"{out.as_posix()}\")")
     return out
 
 
@@ -2353,7 +2456,8 @@ def _testnet(a, held: list) -> None:
                    "allocations": {keys["requester"].address: 10_000 * SYN_PER_VIBE}, "stakes": {},
                    "bootstrap": {keys[v].address: 10 * SYN_PER_VIBE for v in validators}, "earn_in": True,
                    "validators": {keys[v].address: f"http://{public}:{port}" for v, port in zip(validators, ports)},
-                   "economics": econ.NEW_SCHEDULES["testnet"].to_dict()}
+                   "economics": econ.NEW_SCHEDULES["testnet"].to_dict(),
+                   "decision": True}  # it takes fine-tunes of decision models like Laya (ledger.DECISION_GATE)
         if evo:  # a chain that takes ES jobs (ledger.ES_GATE), whose workers are staked: nothing else here to earn it on
             genesis |= {"es": True, "stakes": {keys[n].address: es_local.STAKE for n in worker_names}}
         (d / "genesis.json").write_text(json.dumps(genesis, indent=2))
@@ -2746,6 +2850,9 @@ def parser() -> argparse.ArgumentParser:
                    help="require workers to be given stake; by default they can start with none and earn it")
     p.add_argument("--es", action="store_true",
                    help="let Evo jobs run on this network (\"es\": true); it can't be turned on later")
+    p.add_argument("--decision", action="store_true",
+                   help="let fine-tunes of System 1 decision models like Laya run on this network (\"decision\": true), "
+                        "a prototype for test networks; it can't be turned on later")
     p.add_argument("--starter-job", action="append", metavar="SPEC.json",
                    help="a job on chain from block one, owned by nobody, paying only new coins (fee 0), so the "
                         "network can mine with no starting coins; a spec as `vibehash job template` writes")
@@ -2990,11 +3097,17 @@ def parser() -> argparse.ArgumentParser:
                    "huggingface.co address. Without a data file, shows what the model would take")
     p.add_argument("--rank", type=int, default=16, help="fine-tunes: LoRA rank (default 16)")
     p.add_argument("--lr", type=float, help="fine-tunes: Adam's learning rate (default: by model size)")
-    p.add_argument("--max-len", type=int, default=512, help="fine-tunes: longest sequence in tokens; longer chats are "
-                   "cut (default 512, at most 2048; longer sequences make disputes too big to play from home)")
+    p.add_argument("--max-len", type=int, help="fine-tunes: longest sequence in tokens; longer chats are cut (default "
+                   "512, at most 2048; longer sequences make disputes too big to play from home; a decision model's: "
+                   "its checkpoint's)")
     p.add_argument("--units", type=int, default=8, help="fine-tunes: units of training a round (default 8)")
     p.add_argument("--yes", "-y", action="store_true", help="fine-tunes: don't ask before checking weights or posting")
-    p.add_argument("--label", help="the column to predict (default: the last one)")
+    p.add_argument("--label", help="the column to predict (default: the last one; a decision model's: label)")
+    p.add_argument("--instructions", help="decision models (a Laya checkpoint as --base, a file of text,label rows): "
+                   "the question the model answers about each text (default: Laya's \"Classify the input into the "
+                   "correct category.\")")
+    p.add_argument("--labels", metavar="LABELS.json", help="decision models: a JSON object of {\"label\": "
+                   "\"description\"}, read as the options and their order; Laya reads each as \"label: description\"")
     p.add_argument("--evo", action="store_true", help="Evo mode: post an Evo job, training --base (default "
                    "Qwen/Qwen2.5-0.5B-Instruct) by evolution on puzzles the chain draws, no data file. For local test "
                    "networks for now (`testnet --evo`)")

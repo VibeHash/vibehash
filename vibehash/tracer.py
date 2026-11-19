@@ -26,7 +26,10 @@ def _rot(x: torch.Tensor) -> torch.Tensor:
 
 class Executor:
     """Runs a Program's ops on states of `rt` (finetune._Runtime: the base model on one device). `tamper`, for tests,
-    is a worker that cheats in one op: tamper(where, op) gives a factor its output is multiplied by, or None."""
+    is a worker that cheats in one op: tamper(where, op) gives a factor its output is multiplied by, or None. `ops`:
+    the table of ops by kind, RUN unless a subclass has more (decision_tracer.DecisionExecutor)."""
+
+    ops: dict | None = None
 
     def __init__(self, rt, spec, program, tamper=None):
         self.model, self.device, self.spec, self.prog, self.tamper = rt.model, rt.device, spec, program, tamper
@@ -65,7 +68,7 @@ class Executor:
     # --- running ---
 
     def run(self, op: Op, st: dict) -> None:
-        out = RUN[op.kind](self, op, st)
+        out = (self.ops or RUN)[op.kind](self, op, st)
         if out is not None:
             if self.tamper is not None:
                 f = self.tamper(self.where, op)
@@ -333,6 +336,14 @@ def r_free(ex, op, st):
 
 
 RUN = {name[2:]: fn for name, fn in globals().items() if name.startswith("r_")}
+
+
+def executor(rt, spec, program, tamper=None) -> "Executor":
+    """The executor a fine-tune's units run on: a decision model's (decision_tracer.py), else a FastExecutor."""
+    if getattr(spec, "kind", None) == "decision":
+        from .decision_tracer import DecisionExecutor
+        return DecisionExecutor(rt, spec, program, tamper)
+    return FastExecutor(rt, spec, program, tamper)
 
 
 # --- a fine-tune's executor, with the work Executor repeats done once ----------------------------------------------
@@ -604,7 +615,7 @@ class Party:
         self._sending_lock = threading.Lock()
 
     def executor(self, prog, honest: bool) -> Executor:
-        return FastExecutor(self.rt, self.spec, prog, None if honest else self.tamper)
+        return executor(self.rt, self.spec, prog, None if honest else self.tamper)
 
     def gpu(self):
         """The device's lock (finetune._Runtime.busy) around a re-run, so a dispute's and a check's never hold two

@@ -637,7 +637,13 @@ def tile_rows(shape: tuple[int, int], leaf: int) -> list[tuple[int, int, int]]:
 
 def judge(op, x, leaf: int, said: np.ndarray) -> tuple[bool, str]:
     """Whether the worker's numbers `said` for one tile of `op`'s output are what float32 can make of its inputs.
-    (passed, why) — `why` names the worst number either way, for the record."""
+    (passed, why) — `why` names the worst number either way, for the record.
+
+    A decision model's ops (decision_program.py) have no entries here yet, its known kinds included (their bounds
+    weren't measured on its windowed attention, LayerNorms or f16 weights): every tile of one is Unresolved, so its
+    disputes end unchecked rather than slash an honest party. Such jobs run only where ledger.DECISION_GATE allows."""
+    if getattr(getattr(x, "outside", None) and x.outside.spec, "kind", None) == "decision":
+        raise Unresolved(f"{op.kind} → {op.out}: a decision model's ops aren't refereed yet")
     if op.kind in CHOICES:  # a choice: judged by whole rows of the output against the scores it was chosen from
         said = np.asarray(said, dtype=np.float64)
         at = 0

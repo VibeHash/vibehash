@@ -646,6 +646,7 @@ def report(job_id: str, info: dict, rows: list[dict], receipt: dict | None, node
     spec = info.get("spec") if isinstance(info.get("spec"), dict) else {}
     receipt = receipt if isinstance(receipt, dict) else {}
     fine = "base" in spec
+    right = "items answered right" if isinstance(spec.get("model"), dict) and spec["model"].get("family") == "laya"         else "reply tokens predicted right"  # a decision model's (decision.py) are items, a language model's tokens
     now = time.time() if now is None else now
     model = info.get("model") if isinstance(info.get("model"), dict) else {}
     lines = [f"# How {job_id} was trained", "",
@@ -677,7 +678,7 @@ def report(job_id: str, info: dict, rows: list[dict], receipt: dict | None, node
             acc = f"{a['accuracy']:.1%} → {b['accuracy']:.1%}" if a["accuracy"] is not None and b["accuracy"] is not None else None
             if fine:
                 lines.append("- **Held-back loss**: " + (loss or "not reported")
-                             + (f"; reply tokens predicted right: {acc}" if acc else "") + ". A fine-tune's workers score "
+                             + (f"; {right}: {acc}" if acc else "") + ". A fine-tune's workers score "
                              "the model each round starts from, so the last score is the model before its newest round.")
             else:
                 best = max((r["accuracy"] for r in scored if r["accuracy"] is not None), default=None)

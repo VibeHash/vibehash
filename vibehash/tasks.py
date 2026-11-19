@@ -9,6 +9,7 @@ from enum import Enum
 import numpy as np
 
 from .crypto import h256
+from .decision import DecisionDataset, DecisionSpec, is_decision_npz, is_decision_spec
 from .deepseek_job import DeepSeekData, DeepSeekSpec, TokenFile, is_deepseek_spec
 from .es import ES_KEYS, EsSpec, is_es_spec
 from .finetune import LoraSpec, TokenDataset
@@ -101,6 +102,12 @@ class TrainingJob:
         return isinstance(self.spec, es2.Spec2) and not self.spec.model.get("vocab")
 
     @property
+    def decision(self) -> bool:
+        """Whether it fine-tunes a System 1 decision model, like Laya (decision.py): a fine-tune whose model is a
+        decision model's and whose data is decision items."""
+        return isinstance(self.spec, DecisionSpec)
+
+    @property
     def deepseek(self) -> bool:
         """Whether it's a DeepSeek-V4.1 top-layers job: a prep of the frozen layers, then training rounds."""
         return isinstance(self.spec, DeepSeekSpec)
@@ -182,12 +189,13 @@ class TrainingJob:
 
     @classmethod
     def _from_finetune(cls, d: dict, requester: str, budget: int, deepseek: bool = False) -> "TrainingJob":
-        keys = FINETUNE_KEYS | ({"deepseek"} if deepseek else set())
+        keys = FINETUNE_KEYS | ({"deepseek"} if deepseek else set()) | ({"budgets"} if is_decision_spec(d) else set())
         if set(d) - keys:
             raise InvalidJob(f"a fine-tune's spec has no field {sorted(set(d) - keys)[0]!r}")
         return cls(
             job_id=d["id"], requester=requester, budget=budget, fee_per_round=int(d["fee_per_round"]),
-            spec=(DeepSeekSpec if deepseek else LoraSpec).from_json(d, seed=int(d["init_seed"])),
+            spec=(DeepSeekSpec if deepseek else DecisionSpec if is_decision_spec(d) else LoraSpec).from_json(
+                d, seed=int(d["init_seed"])),
             data_source=dict(d["data"]),
             init_seed=int(d["init_seed"]), lr=float(d["lr"]), batch_size=int(d["batch_size"]),
             steps_per_unit=int(d["steps_per_unit"]), checkpoint_every=int(d["checkpoint_every"]),
@@ -329,6 +337,8 @@ class TrainingJob:
             return
         if self.finetune != isinstance(data, TokenDataset):
             raise InvalidJob("a fine-tune trains on token sequences, and other jobs on tables")
+        if self.decision != isinstance(data, DecisionDataset):
+            raise InvalidJob("a decision model trains on decision items (decision.DecisionDataset), and no other job does")
         if self.finetune:
             try:
                 data.check(self.spec)
@@ -440,6 +450,8 @@ def load_dataset(path, max_bytes: int | None = None) -> Dataset | TokenDataset |
         raise ValueError(f"not a dataset (.npz): {e}") from e
     if names == {"tokens", "lengths", "learn"}:
         return TokenFile.from_npz(path, max_bytes)
+    if is_decision_npz(names):
+        return DecisionDataset.from_npz(path, max_bytes)
     return TokenDataset.from_npz(path, max_bytes) if "train_ids" in names else Dataset.from_npz(path, max_bytes)
 
 
