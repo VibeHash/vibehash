@@ -112,11 +112,12 @@ class TinyLaya:
         self.tensors = weights(self.encoder, self.agent, seed)
         (self.folder / "encoder").mkdir(parents=True, exist_ok=True)
         (self.folder / "tokenizer").mkdir(parents=True, exist_ok=True)
-        (self.folder / "config.json").write_text(json.dumps({"model_type": "laya", "architectures": ["LayaTypedDecisions"]}))
-        (self.folder / "encoder" / "config.json").write_text(json.dumps(self.encoder, indent=2))
-        (self.folder / "rl_agent_config.json").write_text(json.dumps(self.agent, indent=2))
+        top = json.dumps({"model_type": "laya", "architectures": ["LayaTypedDecisions"]})
+        (self.folder / "config.json").write_bytes(top.encode())
+        (self.folder / "encoder" / "config.json").write_bytes(json.dumps(self.encoder, indent=2).encode())
+        (self.folder / "rl_agent_config.json").write_bytes(json.dumps(self.agent, indent=2).encode())
         (self.folder / "tokenizer" / "tokenizer.json").write_bytes(tokenizer_json())
-        (self.folder / "tokenizer" / "tokenizer_config.json").write_text(json.dumps(TOKENIZER_CONFIG))
+        (self.folder / "tokenizer" / "tokenizer_config.json").write_bytes(json.dumps(TOKENIZER_CONFIG).encode())
         write_safetensors(self.folder / "model.safetensors", self.tensors)
         self.commit = hashlib.sha1((self.folder / "model.safetensors").read_bytes()).hexdigest()
         self.repo = "tiny/laya"
@@ -165,9 +166,11 @@ class TinyLaya:
         return out
 
     def dataset(self, n: int = 60, seed: int = 1, path: Path | None = None) -> decision.DecisionDataset:
+        """The rows prepared as `vibehash train` prepares them. The file is written as bytes, since prepare seeds its
+        split from them: written as text, Windows' line endings would give a different split than Linux's."""
         path = path or self.home / f"rows-{n}-{seed}.csv"
         lines = ["text,label"] + [f"{t},{label}" for t, label in self.rows(n, seed)]
-        path.write_text("\n".join(lines) + "\n")
+        path.write_bytes(("\n".join(lines) + "\n").encode())
         p = decision.prepare(path, self.tokenizer(), self.manifest_bytes, self.encoder_bytes, self.agent_bytes)
         return p.data
 

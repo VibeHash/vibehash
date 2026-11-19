@@ -5,6 +5,7 @@ model is checked against transformers' ModernBertModel and PyTorch's own nn.Tran
 laya.common.DecisionModel builds them, when transformers is installed.
 """
 import copy
+import dataclasses
 import importlib.util
 import json
 import tempfile
@@ -484,7 +485,7 @@ class ProtocolTests(unittest.TestCase):
         chain = Chain({req.address: 1000 * VIBE}, stakes={w.address: 10 * VIBE for w in workers}, decision=True)
         proto = Protocol(chain, workers, CoordinatorConfig(), seed=3)
         job = job_of(tiny.spec(seq_len=data.train_ids.shape[1]), data_source={"kind": "tokens", "sha256": sha},
-                     units_per_round=9, lr=1e-2, batch_size=4, steps_per_unit=8, memory_mb=2048, budget=100 * VIBE,
+                     units_per_round=9, lr=3e-3, batch_size=4, steps_per_unit=8, memory_mb=2048, budget=100 * VIBE,
                      fee_per_round=10 * VIBE)
         job.attach_data(load_dataset(path), sha)
         proto.post_job(req, job)
@@ -504,7 +505,14 @@ class ProtocolTests(unittest.TestCase):
                 self.assertLess(stake, 10 * VIBE, w.behavior)
             else:
                 self.assertGreaterEqual(stake, 10 * VIBE, w.behavior)
-        self.assertLess(reports[1].val_loss, reports[0].val_loss, "the averaged units trained the model")
+        # A round's val_loss is its scorers' score of the model it started from, over six held-back items: too few to
+        # show training, and on this toy set they swing either way. The items the units drew from show it.
+        d = job.data
+        train = dataclasses.replace(d, val_ids=d.train_ids, val_len=d.train_len, val_mask=d.train_mask,
+                                    val_target=d.train_target, val_type=d.train_type)
+        base = decision.evaluate(job.spec, train, job.spec.init_params())[0]
+        self.assertLess(decision.evaluate(job.spec, train, reports[-1].params)[0], base - 0.01,
+                        "the averaged units trained the model")
 
         class Recheck:
             def array(self, bid, job):
