@@ -4,4 +4,4 @@
 # GPU from pytorch.org first. Newer releases will likely work, but these are the ones tested.
 torch>=2.6
 transformers==5.22.2
-peft==0.21.2
+peft==0.21.3
