@@ -223,8 +223,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("--require-hashes -r scripts/uv-requirements.txt", before_manifest)  # uv is hash-pinned
 
     def test_uv_is_installed_from_a_hash_pinned_file(self):
+        """One exact version and nothing but its sha256 lines. Dependabot writes a hash for every wheel PyPI has for
+        that version; pip accepts a download only if it matches one of them, so more lines are still a pin."""
         text = (ROOT / "scripts" / "uv-requirements.txt").read_text(encoding="utf-8")
-        self.assertRegex(text, r"^uv==\d+\.\d+\.\d+ \\\n    --hash=sha256:[0-9a-f]{64}\n$")
+        self.assertRegex(text, r"^uv==\d+\.\d+\.\d+(?: \\\n    --hash=sha256:[0-9a-f]{64})+\n$")
 
     def test_the_two_compiles_are_the_ones_the_script_names(self):
         for flag in ("--generate-hashes", "--universal", "--no-emit-package torch", "--python-version 3.10",
