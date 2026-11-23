@@ -1020,6 +1020,59 @@ once a round would be a ledger change.
   before refuses version 3 blocks outright, so a mixed set of validators stops at the first new block instead of
   forking over a fine-tune. Every validator upgrades first (HANDOFF).
 
+#### Decision models (System 1, like Laya)
+
+A System 1 decision model reads a question, its options and a case in one forward pass and gives each option a
+probability. Laya (`convaiinnovations/laya`, Apache-2.0, 421M weights) is one: a ModernBERT-large encoder and a small
+decision head. Its fine-tune is a fine-tune job like the ones above. Units, checkpoints of [B | m | v], replayed
+segments, Adam's bound, averaging B and the scorers are unchanged. The spec, the data and the ops differ
+(`decision.py`, `decision_program.py`, `decision_tracer.py`):
+
+- **The spec** (`decision.DecisionSpec`, a LoraSpec) has model family `laya`. Its dims are the encoder's (vocab, width,
+  layers, heads, MLP width, the sliding window and how often a layer is global) and the head's layer count. Its LoRA
+  targets are every linear layer: the encoder's fused query-key-value projection, its output projection, the MLP's
+  `Wi` and `Wo`, the head layers' four projections and the scorer's hidden layer. That's 4.96M trained weights at
+  rank 16, so a checkpoint is about 60 MB. Laya's own recipe trains every weight. The network trains adapters, whose
+  average is exact (finetune.py).
+- **The data** (`decision.DecisionDataset`, a TokenDataset) is Laya's layout, `[CLS] choice question: <instructions>
+  [SEP] [MASK] option 0 [MASK] option 1 ... [SEP] <case> [SEP]`, built by the poster with the checkpoint's own
+  tokenizer at its own budgets (`max_len`, `head_max_len`). The mask marks each option's `[MASK]`, and `target` holds
+  each item's probability for each option. On the real Laya tokenizer it is identical to `laya.common.build_sequence`,
+  token for token. That was checked on 120 sequences with 2 to 77 options (2026-11-18). The manifest pins
+  `encoder/config.json`, `rl_agent_config.json` and the tokenizer.
+- **The loss** is cross-entropy against the target over the item's own options (Laya's `ce` loss), a strictly proper
+  scoring rule, and the step is the mean over its items. Laya's default `rlcd` loss adds a policy-gradient term over
+  noisy logits. That noise is drawn fresh each step, so a replay would have to draw it too. It is left for later.
+- **The ops** follow program.py's rules: float32, frozen weights cast exactly, attention written out (bidirectional;
+  a sliding layer masks keys further than the window with −∞), one item at a time, and each layer recomputed in its
+  backward. The new kinds are LayerNorm and its backward, exact GELU and ModernBERT's gated form, ReLU, the rotary
+  tables per base, the type embedding, gathering the marker rows, scattering their gradient, and the loss.
+  The model's forward matches transformers' `ModernBertModel` plus PyTorch's `nn.TransformerEncoderLayer`, built as
+  `laya.common.DecisionModel` builds them, to about 1e-7 in float32 on the tiny test model. Every adapter's gradient
+  matches autograd (`tests/test_decision.py`). On the real Laya-421M (commit 85cc74dd) on the CPU, it matches `laya`'s
+  own DecisionModel to 3.4e-5 in probability, with the same top option on 20 of 20 Banking77 test items (2026-11-18).
+  Banking77's 77 options take 355 tokens. Laya's 192-token question budget would cut them until four pairs were
+  identical, so `prepare` raises the budget (here to 384), and the spec pins it (`budgets`) for the downloaded
+  checkpoint.
+- **Scoring** reports the held-back items' mean log loss and the share whose most likely option is right.
+  `decision.calibration` adds the Brier score and the expected calibration error. Calibration is the point of the
+  model.
+- **The result** (`job download`) is the base checkpoint with the adapters merged in, in Laya's layout, which
+  `laya.Agent(folder)` loads. The base's fitted temperatures belong to the base's logits, so they are reset to 1:
+  the probabilities the job trained and was scored on.
+
+**Not refereed yet, so gated.** The referee (`referee.py`) has no arithmetic for the new kinds. Its bounds were never
+measured on windowed attention, LayerNorms or f16 weights, even for the kinds it does know. So every tile of a
+decision model's op is `Unresolved`, and a dispute over one ends unchecked. No party is slashed on a guess. Until
+the referee has those entries, only a chain whose genesis takes decision models can hold such a job. The genesis
+says `"decision": true`, which becomes the memo `ledger.DECISION_GATE`, and every new `testnet` has it.
+
+This needs no block version. On a chain without the gate, a decision job's post_job is refused by the new rule. A
+node from before refuses it too: it reads the spec as a fine-tune of an unknown family. So every block of every
+existing chain is valid or invalid exactly as before. A node from before can't join a gated chain by mistake, since
+it refuses the first block that posts a decision job, as with Evo's gate. Taking decision jobs on the public chain
+will take the referee's entries, then a block version, as fine-tunes did (`FINETUNE_VERSION`).
+
 ---
 
 ## 9. What still stands between this and a mainnet

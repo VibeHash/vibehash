@@ -1,5 +1,6 @@
 """BFT consensus (consensus.py) on a simulated network: honest runs, crashed and lying proposers, double-voting
 validators, lost messages and partitions, with a fake clock so every run is exact and fast."""
+import contextlib
 import json
 import unittest
 
@@ -371,3 +372,49 @@ class ValidatorSetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecisionGateTests(unittest.TestCase):
+    """Decision models' fine-tunes (decision.py) came without a block version: on a chain whose genesis doesn't take them
+    (ledger.DECISION_GATE), a node with them refuses their post_job at every block version, as a node from before does
+    (it reads the spec as a fine-tune of an unknown family), so no existing chain's blocks change meaning."""
+
+    def setUp(self):
+        from vibehash import decision
+        from vibehash.tasks import TrainingJob
+
+        dims = {"family": "laya", "vocab": 50368, "hidden": 1024, "layers": 28, "heads": 16, "ffn": 2624, "window": 64,
+                "every": 3, "head_layers": 2}
+        spec = decision.DecisionSpec(base="hf:convaiinnovations/laya@" + "8" * 40, manifest="a" * 64, dims=dims)
+        job = TrainingJob("laya", "", budget=5 * SYN_PER_VIBE, fee_per_round=SYN_PER_VIBE, spec=spec,
+                          data_source={"kind": "tokens", "sha256": "b" * 64}, lr=2e-4, batch_size=16, steps_per_unit=16,
+                          checkpoint_every=4, tolerance=1e-4, max_update_ratio=1.0)
+        self.req = KeyPair.generate(b"decision-gate")
+        self.tx = Tx.signed(self.req, "post_job", "system", job.budget, 0, job.spec_json(), chain_id="t")
+
+    def apply(self, gate: bool, version: int, before: bool = False):
+        import copy
+        from unittest import mock
+
+        from vibehash import tasks
+        from vibehash.ledger import _apply_user_tx
+
+        s = copy.deepcopy(Chain({self.req.address: 100 * SYN_PER_VIBE}, chain_id="t", decision=gate).state)
+        with mock.patch.object(tasks, "is_decision_spec", lambda d: False) if before else contextlib.nullcontext():
+            _apply_user_tx(s, self.tx, 1, "t", version)
+        return s
+
+    def test_refused_at_every_version_without_the_gate_and_by_a_node_from_before(self):
+        from vibehash.ledger import VERSION
+
+        for version in range(1, VERSION + 1):
+            for before in (False, True):
+                with self.assertRaises(InvalidBlock, msg=(version, before)):
+                    self.apply(False, version, before)
+
+    def test_taken_on_a_gated_chain(self):
+        from vibehash.ledger import FINETUNE_VERSION, VERSION
+
+        self.assertIn("laya", self.apply(True, VERSION).jobs)
+        with self.assertRaises(InvalidBlock):
+            self.apply(True, FINETUNE_VERSION - 1)

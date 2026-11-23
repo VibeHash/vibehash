@@ -277,7 +277,7 @@ Write a genesis file: chain id, starting balances, stakes, validators and the is
 Write the genesis file every node of a new network starts from. Addresses come from `wallet create`. A validator named here needs stake of at least the minimum, from --stake or --bootstrap; a worker needs none when --no-earn-in isn't given, since its first pay becomes its stake. The file's hash identifies the network, so give every node the same file.
 
 ```
-vibehash genesis create [-h] --chain-id CHAIN_ID [--alloc ADDR=VIBE] [--stake ADDR=VIBE] [--validator ADDR=URL] --out OUT [--economics {mainnet,testnet}] [--bootstrap ADDR=VIBE] [--no-earn-in] [--es] [--starter-job SPEC.json]
+vibehash genesis create [-h] --chain-id CHAIN_ID [--alloc ADDR=VIBE] [--stake ADDR=VIBE] [--validator ADDR=URL] --out OUT [--economics {mainnet,testnet}] [--bootstrap ADDR=VIBE] [--no-earn-in] [--es] [--decision] [--starter-job SPEC.json]
 ```
 
 Flags:
@@ -291,6 +291,7 @@ Flags:
 - `--bootstrap ADDR=VIBE`: stake for a first validator that votes but can never be withdrawn or spent; burned if it leaves.
 - `--no-earn-in`: require workers to be given stake; by default they can start with none and earn it.
 - `--es`: let Evo jobs run on this network ("es": true); it can't be turned on later.
+- `--decision`: let fine-tunes of System 1 decision models like Laya run on this network ("decision": true), a prototype for test networks; it can't be turned on later.
 - `--starter-job SPEC.json`: a job on chain from block one, owned by nobody, paying only new coins (fee 0), so the network can mine with no starting coins; a spec as `vibehash job template` writes.
 
 Examples:
@@ -911,7 +912,7 @@ vibehash example
 Train a model on a CSV file: posts it as a job for the network to train.
 
 ```
-vibehash train [-h] [--base MODEL] [--rank RANK] [--lr LR] [--max-len MAX_LEN] [--units UNITS] [--yes] [--label LABEL] [--evo] [--budget BUDGET] [--fee FEE] [--hidden HIDDEN] [--id ID] [--node NODE] [--wallet WALLET] [--plain] [--tor] [--proxy URL] [--tor-mode {control-only,strict}] [data]
+vibehash train [-h] [--base MODEL] [--rank RANK] [--lr LR] [--max-len MAX_LEN] [--units UNITS] [--yes] [--label LABEL] [--instructions INSTRUCTIONS] [--labels LABELS.json] [--evo] [--budget BUDGET] [--fee FEE] [--hidden HIDDEN] [--id ID] [--node NODE] [--wallet WALLET] [--plain] [--tor] [--proxy URL] [--tor-mode {control-only,strict}] [data]
 ```
 
 Arguments:
@@ -923,10 +924,12 @@ Flags:
 - `--base MODEL`: fine-tune an open-weight model on a file of chats or text (JSON lines of {"messages": [...]} or {"text": ...}): a name from `models`, org/name or a huggingface.co address. Without a data file, shows what the model would take.
 - `--rank RANK`: fine-tunes: LoRA rank (default 16).
 - `--lr LR`: fine-tunes: Adam's learning rate (default: by model size).
-- `--max-len MAX_LEN`: fine-tunes: longest sequence in tokens; longer chats are cut (default 512, at most 2048; longer sequences make disputes too big to play from home).
+- `--max-len MAX_LEN`: fine-tunes: longest sequence in tokens; longer chats are cut (default 512, at most 2048; longer sequences make disputes too big to play from home; a decision model's: its checkpoint's).
 - `--units UNITS`: fine-tunes: units of training a round (default 8).
 - `--yes, -y`: fine-tunes: don't ask before checking weights or posting.
-- `--label LABEL`: the column to predict (default: the last one).
+- `--label LABEL`: the column to predict (default: the last one; a decision model's: label).
+- `--instructions INSTRUCTIONS`: decision models (a Laya checkpoint as --base, a file of text,label rows): the question the model answers about each text (default: Laya's "Classify the input into the correct category.").
+- `--labels LABELS.json`: decision models: a JSON object of {"label": "description"}, read as the options and their order; Laya reads each as "label: description".
 - `--evo`: Evo mode: post an Evo job, training --base (default Qwen/Qwen2.5-0.5B-Instruct) by evolution on puzzles the chain draws, no data file. For local test networks for now (`testnet --evo`).
 - `--budget BUDGET`: VIBE to spend, paid only for work that passes its checks (default 100).
 - `--fee FEE`: VIBE per round of training (default 10; an Evo job's 1).

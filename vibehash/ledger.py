@@ -52,6 +52,11 @@ EARN_IN = "earn-in"  # genesis memo: workers may start with no stake and earn it
 # spec as a malformed MLP's, can't be on such a chain by mistake: it refuses the block that posts one. A public rollout
 # would take a block version instead, as fine-tunes did (FINETUNE_VERSION).
 ES_GATE = "es-prototype"
+# Genesis memo: the chain takes fine-tunes of System 1 decision models, like Laya (decision.py). The referee has no
+# entries for their ops yet (decision_program.py), so a dispute over one would end unchecked; until it has, only a chain
+# made with this memo (a local testnet, a test) can hold one, as ES_GATE does for Evo. A node from before them reads
+# a decision spec as a fine-tune of an unknown family and refuses the block that posts one.
+DECISION_GATE = "decision-prototype"
 BOOTSTRAP = "bootstrap"  # genesis memo: stake that votes but can never be withdrawn (see State.locked)
 # Starter jobs: a genesis tx with memo GENESIS_JOB + a job spec puts that job on chain from block one, owned by nobody
 # (job_owner SYSTEM, so nobody can cancel it), with STARTER_ESCROW syn of budget and a fee of 0 a round. It never runs
@@ -328,6 +333,7 @@ class State:
     # minimum, so every spendable coin starts from work. Set by the genesis; older chains don't have it.
     earn_in: bool = False
     es: bool = False  # the chain takes ES jobs (ES_GATE): set by the genesis; no other chain has it
+    decision: bool = False  # the chain takes decision models' fine-tunes (DECISION_GATE): set by the genesis
     genesis: int = 0
     minted: int = 0
     burned: int = 0
@@ -534,6 +540,9 @@ def _apply_user_tx(s: State, tx: Tx, height: int, chain_id: str, version: int,
         if job.es and not s.es:
             raise InvalidBlock("an evolution-strategies job is a prototype: only a chain whose genesis takes them "
                                '("es": true) can hold one')
+        if job.decision and not s.decision:
+            raise InvalidBlock("a decision model's fine-tune is a prototype: only a chain whose genesis takes them "
+                               '("decision": true) can hold one')
         if job.job_id in s.jobs:
             raise InvalidBlock("job id already used")
         s._debit(tx.sender, tx.amount)
@@ -586,6 +595,8 @@ def _starter_job(s: State, tx: Tx) -> None:
         raise InvalidBlock("a starter job pays only new coins: its fee_per_round must be 0")
     if job.es and not s.es:
         raise InvalidBlock('a starter Evo job needs a genesis that takes Evo jobs ("es": true), before it')
+    if job.decision and not s.decision:
+        raise InvalidBlock('a starter decision job needs a genesis that takes them ("decision": true), before it')
     if job.job_id in s.jobs:
         raise InvalidBlock("job id already used")
     s.escrow[job.job_id] = tx.amount
@@ -919,6 +930,10 @@ def apply_block(state: State, block: Block, chain_id: str, prev: Block | None) -
                 if tx.amount or tx.recipient != SYSTEM:
                     raise InvalidBlock("the ES rule can't move coins")
                 s.es = True
+            elif tx.memo == DECISION_GATE:
+                if tx.amount or tx.recipient != SYSTEM:
+                    raise InvalidBlock("the decision-model rule can't move coins")
+                s.decision = True
             elif tx.memo.startswith(ECONOMICS_MEMO):
                 s.economics = _economics_of(tx)
             elif tx.memo.startswith(GENESIS_JOB):
@@ -990,7 +1005,7 @@ class Chain:
     def __init__(self, allocations: dict[str, int], stakes: dict[str, int] | None = None,
                  chain_id: str = DEFAULT_CHAIN_ID, genesis_time: int = 0, economics: econ.Economics | None = None,
                  validators: dict[str, str] | None = None, bootstrap: dict[str, int] | None = None, earn_in: bool = False,
-                 es: bool = False, starter_jobs: list[str] | None = None):
+                 es: bool = False, starter_jobs: list[str] | None = None, decision: bool = False):
         """`bootstrap`: stake for the first validators that votes but can never be withdrawn or spent. `earn_in`:
         workers may start with no stake and earn it. Genesis files without them keep their genesis hash."""
         self.chain_id = chain_id
@@ -1001,6 +1016,7 @@ class Chain:
         txs += [Tx("genesis", SYSTEM, a, v, memo=BOOTSTRAP, chain_id=chain_id) for a, v in sorted((bootstrap or {}).items())]
         txs += [Tx("genesis", SYSTEM, SYSTEM, 0, memo=EARN_IN, chain_id=chain_id)] if earn_in else []
         txs += [Tx("genesis", SYSTEM, SYSTEM, 0, memo=ES_GATE, chain_id=chain_id)] if es else []  # (es.py)
+        txs += [Tx("genesis", SYSTEM, SYSTEM, 0, memo=DECISION_GATE, chain_id=chain_id)] if decision else []
         txs += [Tx("genesis", SYSTEM, SYSTEM, STARTER_ESCROW, memo=GENESIS_JOB + spec, chain_id=chain_id)
                 for spec in starter_jobs or []]  # after the ES rule, which an Evo starter job needs
         genesis = Block(0, b"\x00" * 32, genesis_time, None, txs, chain_id)
@@ -1014,7 +1030,8 @@ class Chain:
                    {k: str(v) for k, v in g.get("validators", {}).items()},
                    {k: int(v) for k, v in g.get("bootstrap", {}).items()}, bool(g.get("earn_in", False)),
                    bool(g.get("es", False)),
-                   [j if isinstance(j, str) else canonical(j).decode() for j in g.get("starter_jobs", [])])
+                   [j if isinstance(j, str) else canonical(j).decode() for j in g.get("starter_jobs", [])],
+                   g.get("decision") is True)
 
     @property
     def tip(self) -> Block:

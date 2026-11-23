@@ -205,7 +205,7 @@ def train_segment(spec: ModelSpec, data: Dataset, theta: np.ndarray, unit_seed: 
     if getattr(spec, "kind", None) == "deepseek":  # a DeepSeek top-layers job's training unit (deepseek_unit.py)
         from .deepseek_unit import train_segment as deepseek_segment
         return deepseek_segment(spec, data, theta, unit_seed, start_step, n_steps, lr, batch_size, backend, tamper)
-    if getattr(spec, "kind", None) == "lora":
+    if getattr(spec, "kind", None) in ("lora", "decision"):  # a decision model's too (decision.py)
         from .finetune import train_segment as lora_segment
         return lora_segment(spec, data, theta, unit_seed, start_step, n_steps, lr, batch_size, backend, tamper)
     from .compute import active
