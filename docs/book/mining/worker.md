@@ -18,11 +18,10 @@ It uses the node and wallet setup saved, trains on the first GPU it finds (or th
 |---|---|
 | `--device` | What to train on: `auto` (the default: first GPU, else CPU), `cpu`, `cuda`, `cuda:1`, `xpu`, `mps`. |
 | `--wallet` | A different wallet file from the one setup saved. |
-| `--node` | A different network's node, such as the [Evo network](evo-hash.md). |
+| `--node` | A different network's node. |
 | `--job` | Mine only this job's rounds and sit the others out. |
 | `--plain` | Print plain log lines instead of the live dashboard. |
 | `--watch` | Also serve what the dashboard shows as JSON on this computer (port 7545 unless you give another). |
-| `--deepseek` | `yes` or `no` to [DeepSeek work](deepseek.md); remembered. |
 | `--memory-mb` | Override the memory it detected, if it got it wrong. |
 
 ## The live dashboard

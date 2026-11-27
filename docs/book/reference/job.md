@@ -76,7 +76,7 @@ Flags:
 
 - `--out OUT`: file to save (default JOB.npz), or a fine-tune's folder (default DATA-lora, or DATA-merged).
 - `--merged`: a fine-tune: the base model with the adapter folded into its weights, a model folder that loads as the base does, no PEFT (downloads the base's weights once).
-- `--float32`: with --merged (or an Evo job): save float32 weights, which keep the change whole, not the base's bf16 (twice the size).
+- `--float32`: with --merged: save float32 weights, which keep the change whole, not the base's bf16 (twice the size).
 - `--node NODE`: node address (default: the one `setup` saved).
 - `--tor`: send this command's node traffic through Tor (a local Tor on 9050, or Tor Browser's on 9150), resolving the node's name inside Tor.
 - `--proxy URL`: send it through this SOCKS proxy instead: socks5h://HOST:PORT (socks5:// would resolve the node's name on this computer, so it is refused).
@@ -122,7 +122,7 @@ vibehash job history fruit-demo --csv fruit-demo.csv
 Write a starter job file, for full control with post-job.
 
 ```
-vibehash job template [-h] [--out OUT] [--id ID] [--gpu] [--evo MODEL] [--tasks TASKS] [--rounds ROUNDS] [--max-tokens N] [--loop-stop PERIOD,RUN] [--task-tokens TASK=N,...] [--cross-margin X] [--fixed-step] [--no-fixed-step] [--problems N] [--gold] [--target-tokens N]
+vibehash job template [-h] [--out OUT] [--id ID] [--gpu]
 ```
 
 Flags:
@@ -130,18 +130,6 @@ Flags:
 - `--out OUT`: file to write (default job.json).
 - `--id ID`: the job's name (default my-first-job).
 - `--gpu`: a larger float32 model sized for GPUs.
-- `--evo MODEL`: an Evo job on MODEL that never ends, taking its tasks in turn: a genesis starter job (genesis create --es --starter-job).
-- `--tasks TASKS`: with --evo: the tasks, comma-separated, curated (the default: the ones a small model learns from), vibe (the Qwen3.5-0.8B job's, for max_tokens 384-512) or all.
-- `--rounds ROUNDS`: with --evo: rounds on each task before the next (default 12).
-- `--max-tokens N`: with --evo: the longest answer, in tokens (default 64; 512 with --tasks vibe, whose math and instructions need room to reason).
-- `--loop-stop PERIOD,RUN`: with --evo: end an answer once RUN tokens in a row each repeat the token up to PERIOD before (a loop), or off (default 32,48 with --tasks vibe, else off).
-- `--task-tokens TASK=N,...`: with --evo: shorter answers for some tasks, such as math=448,gsm8k=384, or off (default math=448,gsm8k=384,ifeval=256 with --tasks vibe, else off).
-- `--cross-margin X`: with --evo: the margin, in logits, between machines that do the arithmetic differently, with 0.1 for alike ones and checkers paired by setup (default 0.5), or off for one margin of 0.5 and no pairing.
-- `--fixed-step`: with --evo: on by default, kept so old commands work.
-- `--no-fixed-step`: with --evo: a round where only some units land takes a full step out of fewer members, instead of a step its share of the size (the default).
-- `--problems N`: with --evo: problems each member answers a round (default 16); more problems a round puts more work into each round without extra noise cost.
-- `--gold`: with --evo: score each round's members on its own problems' right answers, so the model learns from what it gets wrong too, instead of only on answers it already got right (needs nodes on 0.5.28+).
-- `--target-tokens N`: with --evo and a pool task (vibe_reason): the most tokens a problem's target reply is scored on (default 1024; needs nodes on 0.5.28+).
 
 Examples:
 

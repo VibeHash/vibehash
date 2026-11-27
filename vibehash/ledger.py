@@ -37,7 +37,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import economics as econ
 from .crypto import KeyPair, address_of, canonical, h256, is_canonical_address, merkle_root, verify  # (canonical: crypto's, the one definition)
-from .tasks import InvalidJob, TrainingJob
+from .tasks import _JOB_ID, RETIRED_IN, InvalidJob, RetiredJob, TrainingJob
 
 DEFAULT_CHAIN_ID = "vibehash-testnet-1"
 USER_KINDS = {"transfer", "stake", "unstake", "post_job", "cancel_job", "validator", "evidence"}
@@ -47,16 +47,17 @@ UNBONDING_ROUNDS = 20  # unstaked coins stay slashable this long
 VALIDATOR = "validator "  # genesis memo naming a validator: "validator <url>"
 ECONOMICS_MEMO = "economics:"  # a genesis tx with this memo fixes the network's issuance schedule
 EARN_IN = "earn-in"  # genesis memo: workers may start with no stake and earn it (see State.earn_in)
-# Genesis memo: the chain takes evolution-strategies jobs (es.py), a prototype. Only a chain made with it (a local testnet,
-# a test) can hold one, so no block of any other chain changes meaning, and a node from before ES jobs, which reads an ES
-# spec as a malformed MLP's, can't be on such a chain by mistake: it refuses the block that posts one. A public rollout
-# would take a block version instead, as fine-tunes did (FINETUNE_VERSION).
+# Genesis memo of a chain that took Evo (evolution strategies) jobs. Evo was cut after 0.5.28, so this node refuses such
+# a genesis outright (apply_block, Chain.from_genesis): running one without Evo would read its rounds wrongly. Only local
+# testnets and tests were ever made with it; the public network never was.
 ES_GATE = "es-prototype"
 # Genesis memo: the chain takes fine-tunes of System 1 decision models, like Laya (decision.py). The referee has no
 # entries for their ops yet (decision_program.py), so a dispute over one would end unchecked; until it has, only a chain
-# made with this memo (a local testnet, a test) can hold one, as ES_GATE does for Evo. A node from before them reads
-# a decision spec as a fine-tune of an unknown family and refuses the block that posts one.
+# made with this memo (a local testnet, a test) can hold one. A node from before them reads a decision spec as a
+# fine-tune of an unknown family and refuses the block that posts one.
 DECISION_GATE = "decision-prototype"
+EVO_GENESIS = ('this genesis takes Evo (evolution strategies) jobs ("es": true), and Evo was removed from VibeHash after '
+               f"{RETIRED_IN}: run that chain with 0.5.28, or start a new one without it")
 BOOTSTRAP = "bootstrap"  # genesis memo: stake that votes but can never be withdrawn (see State.locked)
 # Starter jobs: a genesis tx with memo GENESIS_JOB + a job spec puts that job on chain from block one, owned by nobody
 # (job_owner SYSTEM, so nobody can cancel it), with STARTER_ESCROW syn of budget and a fee of 0 a round. It never runs
@@ -83,7 +84,10 @@ STARTER_ESCROW = 1
 #      held to a looser bound, and a replica that challenged its twin and withdrew isn't marked as missing. The ledger's
 #      own rules are version 4's. The version changes because a node from before would refuse a rule-3 round and settle
 #      one differently; now it refuses the block, and its workers are told to upgrade (client.too_old).
+#      Also from 5 (RETIRED_VERSION): no DeepSeek job is posted and no round of one is sealed. That kind of job was cut
+#      (tasks.RetiredJob); the two the public network posted, and their rounds, still apply in the blocks they're in.
 VERSION = 5
+RETIRED_VERSION = 5
 FINETUNE_VERSION = 3
 ACCOUNTABILITY_VERSION = 4
 # A join or leave in block h takes effect at height h + VALIDATOR_DELAY: the validators voting on that block are the
@@ -234,8 +238,8 @@ class RoundSummary:
         what mints its subsidy and moves the halving clock: it credits accepted work (worker FLOPs above 0) to a worker
         who isn't an offender. That's the work _reward_txs pays workers for, and the proposer's share needs
         (economics.compute_payout), in every kind of round: an MLP's, a sharded team's, a fine-tune's (a claim a
-        checker approved or that won its disputes; a DeepSeek training round is one), an Evo round's (approved, and
-        nobody rejected it) and a DeepSeek prep round's (a unit kept into the work graph). It's read from the summary
+        checker approved or that won its disputes), and, in old blocks, a DeepSeek prep round's (a unit kept into the
+        work graph) and an Evo round's (approved, and nobody rejected it). It's read from the summary
         alone, not from what the split comes to, which depends on the subsidy itself. Checking or scoring doesn't make
         a round one: they're paid out of a round that pays for work, and in a round with none accepted, a catcher is
         paid by its slash's bounty and other checks and scores go unpaid, as nothing is minted to pay them with. A
@@ -332,7 +336,6 @@ class State:
     # Earn-in: anyone may take work without stake, and their pay goes into their stake until it reaches the
     # minimum, so every spendable coin starts from work. Set by the genesis; older chains don't have it.
     earn_in: bool = False
-    es: bool = False  # the chain takes ES jobs (ES_GATE): set by the genesis; no other chain has it
     decision: bool = False  # the chain takes decision models' fine-tunes (DECISION_GATE): set by the genesis
     genesis: int = 0
     minted: int = 0
@@ -436,13 +439,24 @@ def _withdrawable(s: State, addr: str) -> int:
     return max(0, s.stake(addr) - s.locked.get(addr, 0))
 
 
+def _terms(s: State, job_id: str) -> tuple[int, int, int | None]:
+    """A job's fee a round, units a round and FLOPs a unit, for settling one of its rounds. A job of a cut kind (a
+    DeepSeek job the chain already holds: tasks.RetiredJob) gives the first two as its spec says and None for the FLOPs,
+    which only its old code could work out."""
+    try:
+        job = s.job(job_id)
+    except RetiredJob as e:
+        return e.fee_per_round, e.units_per_round, None
+    return job.fee_per_round, job.units_per_round, job.unit_flops
+
+
 def _round_fee(s: State, summary: RoundSummary) -> int:
     """What the round's job pays into the pool: its fee per round for the share of units that verified, while its
     escrow lasts."""
     if summary.job_id not in s.jobs:
         return 0
-    job = s.job(summary.job_id)
-    return min(s.escrow.get(summary.job_id, 0), job.fee_per_round * summary.accepted_units // job.units_per_round)
+    fee_per_round, units_per_round, _ = _terms(s, summary.job_id)
+    return min(s.escrow.get(summary.job_id, 0), fee_per_round * summary.accepted_units // units_per_round)
 
 
 def _reward_txs(s: State, summary: RoundSummary, height: int, chain_id: str, version: int,
@@ -472,7 +486,7 @@ def _reward_txs(s: State, summary: RoundSummary, height: int, chain_id: str, ver
     return txs
 
 
-def _check_summary(s: State, summary: RoundSummary, proposer: str) -> None:
+def _check_summary(s: State, summary: RoundSummary, proposer: str, version: int) -> None:
     if summary.proposer != proposer:
         raise InvalidBlock("summary names a different proposer")
     # Checkers must be staked. Workers too, unless the chain lets them earn their stake in.
@@ -484,12 +498,20 @@ def _check_summary(s: State, summary: RoundSummary, proposer: str) -> None:
     if summary.worker_flops or summary.accepted_units:
         if summary.job_id not in s.jobs:
             raise InvalidBlock("summary references an unknown job")
-        job = s.job(summary.job_id)
-        if not 0 <= summary.accepted_units <= job.units_per_round:
+        _, units_per_round, unit_flops = _terms(s, summary.job_id)
+        if not 0 <= summary.accepted_units <= units_per_round:
             raise InvalidBlock("accepted units out of range")
-        # Each unit can be done by at most two replicas.
-        if sum(summary.worker_flops.values()) > 2 * job.units_per_round * job.unit_flops:
+        # Each unit can be done by at most two replicas. (A cut kind's rounds are only in blocks before
+        # RETIRED_VERSION, which the validators of the time checked with the code that knew its FLOPs.)
+        if unit_flops is not None and sum(summary.worker_flops.values()) > 2 * units_per_round * unit_flops:
             raise InvalidBlock("claimed work exceeds what the round contained")
+    if version >= RETIRED_VERSION and summary.job_id in s.jobs:
+        try:
+            s.job(summary.job_id)
+        except RetiredJob as e:
+            raise InvalidBlock(f"a round of job {summary.job_id}: {e}") from None
+        except InvalidJob:
+            pass
 
 
 def _apply_user_tx(s: State, tx: Tx, height: int, chain_id: str, version: int,
@@ -533,22 +555,23 @@ def _apply_user_tx(s: State, tx: Tx, height: int, chain_id: str, version: int,
     elif tx.kind == "post_job":
         try:
             job = TrainingJob.from_spec_json(tx.memo, tx.sender, tx.amount)
+            job_id = job.job_id
+        except RetiredJob as e:
+            job_id = _retired_post(e, version)
         except InvalidJob as e:
             raise InvalidBlock(str(e)) from e
-        if job.finetune and version < FINETUNE_VERSION:
-            raise InvalidBlock(f"a fine-tune can be posted only in a block of version {FINETUNE_VERSION} or later")
-        if job.es and not s.es:
-            raise InvalidBlock("an evolution-strategies job is a prototype: only a chain whose genesis takes them "
-                               '("es": true) can hold one')
-        if job.decision and not s.decision:
-            raise InvalidBlock("a decision model's fine-tune is a prototype: only a chain whose genesis takes them "
-                               '("decision": true) can hold one')
-        if job.job_id in s.jobs:
+        else:
+            if job.finetune and version < FINETUNE_VERSION:
+                raise InvalidBlock(f"a fine-tune can be posted only in a block of version {FINETUNE_VERSION} or later")
+            if job.decision and not s.decision:
+                raise InvalidBlock("a decision model's fine-tune is a prototype: only a chain whose genesis takes them "
+                                   '("decision": true) can hold one')
+        if job_id in s.jobs:
             raise InvalidBlock("job id already used")
         s._debit(tx.sender, tx.amount)
-        s.escrow[job.job_id] = tx.amount
-        s.jobs[job.job_id] = tx.memo
-        s.job_owner[job.job_id] = tx.sender
+        s.escrow[job_id] = tx.amount
+        s.jobs[job_id] = tx.memo
+        s.job_owner[job_id] = tx.sender
     elif tx.kind == "cancel_job":
         if s.job_owner.get(tx.memo) != tx.sender:
             raise InvalidBlock("only the requester can cancel a job")
@@ -582,6 +605,21 @@ def _apply_user_tx(s: State, tx: Tx, height: int, chain_id: str, version: int,
         _punish(s, tx, height, chain_id)
 
 
+def _retired_post(e: RetiredJob, version: int) -> str:
+    """The job id of a post_job of a cut kind, in a block that may hold one, or InvalidBlock. Only DeepSeek jobs were
+    ever posted to a chain without the Evo genesis memo, and only in blocks of versions FINETUNE_VERSION to
+    RETIRED_VERSION - 1 (the old code took a DeepSeek job for a fine-tune). Those blocks keep their meaning: the job is
+    on chain, its budget in escrow, its owner able to cancel it. Its spec was checked by the validators that took it,
+    with the code that knew it; this node can't run it, and the coordinator never opens a round of it."""
+    if e.kind != "deepseek" or not FINETUNE_VERSION <= version < RETIRED_VERSION:
+        raise InvalidBlock(str(e))
+    if not _JOB_ID.match(e.job_id):
+        raise InvalidBlock("job id must be 1-64 chars of a-z 0-9 . _ -")
+    if e.units_per_round < 1 or e.fee_per_round < 0:
+        raise InvalidBlock("a DeepSeek job's units a round and fee a round are out of range")
+    return e.job_id
+
+
 def _starter_job(s: State, tx: Tx) -> None:
     """A starter job in the genesis block (GENESIS_JOB): on chain, owned by nobody, paying only the subsidy."""
     if tx.recipient != SYSTEM or tx.amount != STARTER_ESCROW:
@@ -593,8 +631,6 @@ def _starter_job(s: State, tx: Tx) -> None:
         raise InvalidBlock(f"starter job: {e}") from e
     if job.fee_per_round:
         raise InvalidBlock("a starter job pays only new coins: its fee_per_round must be 0")
-    if job.es and not s.es:
-        raise InvalidBlock('a starter Evo job needs a genesis that takes Evo jobs ("es": true), before it')
     if job.decision and not s.decision:
         raise InvalidBlock('a starter decision job needs a genesis that takes them ("decision": true), before it')
     if job.job_id in s.jobs:
@@ -927,9 +963,7 @@ def apply_block(state: State, block: Block, chain_id: str, prev: Block | None) -
                     raise InvalidBlock("the earn-in rule can't move coins")
                 s.earn_in = True
             elif tx.memo == ES_GATE:
-                if tx.amount or tx.recipient != SYSTEM:
-                    raise InvalidBlock("the ES rule can't move coins")
-                s.es = True
+                raise InvalidBlock(EVO_GENESIS)
             elif tx.memo == DECISION_GATE:
                 if tx.amount or tx.recipient != SYSTEM:
                     raise InvalidBlock("the decision-model rule can't move coins")
@@ -970,7 +1004,7 @@ def apply_block(state: State, block: Block, chain_id: str, prev: Block | None) -
 
     summary = block.summary
     if summary is not None:
-        _check_summary(s, summary, proposer)
+        _check_summary(s, summary, proposer, block.version)
     pre, owed = _settle_first(s, summary, block.height, chain_id, block.version)
 
     user = [tx for tx in block.txs if tx.kind in USER_KINDS]
@@ -1005,7 +1039,7 @@ class Chain:
     def __init__(self, allocations: dict[str, int], stakes: dict[str, int] | None = None,
                  chain_id: str = DEFAULT_CHAIN_ID, genesis_time: int = 0, economics: econ.Economics | None = None,
                  validators: dict[str, str] | None = None, bootstrap: dict[str, int] | None = None, earn_in: bool = False,
-                 es: bool = False, starter_jobs: list[str] | None = None, decision: bool = False):
+                 starter_jobs: list[str] | None = None, decision: bool = False):
         """`bootstrap`: stake for the first validators that votes but can never be withdrawn or spent. `earn_in`:
         workers may start with no stake and earn it. Genesis files without them keep their genesis hash."""
         self.chain_id = chain_id
@@ -1015,21 +1049,21 @@ class Chain:
         txs += [Tx("genesis", SYSTEM, a, 0, memo=VALIDATOR + url, chain_id=chain_id) for a, url in sorted((validators or {}).items())]
         txs += [Tx("genesis", SYSTEM, a, v, memo=BOOTSTRAP, chain_id=chain_id) for a, v in sorted((bootstrap or {}).items())]
         txs += [Tx("genesis", SYSTEM, SYSTEM, 0, memo=EARN_IN, chain_id=chain_id)] if earn_in else []
-        txs += [Tx("genesis", SYSTEM, SYSTEM, 0, memo=ES_GATE, chain_id=chain_id)] if es else []  # (es.py)
         txs += [Tx("genesis", SYSTEM, SYSTEM, 0, memo=DECISION_GATE, chain_id=chain_id)] if decision else []
         txs += [Tx("genesis", SYSTEM, SYSTEM, STARTER_ESCROW, memo=GENESIS_JOB + spec, chain_id=chain_id)
-                for spec in starter_jobs or []]  # after the ES rule, which an Evo starter job needs
+                for spec in starter_jobs or []]  # after the decision rule, which a decision starter job needs
         genesis = Block(0, b"\x00" * 32, genesis_time, None, txs, chain_id)
         self.state = apply_block(State(), genesis, chain_id, None)
         self.blocks: list[Block] = [genesis]
 
     @classmethod
     def from_genesis(cls, g: dict) -> "Chain":
+        if g.get("es"):
+            raise InvalidBlock(EVO_GENESIS)
         return cls({k: int(v) for k, v in g["allocations"].items()}, {k: int(v) for k, v in g.get("stakes", {}).items()},
                    g["chain_id"], int(g.get("timestamp", 0)), econ.Economics.from_genesis(g),
                    {k: str(v) for k, v in g.get("validators", {}).items()},
                    {k: int(v) for k, v in g.get("bootstrap", {}).items()}, bool(g.get("earn_in", False)),
-                   bool(g.get("es", False)),
                    [j if isinstance(j, str) else canonical(j).decode() for j in g.get("starter_jobs", [])],
                    g.get("decision") is True)
 

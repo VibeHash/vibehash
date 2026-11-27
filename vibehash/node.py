@@ -55,14 +55,13 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
-from . import deepseek_graph as dsg
 from . import economics as econ
 from . import __version__, advice, filelock, hardware, netstats, nodeadmin, proxy, receipts, supply, tasks
 from .blobs import CHUNK, MAX_DATASET, STALE_PART_S, BlobError, BlobStore, check_id
 from .client import MIN_CLIENT, OLD_CLIENT, NodeError, agent_version, parse_version  # the oldest releases it takes
 from .consensus import Engine, Timeouts, check_certificate, evidence_memo
-from .coordinator import (ES_RECORD_VERSION, FINETUNE_RECORD_VERSION, NEWCOMER_RESERVE, RECORD_VERSION,
-                          SHARDED_RECORD_VERSION, Coordinator, CoordinatorConfig, Phase, ProtocolError, valid_gap)
+from .coordinator import (FINETUNE_RECORD_VERSION, RECORD_VERSION, SHARDED_RECORD_VERSION, Coordinator,
+                          CoordinatorConfig, Phase, ProtocolError)
 from .crypto import AddressError, KeyPair, address_of, checksummed, parse_address, verify
 from .ledger import EVIDENCE_WINDOW, SYSTEM, VERSION, Block, InvalidBlock, Tx, apply_block, canonical
 from .model import params_hash
@@ -70,7 +69,7 @@ from .p2p import Peers
 from .ratelimit import GuardedHandler, GuardedServer, Limits, path_parts
 from .replay import replay_block
 from .storage import NotSaved, RivalBlock, Store, record_blobs
-from .tasks import NO_VOCAB_MSG, SYN_PER_VIBE, InvalidJob, Reveal, TrainingJob
+from .tasks import SYN_PER_VIBE, InvalidJob, RetiredJob, Reveal, TrainingJob
 from .verification import FINETUNE_CHECK
 from .wire import MAX_CLOCK_SKEW_S, WireError, blob_openings_in, blob_openings_out, commitment_in, commitment_out, open_envelope
 
@@ -94,13 +93,10 @@ MAX_BLOCKS_REPLY = 4 * 2**20
 # up to ~10 KB for a reveal's Merkle proofs. Registrations and verdicts go into the round record exactly as sent, so
 # anything more would be junk that every validator stores and every proposal carries.
 ENVELOPE = {"kind", "body", "ts", "chain_id", "pubkey", "sig"}
-BODIES = {"register": {"round", "flops_per_sec", "memory_mb", "hardware", "numerics"}, "assignment": {"round"}, "commit": {"round", "commitment"},
-          "sign": {"round", "requests"},
-          "reveal": {"round", "reveal"}, "tasks": {"round"}, "verdict": {"round", "task_id", "ok", "bad_segment", "score", "gap"},
+BODIES = {"register": {"round", "flops_per_sec", "memory_mb", "hardware"}, "assignment": {"round"}, "commit": {"round", "commitment"},
+          "reveal": {"round", "reveal"}, "tasks": {"round"}, "verdict": {"round", "task_id", "ok", "bad_segment", "score"},
           "move": {"round", "game", "n", "move"}}
 MAX_MESSAGE, MAX_REVEAL = 4 * 2**10, 64 * 2**10
-MAX_COMMITMENT = 2**20  # a prep unit's commitment in the bucket: roots, digests and a leaf a record, a few KB
-MAX_ES_ANSWERS = CHUNK - 1  # an ES unit's answers blob (es.claim_bytes): sent and fetched in one request each
 MAX_MOVE = 16 * 2**10  # a dispute's split names up to program.K + 1 state roots
 # What a dispute's defender may upload in a round: the states its splits name (a step's gradients after each sequence,
 # a sequence's activations layer by layer, a layer's tensors op by op), and its evidence.
@@ -145,16 +141,6 @@ def explorer_page() -> tuple[bytes, str]:
     return _explorer
 
 
-def bucket_from_env() -> dsg.Signer | None:
-    """The bucket for DeepSeek jobs' hand-offs, from $VIBEHASH_BUCKET_HOST (my-bucket.nyc3.digitaloceanspaces.com),
-    $VIBEHASH_BUCKET_REGION, $VIBEHASH_BUCKET_KEY and $VIBEHASH_BUCKET_SECRET (and $VIBEHASH_BUCKET_SCHEME, https
-    unless set): the operator sets them on the node at launch. None if they aren't set."""
-    env ={k: os.environ.get(f"VIBEHASH_BUCKET_{k}") for k in ("HOST", "REGION", "KEY", "SECRET", "SCHEME")}
-    if not all(env[k] for k in ("HOST", "REGION", "KEY", "SECRET")):
-        return None
-    return dsg.Signer(env["HOST"], env["REGION"], env["KEY"], env["SECRET"], scheme=env["SCHEME"] or "https")
-
-
 class Busy(Exception):
     """The node can't take this request now (503): the client waits and resends."""
 
@@ -170,7 +156,7 @@ class Halted(RuntimeError):
 def hold_folder(data_dir) -> filelock.Lock:
     """The data folder's lock, held while a node runs there (the lock goes with its process, however it ends). Two
     nodes on one folder each build blocks on the chain they loaded, sign rival ones with the one validator key, and
-    fail every save the other got to first (2026-11-03: the menu's Evo Hash beside a running `testnet --evo2`)."""
+    fail every save the other got to first (2026-11-03: a menu's local testnet beside a running `testnet`)."""
     path = Path(data_dir) / "node.lock"
     lock = filelock.try_hold(path, note=f"process {os.getpid()}")
     if lock is None:
@@ -210,15 +196,12 @@ class Node:
                  times: PhaseTimes | None = None, config: CoordinatorConfig | None = None, keep_rounds: int = 10,
                  limits: Limits | None = None, tls: ssl.SSLContext | None = None,
                  peers: list[str] = (), announce: str | None = None, timeouts: Timeouts | None = None,
-                 max_job_bytes: int = MAX_JOB_BYTES, bucket: dsg.Signer | None = None, min_client: str = MIN_CLIENT,
+                 max_job_bytes: int = MAX_JOB_BYTES, min_client: str = MIN_CLIENT,
                  admin_token: str | None = None, admin_mfa: str | None = None, onion: str | None = None,
                  model_access: str = "public"):
         """`peers`: other nodes to connect to (validators find each other from the chain without them).
         `announce`: the address other nodes reach this one at, if it isn't the one it listens on.
         `max_job_bytes`: the biggest model (one checkpoint) a job may have for this node to relay its post_job.
-        `bucket`: the storage DeepSeek jobs hand off through (deepseek_graph.Signer, its keys this node's): workers get
-        links it signs for their units' own objects. None: this node can't run a DeepSeek job's prep (bucket_from_env
-        reads one from the environment).
         `min_client`: the oldest release whose workers may register (MIN_CLIENT); older ones are told to upgrade.
         `admin_token`: what the admin app sends to reach /admin/* (nodeadmin.py); None: those routes don't exist.
         `admin_mfa`: an authenticator app's key, so the token also needs that app's code (a sign-in, nodeadmin.py).
@@ -254,9 +237,6 @@ class Node:
         self.admin = nodeadmin.Admin(self.store, admin_token, mfa=admin_mfa)
         self.coord.policy = self.admin.reason
         self.admin.changed = lambda job_id: self.coord.waiting.pop(job_id, None)
-        self.bucket = bucket
-        if bucket is not None:
-            self.coord.prep_store = self.prep_store
         self.coord.timing = lambda job: self.times_for(job).compute_s * 0.8  # capacity leaves slack, as above
         self.blobs: BlobStore = self.store.blobs
         self.coord.trace_blobs = TraceBlobs(self.blobs)
@@ -272,7 +252,6 @@ class Node:
         self._network_lock = threading.Lock()
         self._network_cache: tuple = (None, 0.0, {})  # (tip hash, when, /network's answer)
         self._census_cache: dict[int, dict] = {}  # height -> who registered that round and on what (_registrations)
-        self.gaps = netstats.GapCensus()  # Evo checks' worst gaps by pair of number setups, as /network shows them
         self.stopping = threading.Event()  # set by stop(), and by a halt, which leaves the server up
         self.halted: str | None = None  # why this node stopped itself (_halt): a block it couldn't save
         # What /status and refusals say about it: the height, not the folder or the database's own error text, which
@@ -386,7 +365,7 @@ class Node:
         """Sleep through a phase. False if we're stopping, or `still()` turns false (the round's no longer wanted).
         `done()`: the phase's work is all in, so it ends then rather than when its time runs out, though not before
         `least` seconds. /status's `phase_ends` is the latest it can end until then (nobody it waits for is cut short),
-        and when it will end from then on: a dashboard counting down a DeepSeek round's ten minutes, then seeing it end
+        and when it will end from then on: a dashboard counting down a big round's ten minutes, then seeing it end
         in twenty seconds, was showing the wrong one (test night, 2026-11-02)."""
         began = time.time()
         self.phase_ends = end = began + seconds
@@ -455,43 +434,15 @@ class Node:
         log.info("block %d sealed: %d units accepted, %d fraud, val acc %s, pool %.3f VIBE",
                  rep.block.height, rep.block.summary.accepted_units, fraud, acc, rep.pool / SYN_PER_VIBE)
 
-    def prep_store(self, job) -> dsg.PresignedStore:
-        """A DeepSeek job's objects in the bucket, under its id, as this node reaches them (signing its own links):
-        two tries, a minute each, no long waits, since the node may be holding its lock."""
-        return dsg.PresignedStore(lambda m, n, q=None: self.bucket(m, f"{job.job_id}/{n}", q), tries=2,
-                                  wait=lambda s: time.sleep(min(s, 1.0)), timeout=60)
-
-    def _prep_commitment(self, body: dict) -> bytes | None:
-        """A prep unit's commitment from the bucket, for its reveal: read before the coordinator's lock is taken (a
-        slow bucket mustn't freeze the node), and no bigger than MAX_COMMITMENT. None if it can't be had."""
-        d = body.get("reveal")
-        if self.bucket is None or not isinstance(d, dict) or not d.get("prep"):
-            return None
-        c = self.coord
-        with c.lock:
-            r = c.r
-            if r is None or body.get("round") != r.round_no or str(d.get("unit_id")) not in r.prep:
-                return None
-            job = c.job(r.job_id)
-            name = dsg.unit_commit(c.prep(job).graph.units[r.prep[str(d["unit_id"])]])
-        try:
-            return self.prep_store(job).get(name, cap=MAX_COMMITMENT)
-        except (OSError, ValueError) as e:
-            log.info("a prep unit's commitment %s: %s", name, e)
-            return None
-
     def times_for(self, job) -> PhaseTimes:
         """A round's phase lengths for `job`: this node's, or longer where the job's size needs it (or the job asks
         for a longer compute phase). See TrainingJob.phase_lengths."""
         t, need = self.times, job.phase_lengths()
-        if job.deepseek:  # a prep unit's transfers at the slowest link the network takes (deepseek_graph.deadline)
-            need = need | {"compute": max(need["compute"], job.spec.prep_seconds())}
         verify = min(MAX_PHASE_S, max(t.verify_s, need["verify"]))
         # A dispute has as many moves as the job's program is deep (need["moves"], program.dispute_size), and each as
         # long as its dearest takes (need["move"]: re-running a segment, and a split's states up and down), or verify
         # if that's longer. Most moves take a second or two, and the phase ends as soon as every dispute has; it's this
-        # long only for a party that makes every move just in time (a DeepSeek job's prep rounds have no games yet:
-        # their dispute phase ends at once). A job whose moves need more than MAX_PHASE_S in all gets less for each: a
+        # long only for a party that makes every move just in time. A job whose moves need more than MAX_PHASE_S in all gets less for each: a
         # defender too slow for it loses (DESIGN, "Time").
         moves = need.get("moves", 0)
         move = min(max(verify, need["move"]), MAX_PHASE_S / moves) if moves else 0.0
@@ -503,12 +454,18 @@ class Node:
         own rounds the longest job with budget left runs, since its leader may be running that one. It's the most a
         round can take: one that ends sooner (_run_round) is proposed sooner, and voted on as soon as it comes."""
         s = self.chain.state
-        longest = max((self.times_for(s.job(j)).round_s for j, v in s.escrow.items() if v > 0), default=0.0)
+        longest = 0.0
+        for j, v in s.escrow.items():
+            if v > 0:
+                try:
+                    longest = max(longest, self.times_for(s.job(j)).round_s)
+                except InvalidJob:  # a job of a cut kind (tasks.RetiredJob) never runs: no round to wait for
+                    continue
         return self.engine.timeouts.propose + 1.5 * max(0.0, longest - self.times.round_s)
 
     def shortest_round(self) -> float:
         """The least a round lasts: this node's own round, but never more than the mainnet schedule's block time. A
-        node given longer phases for slow work (the Evo node's 180 s verify) has them as the most a phase may take,
+        node given longer phases for slow work (a 180 s verify, say) has them as the most a phase may take,
         not as a wait for rounds whose work is all in."""
         return min(self.times.round_s, float(econ.MAINNET_BLOCK_S))
 
@@ -517,18 +474,17 @@ class Node:
         round's no longer wanted (another block was decided at its height).
 
         How long the phases last. Registration: this node's own length (self.times). Compute, reveal and verify: at
-        most the round's (times_for: this node's own, or longer where the job needs it, as for a big model's transfers
-        or a DeepSeek prep unit's deadline, ten minutes at least), ending sooner as soon as everything the phase waits
+        most the round's (times_for: this node's own, or longer where the job needs it, as for a big model's
+        transfers), ending sooner as soon as everything the phase waits
         for is in (Coordinator.all_in: every unit handed out committed, every commitment revealed, every task
         answered). The whole round lasts at least shortest_round(), the rest of it spent in verify. So a round in which
         nothing was handed out (nobody registered who fits, or a fine-tune short of its quorum) lasts 38 s by default,
-        however long the job's are: the DeepSeek pilot's took 1,521 s with nobody mining it. Never less, though
+        however long the job's are: a big job's took 1,521 s with nobody mining it. Never less, though
         there's nothing to wait for: any job with budget keeps rounds coming (_has_work), so a chain nobody mines would
         otherwise seal a block every few seconds, and the mainnet schedule's halvings are timed by blocks of the default
-        round (economics.MAINNET_BLOCK_S). (Each phase used to last at least the node's own length for it, so the Evo
-        node's 180 s verify, there to give checkers the time, was also how long every round waited with every check
-        in, or none handed out: 208 s rounds, 82% of vibehash-evo-1's first day with nobody mining, and two thirds of
-        each round that was mined.) Nothing in a round's record or block but its timestamp depends on when a phase
+        round (economics.MAINNET_BLOCK_S). (Each phase used to last at least the node's own length for it, so a node's
+        180 s verify, there to give checkers the time, was also how long every round waited with every check in, or
+        none handed out: 208 s rounds, with nobody mining, on a testnet's first day.) Nothing in a round's record or block but its timestamp depends on when a phase
         ended: the compute seconds capacity reads (record["rules"]["compute_s"], Coordinator.timing) are still the
         job's, and nothing more can come in once a phase is all in."""
         c, own = self.coord, self.times
@@ -624,17 +580,13 @@ class Node:
             if block.summary is not None and isinstance(record, dict):
                 job = self.chain.state.job(block.summary.job_id) if block.summary.job_id in self.chain.state.jobs else None
                 want = (SHARDED_RECORD_VERSION if job and job.sharded else FINETUNE_RECORD_VERSION if job and job.finetune
-                        else ES_RECORD_VERSION if job and job.es else RECORD_VERSION)
+                        else RECORD_VERSION)
                 if record.get("version") != want:
                     raise InvalidBlock(f"a new round's record must be version {want}, not {record.get('version')!r}")
                 rules = record.get("rules")
                 if want == FINETUNE_RECORD_VERSION and isinstance(rules, dict) and rules.get("finetune_check") != FINETUNE_CHECK:
                     raise InvalidBlock(f"a new fine-tune round compares its replicas by rule {FINETUNE_CHECK}, not "
                                        f"{rules.get('finetune_check', 1)!r}")
-                if (want == ES_RECORD_VERSION and self.chain.state.earn_in and isinstance(rules, dict)
-                        and rules.get("newcomer_reserve", 0) != NEWCOMER_RESERVE):
-                    raise InvalidBlock(f"a new Evo round on this chain holds {NEWCOMER_RESERVE} units for workers "
-                                       f"earning their stake in, not {rules.get('newcomer_reserve', 0)!r}")
             with self.coord.lock:
                 tip = self.chain.tip
                 if block.height != tip.height + 1 or block.prev_hash != tip.hash:
@@ -648,9 +600,7 @@ class Node:
                                 else replay_block(self.chain, block, record,
                                                   datasets=PeerDatasets(self, self.chain.state.validators.get(
                                                       address_of(block.proposer_pubkey))),
-                                                  roots=LeaderBlobs(self, address_of(block.proposer_pubkey)),
-                                                  records=self.prep_store if self.bucket is not None else None,
-                                                  es_states=self._es_state))
+                                                  roots=LeaderBlobs(self, address_of(block.proposer_pubkey))))
                     if problems:
                         raise InvalidBlock("; ".join(problems))
         except (InvalidBlock, InvalidJob, KeyError, TypeError, ValueError) as e:
@@ -821,17 +771,6 @@ class Node:
             return False
         return True
 
-    def _es_state(self, job_id: str, start_hash: bytes):
-        """An ES job's state with this hash if this node has it (the one its next round starts from), for replays to work
-        a round's update out again (Coordinator.es_states), else None."""
-        have = self.coord.params.get(job_id)
-        if have is None:
-            try:  # (a rule-2 Evo job's is worked out from the chain: Coordinator.start_params)
-                have = self.coord.start_params(job_id)
-            except Exception:  # noqa: BLE001
-                have = self.store.load_params(job_id)
-        return have if have is not None and params_hash(have) == start_hash else None
-
     def _latest_round(self, job_id: str) -> int:
         return next((b.height for b in reversed(self.chain.blocks) if b.summary and b.summary.job_id == job_id), 0)
 
@@ -840,11 +779,6 @@ class Node:
         fetching them from a peer if not. They're checked against the hash the chain holds."""
         c, job = self.coord, self.chain.state.job(job_id)
         want = c.expected_start_hash(job)
-        if job.es and job.spec.rule == 2:  # a rule-2 Evo job's state is worked out from the chain, never fetched
-            with c.lock:
-                if params_hash(c.start_params(job_id)) != want:
-                    c.params.pop(job_id, None)  # behind the chain: worked out again
-                return params_hash(c.start_params(job_id)) == want
         have = self.store.load_params(job_id)
         if params_hash(have if have is not None else job.spec.init_params(job.init_seed)) == want:
             return True
@@ -877,6 +811,8 @@ class Node:
             try:
                 if self._ensure_params(job_id) or self.stopping.wait(2):
                     return
+            except RetiredJob:  # an old DeepSeek round's block: there are no weights this code could use
+                return
             except Exception:  # noqa: BLE001
                 log.exception("fetching job %s's weights failed", job_id)
                 return
@@ -886,7 +822,10 @@ class Node:
         data, a validator can't lead its rounds."""
         s = self.chain.state
         for job_id in [j for j, v in s.escrow.items() if v > 0]:
-            src = s.job(job_id).data_source
+            try:
+                src = s.job(job_id).data_source
+            except InvalidJob:  # a cut kind's job (tasks.RetiredJob): never run, so no data to fetch
+                continue
             if src.get("kind") not in ("npz", "tokens") or self.store.datasets.has(src["sha256"]):
                 continue
             for url in self.peers.urls():
@@ -905,8 +844,6 @@ class Node:
             raise ProtocolError(f"this node has stopped: {self.halted_public}")
         if tx.kind == "post_job":  # relay policy, not a rule: a block with a bigger job is as valid as before
             job = TrainingJob.from_spec_json(tx.memo, tx.sender, tx.amount)
-            if job.no_vocab():  # also relay policy: blocks already on a chain with such a job replay as they did
-                raise ProtocolError(NO_VOCAB_MSG)
             size = job.checkpoint_bytes
             if size > self.max_job_bytes:
                 raise ProtocolError(f"this node relays jobs whose models are at most {self.max_job_bytes / 2**20:g} MB "
@@ -1016,19 +953,22 @@ class Node:
         s = self.chain.state
         if job_id not in s.jobs:
             raise KeyError(job_id)
-        if not self.store.params_height(job_id):  # untrained: its size is its spec's, and there's nothing to hash
+        retired = None
+        try:
+            s.job(job_id)
+        except RetiredJob as e:  # a cut kind's job the chain still holds: its spec and escrow, no model
+            retired = str(e)
+        if retired is not None:
+            model = None
+        elif not self.store.params_height(job_id):  # untrained: its size is its spec's, and there's nothing to hash
             model = {"height": 0, "bytes": s.job(job_id).checkpoint_bytes, "sha256": None}
         else:
             height, size, sha = self._model_sum(job_id)
             model = {"height": height, "bytes": size, "sha256": sha}
         out = {"spec": json.loads(s.jobs[job_id]), "owner": s.job_owner[job_id], "escrow": s.escrow.get(job_id, 0),
                "rounds": self.store.job_rounds(job_id), "model": model}
-        if "deepseek" in out["spec"]:  # where its prep is, and the records' root once it's done (trainers check it)
-            try:
-                state = self.coord.prep(self.coord.job(job_id))
-                out["prep"] = {"done": state.done, "root": state.root}
-            except Exception:  # noqa: BLE001 - its data isn't on this node
-                out["prep"] = {"done": False, "root": None}
+        if retired is not None:
+            out["retired"] = retired
         return out
 
     def _model_bytes(self, job_id: str) -> tuple[int, bytes, str]:
@@ -1089,17 +1029,12 @@ class Node:
         jobs = [netstats.job_summary(j, json.loads(spec), s.escrow.get(j, 0), self.store.job_rounds(j), current,
                                      lambda h: blocks[h].timestamp if 0 <= h < len(blocks) else None)
                 for j, spec in list(s.jobs.items())]
-        for j in jobs:  # a DeepSeek job's prep, as the front page draws it (netstats: "prep")
-            if "deepseek" in json.loads(s.jobs[j["id"]]):
-                prep = self.coord.prep_summary(j["id"], now)
-                if prep is not None:
-                    j["prep"] = prep
         order = {"training": 0, "open": 1, "finished": 2}
         jobs.sort(key=lambda j: (order[j["status"]], -j["escrow"], j["id"]))
         return {"chain_id": self.chain.chain_id, "height": tip.height, "time": tip.timestamp, "now": now,
                 "subsidy": s.subsidy(tip.height + 1), "validators": len(s.validator_set()), "round": rnd,
                 "miners": netstats.summarize(recent, now), "hardware": netstats.census(self._registrations(recent, now), now),
-                "gaps": self.gaps.summary(now), "jobs": jobs}
+                "jobs": jobs}
 
     def _registrations(self, recent: list[dict], now: float) -> list[dict]:
         """Who registered for the last day's rounds and on what kind of machine, from the round records this node
@@ -1198,18 +1133,13 @@ class Node:
             raise WireError("malformed envelope")
         if not set(env["body"]) <= BODIES.get(kind, set()):
             raise WireError(f"a {kind} message has only {', '.join(sorted(BODIES.get(kind, ())))}")
-        if len(canonical(env)) > {"reveal": MAX_REVEAL, "move": MAX_MOVE, "sign": MAX_REVEAL}.get(kind, MAX_MESSAGE):
+        if len(canonical(env)) > {"reveal": MAX_REVEAL, "move": MAX_MOVE}.get(kind, MAX_MESSAGE):
             raise WireError(f"{kind} message too large")
         # Refused here, not in the coordinator: a wire rule can be stricter than the record's (replay.py doesn't come
         # this way), so nodes of different versions still agree on every block.
         if kind == "register" and "hardware" in env["body"] and not hardware.valid_class(env["body"]["hardware"]):
             raise WireError("the hardware class isn't in its canonical form (what hardware.hardware_class makes)")
-        if kind == "register" and "numerics" in env["body"] and not hardware.valid_numerics(env["body"]["numerics"]):
-            raise WireError("the number setup isn't in its canonical form (what hardware.numerics makes)")
-        if kind == "verdict" and "gap" in env["body"] and not valid_gap(env["body"]["gap"]):
-            raise WireError("a check's gap is a number from 0 to 1e6")
         addr, body = open_envelope(env, kind, self.chain.chain_id)
-        commitment = self._prep_commitment(body) if kind == "reveal" else None
         with c.lock:
             r = c.r
             if r is None or body.get("round") != r.round_no:
@@ -1222,14 +1152,7 @@ class Node:
                 return {"ok": True, "receipt": self._receipt(kind, entry)}
             if kind == "assignment":
                 units = c.assignment(addr)
-                out = {"units": [u.to_dict() for u in units]}
-                if r.prep:  # a DeepSeek prep round: which unit of the work graph each is, and what its inputs must be
-                    out["prep"] = {u.unit_id: r.prep[u.unit_id] for u in units}
-                    out["want"] = c.prep(job).want()
-                if r.es:  # an ES round's problems are at the level its starting state holds (each unit's seed: the round's);
-                    # a rule-2 round's (es2.py): its step and fitness instead
-                    out["es"] = {k: r.record["es"][k] for k in ("level", "step", "fitness") if k in r.record["es"]}
-                return out
+                return {"units": [u.to_dict() for u in units]}
             if kind == "commit":
                 cm = commitment_in(body["commitment"])
                 if cm.worker != addr:
@@ -1238,59 +1161,6 @@ class Node:
                     raise WireError("a commitment's digest is a SHA-256")
                 c.commit(cm)
                 return {"ok": True, "receipt": self._receipt(kind, commitment_out(cm))}
-            if kind == "sign":  # a DeepSeek unit's links to the bucket (deepseek_rounds; Coordinator.may_sign)
-                reqs = body["requests"]
-                if self.bucket is None:
-                    raise ProtocolError("this node has no bucket for DeepSeek jobs' hand-offs")
-                if not isinstance(reqs, list) or not 1 <= len(reqs) <= 64:
-                    raise WireError("a sign message asks for 1-64 links")
-                urls = []
-                for req in reqs:
-                    try:
-                        method, name, query = str(req[0]), str(req[1]), dict(req[2] or {})
-                    except (TypeError, IndexError, ValueError) as e:
-                        raise WireError(f"a link request is [method, name, query]: {e}") from None
-                    c.may_sign(addr, method, name, query)
-                    # A write's link dies when the compute phase it was for ends at the latest: one that ends
-                    # sooner, its units all committed (Coordinator.all_in), leaves it working to then (DEEPSEEK.md
-                    # §8's launch list).
-                    left = max(1, int(self.phase_ends - time.time())) if method in ("PUT", "POST") else None
-                    urls.append(self.bucket(method, f"{r.job_id}/{name}", {k: str(v) for k, v in query.items()},
-                                            expires=left))
-                return {"urls": urls}
-            if kind == "reveal" and isinstance(body.get("reveal"), dict) and body["reveal"].get("prep"):
-                d = body["reveal"]  # a DeepSeek prep unit's: the root of its commitment in the bucket, and the salt
-                try:
-                    root, salt = bytes.fromhex(d["merkle_root"]), bytes.fromhex(d["salt"])
-                    if len(root) != 32 or len(salt) > 64:
-                        raise WireError("more in it than a reveal has")
-                    rv = Reveal(str(d["unit_id"]), str(d["worker"]), root, salt, None, {})
-                except (KeyError, TypeError, ValueError, AttributeError) as e:
-                    raise WireError(f"bad reveal: {e}") from e
-                if rv.worker != addr:
-                    raise ProtocolError("can only reveal for yourself")
-                wire = {"unit_id": rv.unit_id, "worker": rv.worker, "merkle_root": root.hex(), "salt": salt.hex(), "prep": True}
-                verdict = c.reveal(rv, wire=wire, commitment=commitment)
-                return {"ok": verdict is None, "verdict": verdict.value if verdict else "pending", "receipt": self._receipt(kind, wire)}
-            if kind == "reveal" and job.es:  # an ES claim's: its answers blob and the rewards it claims for them
-                d = body["reveal"]
-                try:
-                    root, salt = bytes.fromhex(d["merkle_root"]), bytes.fromhex(d["salt"])
-                    answers, rewards = check_id(d["es"]["answers"]), d["es"]["rewards"]
-                    lps = d["es"].get("lps")  # a rule-2 claim's replay log-probabilities (es2_rounds.py), or null
-                    if (len(root) != 32 or len(salt) > 64 or not isinstance(rewards, list) or len(rewards) > 4096
-                            or not (lps is None or isinstance(lps, list) and len(lps) <= 4096)):
-                        raise WireError("more in it than a reveal has")
-                    rv = Reveal(str(d["unit_id"]), str(d["worker"]), root, salt, None, {})
-                except (KeyError, TypeError, ValueError, AttributeError) as e:
-                    raise WireError(f"bad reveal: {e}") from e
-                if rv.worker != addr:
-                    raise ProtocolError("can only reveal for yourself")
-                raw = self.blobs.path(answers).read_bytes() if self.blobs.has(answers) else None
-                wire = {"unit_id": rv.unit_id, "worker": rv.worker, "merkle_root": root.hex(), "salt": salt.hex(),
-                        "es": {"answers": answers, "rewards": rewards, **({"lps": lps} if job.spec.rule == 2 else {})}}
-                verdict = c.reveal(rv, wire=wire, commitment=raw)
-                return {"ok": verdict is None, "verdict": verdict.value if verdict else "pending", "receipt": self._receipt(kind, wire)}
             if kind == "reveal":
                 d = body["reveal"]
                 try:
@@ -1318,11 +1188,7 @@ class Node:
                 for t in c.tasks_for(addr):
                     d = {"task_id": t.task_id, "unit": t.unit.to_dict(), "segments": t.segments, "dtype": job.wire_dtype,
                          "openings": blob_openings_out({i: (self._blob_id(a, job), pr) for i, (a, pr) in t.openings.items()})}
-                    if t.kind == "prep":  # a DeepSeek prep unit's: what to replay, and what to check it against
-                        d |= {"kind": "prep", **c.prep_task(t)}
-                    elif t.kind == "es":  # an ES claim's: its answers blob, rewards and level (segments: its members)
-                        d |= {"kind": "es", **c.es_task(t)}
-                    elif t.kind != "check":  # fine-tunes': only new workers get these, so old ones see what they always did
+                    if t.kind != "check":  # fine-tunes': only new workers get these, so old ones see what they always did
                         d |= {"kind": t.kind}
                     tasks.append(d)
                 return {"tasks": tasks}
@@ -1330,13 +1196,6 @@ class Node:
                 bad = body.get("bad_segment")
                 c.submit_verdict(addr, str(body["task_id"]), bool(body["ok"]), None if bad is None else int(bad), envelope=env,
                                  score=body.get("score"))
-                t = r.tasks.get(str(body["task_id"]))
-                if t is not None and t.gap is not None:
-                    setup = lambda a: hardware.numerics_key(r.regs[a].numerics) if a in r.regs else None  # noqa: E731
-                    worker, checker = setup(t.submitter), setup(addr)
-                    same = worker is not None and worker == checker
-                    margin = job.spec.margin_for(same) if hasattr(job.spec, "margin_for") else job.spec.margin
-                    self.gaps.add(time.time(), worker, checker, t.gap, float(margin))  # the pair's own margin
                 return {"ok": True, "receipt": self._receipt(kind, env)}
             if kind == "move":
                 view = c.submit_move(addr, {k: body.get(k) for k in ("game", "n", "move")}, envelope=env, now=time.time())
@@ -1405,14 +1264,6 @@ class Node:
             if r is None or c.phase not in (Phase.COMPUTE, Phase.REVEAL) or not r.assignments.get(addr):
                 raise ProtocolError("checkpoints can only be uploaded by this round's workers, before the reveal deadline")
             job = c.job(r.job_id)
-            if job.es:  # an ES unit's answers (es.claim_bytes), one a unit
-                mine = self.uploads.setdefault(addr, set())
-                if not 0 < total <= MAX_ES_ANSWERS:
-                    raise ProtocolError(f"an ES unit's answers are at most {MAX_ES_ANSWERS} bytes")
-                if blob_id not in mine and len(mine) >= len(r.assignments[addr]):
-                    raise ProtocolError("answers upload quota for this round used up")
-                mine.add(blob_id)
-                return addr
             if total != job.spec.n_params * np.dtype(job.wire_dtype).itemsize:
                 raise ProtocolError("upload isn't the size of one checkpoint for this job")
             mine = self.uploads.setdefault(addr, set())

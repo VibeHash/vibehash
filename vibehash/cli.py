@@ -38,15 +38,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import advice, credstore, crypto, filelock, hardware, mnemonic, modelstore, nodeadmin, proxy, settings, tls, unattended
+from . import advice, credstore, crypto, filelock, hardware, mnemonic, nodeadmin, proxy, settings, tls, unattended
 from . import economics as econ
 from . import fees
 from . import wallet as wallets
 from .client import MIN_CLIENT, NodeClient, NodeError, WorkerClient, job_ids, too_old
 from .crypto import AddressError, KeyPair, checksummed, parse_address
-from .ledger import UNBONDING_ROUNDS, Block, Chain, canonical
+from .ledger import UNBONDING_ROUNDS, Block, Chain
 from .model import ModelSpec
-from .tasks import NO_VOCAB_MSG, SYN_PER_VIBE, InvalidJob, TrainingJob
+from .tasks import SYN_PER_VIBE, InvalidJob, TrainingJob
 from .watch import DEFAULT_PORT as WATCH_PORT
 
 ADMIN_PORT = 7546  # the admin app's local server (admin.DEFAULT_PORT; not imported: the admin module is for admins only)
@@ -124,9 +124,9 @@ def normalise_url(text: str, https: bool = False) -> str:
     text = text.strip().rstrip("/")
     if "://" in text:
         return text
-    for public in (settings.PUBLIC_NODE, settings.PUBLIC_EVO_NODE):  # the public nodes serve HTTPS, Evo's on 8443
-        if text in (urlsplit(public).hostname, urlsplit(public).netloc):
-            return public
+    public = settings.PUBLIC_NODE  # the public node serves HTTPS
+    if text in (urlsplit(public).hostname, urlsplit(public).netloc):
+        return public
     scheme = "https" if https else "http"
     return f"{scheme}://{text}" if urlsplit(f"http://{text}").port else f"{scheme}://{text}:8545"
 
@@ -332,8 +332,6 @@ def cmd_genesis_create(a):
                      f"{', '.join(map(checksummed, unstaked))}")
     if a.earn_in:
         g["earn_in"] = True
-    if a.es:
-        g["es"] = True
     if a.decision:
         g["decision"] = True
     starters = []
@@ -356,8 +354,6 @@ def cmd_genesis_create(a):
     print(f"wrote {a.out}  genesis hash {hash_}\n{_describe_economics(economics)}")
     if a.earn_in:
         print(f"workers can start with no stake: their first {fmt(econ.MIN_STAKE)} of pay becomes their stake")
-    if a.es:
-        print("Evo jobs can run on it (\"es\": true)")
     if a.decision:
         print("fine-tunes of decision models like Laya can run on it (\"decision\": true)")
     for spec in starters:
@@ -416,7 +412,7 @@ def _loopback(host: str) -> bool:
 
 def cmd_node(a):
     from .coordinator import CoordinatorConfig
-    from .node import HALT_EXIT, RESTART_EXIT, FolderInUse, Node, PhaseTimes, bucket_from_env  # only nodes need the server
+    from .node import HALT_EXIT, RESTART_EXIT, FolderInUse, Node, PhaseTimes  # only nodes need the server
     from .ratelimit import Limits
 
     if crypto.BACKEND != "openssl":
@@ -452,7 +448,6 @@ def cmd_node(a):
         node = Node(a.data_dir, genesis, load_wallet(a.wallet), a.host, a.port, times, config=CoordinatorConfig(min_fee=a.min_fee),
                     keep_rounds=a.keep_rounds, limits=limits, tls=context, peers=[normalise_url(p) for p in a.peer or []],
                     announce=normalise_url(a.announce) if a.announce else None, max_job_bytes=int(a.max_job_mb * 2**20),
-                    bucket=bucket_from_env(),  # DeepSeek jobs' hand-offs, if $VIBEHASH_BUCKET_* are set
                     min_client=a.min_client, admin_token=a.admin_token, admin_mfa=a.admin_mfa,
                     onion=a.onion, model_access=a.model_access).start()
     except FolderInUse as e:
@@ -497,10 +492,9 @@ def cmd_tls_fingerprint(a):
 
 
 def pin_gpu(a) -> None:
-    """`--device cuda:N`: this process sees GPU N alone (CUDA_VISIBLE_DEVICES), as its "cuda". Evo's engines (es_fast,
-    es_hybrid) put their buffers, streams and CUDA graphs on "cuda", the current GPU, which is per thread and GPU 0 by
-    default: on any other GPU they captured empty graphs on the wrong device (garbage answers, rejected and slashed).
-    Only before PyTorch has started CUDA, which the variable can't change afterwards; a GPU list already set
+    """`--device cuda:N`: this process sees GPU N alone (CUDA_VISIBLE_DEVICES), as its "cuda". Code that puts buffers,
+    streams or CUDA graphs on "cuda", the current GPU, which is per thread and GPU 0 by default, then lands on the
+    right card (an engine that captured graphs on GPU 0 while working on another gave garbage answers). Only before PyTorch has started CUDA, which the variable can't change afterwards; a GPU list already set
     (CUDA_VISIBLE_DEVICES=2,3) is indexed into."""
     m = re.fullmatch(r"cuda:(\d+)", getattr(a, "device", None) or "")
     if not m:
@@ -548,22 +542,6 @@ def _stop_like_ctrl_c() -> None:
                 pass
 
 
-def evo_network(node) -> bool:
-    """Whether `node`'s network takes Evo jobs (its genesis says "es": true, as the public Evo network's does), so the
-    miner's screen opens on the Evo scene while the job loads instead of the usual one (minerui's `evo`). Any trouble
-    reading the genesis is just "no": the screen still switches once the job is known."""
-    try:
-        return node.get("/genesis").get("es") is True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def deepseek_wanted(a) -> bool:
-    """Whether the worker takes DeepSeek work: `--deepseek yes`, else the saved choice. Frozen, so off unless chosen
-    (the first-run "ask" default only exists under VIBEHASH_DEEPSEEK_PILOT=1)."""
-    return (getattr(a, "deepseek", None) or settings.deepseek_choice()) == "yes"
-
-
 def _mine(a, keys: KeyPair):
     from . import minerui, selftest
     from .wire import MAX_CLOCK_SKEW_S
@@ -581,12 +559,8 @@ def _mine(a, keys: KeyPair):
     job = job_ids(settings.saved_jobs() if follow else None if raw in (None, "auto") else raw)
     if job and not follow:  # before the GPU's self-test: a mistyped job is said at once. A saved one that has since
         _chosen_job(NodeClient(url), job, url)  # run out is dropped as the worker runs instead (WorkerClient._sits_out)
-    if getattr(a, "deepseek", None):
-        settings.save(deepseek=a.deepseek)  # remembered: the next `vibehash worker` does the same
-    deepseek = deepseek_wanted(a)
     try:
-        w = WorkerClient(url, keys, a.memory_mb, a.flops, device=a.device, cache_dir=a.cache_dir, deepseek=deepseek,
-                         job=job)
+        w = WorkerClient(url, keys, a.memory_mb, a.flops, device=a.device, cache_dir=a.cache_dir, job=job)
     except RuntimeError as e:
         sys.exit(f"error: {e}")
     mining = f"mining {', '.join(sorted(job))} only (--job): other jobs' rounds are sat out" if job else None
@@ -626,7 +600,7 @@ def _mine(a, keys: KeyPair):
                 watcher.stop()
             _record_end(session)
         return
-    dash = minerui.MinerDashboard([("you", w)], url, evo=evo_network(w.node))
+    dash = minerui.MinerDashboard([("you", w)], url)
     if session:
         dash.note(session.where())
     if watcher:
@@ -808,7 +782,7 @@ def _setup_gpu(assume_yes: bool) -> bool:
 def cmd_update(a):
     from . import update
 
-    code = update.update(reinstall=a.evo, variant="evo" if a.evo else "base")
+    code = update.update()
     if code:
         sys.exit(code)
 
@@ -863,8 +837,6 @@ def cmd_setup(a):
     address, pw, _ = ensure_wallet(path, "   ")
     keys = None if pw is None else wallets.load(path, pw)  # (a wallet made just now: no second password for staking)
     settings.save(wallet=str(path))
-    if a.deepseek:
-        settings.save(deepseek=a.deepseek)  # what `worker` does with DeepSeek jobs, until `worker --deepseek` changes it
 
     print("\n3. Graphics card")
     if a.gpu == "skip":
@@ -872,10 +844,7 @@ def cmd_setup(a):
     else:
         _setup_gpu(a.yes)
 
-    print("\n4. Space for big models")
-    _setup_models(a)
-
-    print("\n5. Stake")
+    print("\n4. Stake")
     staked = False
     if status is None:
         print("   skipped (no node yet)")
@@ -910,67 +879,6 @@ def cmd_setup(a):
         cmd_worker(parser().parse_args(["worker", "--node", url, "--wallet", str(path)]), keys)  # no second password
     else:
         print(f"\nAll set. Start earning with:\n   {prog()} worker")
-
-
-def _setup_models(a) -> None:
-    """Where big model files (DeepSeek's ~30 GB) go, how much space they may take, and whether they're kept after a
-    job ends (modelstore.py). Asked once; flags set them outright; re-running setup with no flags keeps them."""
-    saved = settings.load().get("models")
-    store = modelstore.Store.from_settings()
-
-    def reply(question: str) -> str:
-        try:
-            return input("   " + question).strip()
-        except EOFError:  # nothing to read: Windows counts NUL as a terminal
-            print()
-            return ""
-    if a.models_dir:
-        store.folder = modelstore.dedicated(Path(a.models_dir).expanduser().resolve())
-    elif not saved and unattended.interactive() and not a.yes:
-        print("   Big models (like DeepSeek's, ~30 GB) are downloaded only when you take their work, and deleted when the\n"
-              "   job ends or after a week without mining it. Where should they go?")
-        store.choose(ask=reply, say=lambda m: print("   " + m))
-    if a.models_gb:
-        store.cap = int(a.models_gb * modelstore.GB)
-    elif not saved and unattended.interactive() and not a.yes:
-        answer = reply(f"How much space may they use, in GB? (Enter: {store.cap / modelstore.GB:.0f}) ")
-        if answer:
-            try:
-                store.cap = int(float(answer) * modelstore.GB)
-            except ValueError:
-                print(f"   kept {store.cap / modelstore.GB:.0f} GB")
-    if a.keep_models is not None:
-        store.keep = a.keep_models == "yes"
-    elif not saved and unattended.interactive() and not a.yes:
-        store.keep = reply("Keep them after a job ends, to save downloading them again on a slow link? They'd\n"
-                           "   stay until you run `vibehash cache clear`. [y/N] ").lower() in ("y", "yes")
-    store.remember()
-    print(f"   {store.folder}, up to {store.cap / modelstore.GB:.0f} GB, "
-          + ("kept after a job ends" if store.keep else "deleted when the job ends") + f" (`{prog()} cache` shows them)")
-
-
-def cmd_cache(a):
-    """What the model store holds (where, how big, why), or `cache clear [JOB]` to remove it."""
-    store = modelstore.Store.from_settings()
-    if a.action == "clear":
-        freed = store.clear(a.job)
-        print(f"removed {freed / modelstore.GB:.1f} GB" + (f" of job {a.job}'s files" if a.job else "")
-              + f" from {store.folder}")
-        return
-    if a.action == "sweep":
-        gone = store.sweep()
-        print(f"removed {len(gone)} file(s) no job has used for a week, and stray partial downloads")
-        return
-    entries = store.entries()
-    print(f"{store.folder}: {store.usage() / modelstore.GB:.1f} GB of the {store.cap / modelstore.GB:.0f} GB you allow"
-          + ("; kept after jobs end" if store.keep else "; deleted when their jobs end"))
-    if a.json:
-        print(json.dumps(entries, indent=1))
-        return
-    if not entries:
-        print("nothing stored")
-    for e in entries:
-        print(f"  {e['bytes'] / modelstore.GB:7.2f} GB  {e['name']}\n             {e['what']}: {e['why']}")
 
 
 def cmd_balance(a):
@@ -1166,8 +1074,6 @@ def cmd_post_job(a):
         job = TrainingJob.from_spec_json(json.dumps(spec), keys.address, a.budget)
     except InvalidJob as e:
         sys.exit(f"invalid job spec: {e}")
-    if job.no_vocab():
-        sys.exit(f"invalid job spec: {NO_VOCAB_MSG}")
     fee = node.min_fee() if a.fee is None else a.fee
     txid = node.send_tx(keys, "post_job", "system", a.budget, job.spec_json(), fee)
     print(f"posted job {job.job_id} with budget {fmt(a.budget)} and a {fmt(fee)} fee ({txid})")
@@ -1186,110 +1092,12 @@ def cmd_job_template(a):
     out = Path(a.out)
     if out.exists():
         sys.exit(f"{out} already exists; refusing to overwrite it")
-    if a.evo:
-        return _evo_template(a, out)
     try:
         job = template_job(a.id, a.gpu)
     except InvalidJob as e:
         sys.exit(f"invalid job id: {e}")
     out.write_text(json.dumps(job.to_spec(), indent=2) + "\n")
     print(f"wrote {out}; edit it, then post it with post-job --spec {out}")
-
-
-def _loop_stop(text: str) -> tuple:
-    """--loop-stop PERIOD,RUN as a spec's loop_stop, or () for "off" (es2.Spec2.loop_stop)."""
-    if text.strip().lower() in ("off", "0", "none", ""):
-        return ()
-    try:
-        period, run = (int(x) for x in text.split(","))
-    except ValueError:
-        sys.exit(f"--loop-stop is PERIOD,RUN (such as 32,48) or off, not {text!r}")
-    return (period, run)
-
-
-def _cross_margin(text: str) -> float:
-    """--cross-margin X as a spec's cross_margin, or 0 for "off" (es2.Spec2.cross_margin)."""
-    if text.strip().lower() in ("off", "0", "none", ""):
-        return 0.0
-    try:
-        return float(text)
-    except ValueError:
-        sys.exit(f"--cross-margin is a number of logits (such as 0.5) or off, not {text!r}")
-
-
-def _task_tokens(text: str) -> dict:
-    """--task-tokens TASK=N,TASK=N as a spec's task_tokens, or {} for "off" (es2.Spec2.task_tokens)."""
-    if text.strip().lower() in ("off", "0", "none", ""):
-        return {}
-    try:
-        return {t.strip(): int(n) for t, n in (part.split("=") for part in text.split(",") if part.strip())}
-    except ValueError:
-        sys.exit(f"--task-tokens is TASK=N[,TASK=N...] (such as math=448,gsm8k=384) or off, not {text!r}")
-
-
-def _evo_template(a, out: Path):
-    """An Evo job that never ends, for a genesis's starter job (`genesis create --starter-job`): Evo v2's settings,
-    its tasks taken in turn, `--rounds` each (es2.task_at), fee 0. Only the model's config.json is fetched."""
-    from . import es_local, es_tasks
-
-    named = {"all": tuple(t for t in es_tasks.NAMES if t not in es_tasks.POOL_TASKS), "curated": es_tasks.CURATED,
-             "vibe": es_tasks.VIBE}
-    tasks = (list(named[a.tasks]) if a.tasks in named else [t.strip() for t in a.tasks.split(",") if t.strip()])
-    unknown = [t for t in tasks if t not in es_tasks.NAMES]
-    if unknown or not tasks:
-        sys.exit(f"unknown task {unknown[0] if unknown else '(none given)'}: the tasks are {', '.join(es_tasks.NAMES)}")
-    problems = getattr(a, "problems", None)
-    if problems is not None and problems < 1:
-        sys.exit(f"--problems is a positive number of problems a member answers a round, not {problems}")
-    # A pool task's problems carry whole target replies (es_tasks.PoolTask): members are scored on those (gold), with
-    # room for them (target_tokens), and write only a short answer each, enough for the answer check to see their own
-    # model at work. A job of pool tasks alone forms no replay targets (every problem is a gold one).
-    pools = [t for t in tasks if t in es_tasks.POOL_TASKS]
-    target_tokens = getattr(a, "target_tokens", None)
-    if target_tokens is not None and not pools:
-        sys.exit("--target-tokens is for pool tasks (" + ", ".join(es_tasks.POOL_TASKS) + ")")
-    pool_set = ({"gold": True, "target_tokens": target_tokens or es_tasks.POOL_TARGET_TOKENS,
-                 **({"replay": 0} if len(pools) == len(tasks) else {})} if pools else {})
-    try:
-        found = es_local.find(a.evo, config_only=True)
-        # The vibe mix reasons before it answers (gsm8k, math, ifeval), so it gets room to: es_tasks.VIBE.
-        max_tokens = a.max_tokens or (es_tasks.VIBE_MAX_TOKENS if a.tasks == "vibe" else
-                                      es_tasks.POOL_ANSWER_TOKENS if pools and len(pools) == len(tasks) else None)
-        # A looping answer ends where it loops (es2.loop_end): on by default for vibe, whose answers run long.
-        loop = (es_tasks.VIBE_LOOP_STOP if a.tasks == "vibe" else ()) if a.loop_stop is None else _loop_stop(a.loop_stop)
-        # Checkers paired by number setup, a tight margin for the same setup and a wider one across (es2.cross_margin).
-        cross = es_local.V2_CROSS_MARGIN if a.cross_margin is None else _cross_margin(a.cross_margin)
-        # The long tasks' answers end sooner (es2.task_tokens): on by default for vibe, cut where its right answers end.
-        # (A default cap at or past the job's max_tokens would change nothing, so it's left out.)
-        top = max_tokens or es_local.V2_SETTINGS["max_tokens"]
-        caps = ({t: n for t, n in es_tasks.VIBE_TASK_TOKENS.items() if t in tasks and n < top}
-                if a.tasks == "vibe" else {}) if a.task_tokens is None else _task_tokens(a.task_tokens)
-        spec = es_local.spec2_for(found, tasks[0], rounds=a.rounds, tasks=tuple(tasks),
-                                  **({"max_tokens": max_tokens} if max_tokens else {}),
-                                  **({"loop_stop": tuple(loop)} if loop else {}),
-                                  **({"task_tokens": caps} if caps else {}),
-                                  **({"margin": min(es_local.V2_PAIRED_MARGIN, cross), "cross_margin": cross}
-                                     if cross else {}),
-                                  **({"fixed_step": True} if es_local.V2_FIXED_STEP and not getattr(a, "no_fixed_step", False) else {}),
-                                  **({"problems": problems} if problems else {}),
-                                  # Right-answer scoring (es2.Spec2.gold); the few replay targets left are the reasoned
-                                  # tasks' (es_tasks.WRITTEN), kept few so they don't outweigh the round's own problems.
-                                  **({"gold": True, "replay": es_local.V2_GOLD_REPLAY}
-                                     if getattr(a, "gold", False) else {}),
-                                  **pool_set)
-        job = es_local.job2(spec, a.id, "system", budget=1, fee=0)
-    except (ValueError, RuntimeError, OSError, InvalidJob) as e:
-        sys.exit(f"can't make an Evo job for {a.evo}: {e}")
-    out.write_text(json.dumps(job.to_spec(), indent=2) + "\n")
-    print(f"wrote {out}: an Evo job on {found.repo}, {len(tasks)} tasks{' mixed in every round' if spec.mix else ' in turn'}, "
-          f"answers up to {spec.max_tokens} tokens"
-          f"{f' (or until one loops: {spec.loop_stop[1]} tokens repeating a stretch of up to {spec.loop_stop[0]})' if spec.loop_stop else ''}"
-          f"{(', ' + ', '.join(f'{t} {n}' for t, n in spec.task_tokens)) if spec.task_tokens else ''}"
-          f"{f', checked to {spec.margin:g} on a machine like its worker and {spec.cross_margin:g} across' if spec.cross_margin else ''}"
-          f"{', members scored on the right answers' if spec.gold else ''}"
-          f"{f' (pool targets up to {spec.target_tokens} tokens)' if spec.target_tokens else ''}"
-          f", paying only new coins; give it to `vibehash genesis create --es "
-          f"--starter-job {out}`, or post it with `vibehash post-job --spec {out} --budget VIBE`")
 
 
 def cmd_cancel_job(a):
@@ -1577,78 +1385,13 @@ def _decision(a, ref: str) -> None:
               f"When it's trained:  {prog()} job download   (a Laya checkpoint, for laya.Agent)")
 
 
-def _evo(a) -> None:
-    """`train --evo`: post an Evo job (es.py, es_local.py) to the node: training by evolution on Countdown puzzles the
-    chain draws, so there's no data file. Only a chain whose genesis takes ES jobs accepts one, which is checked first,
-    before a model is looked for or a wallet opened: on any other chain nothing is spent. Then the plan, and one question
-    before anything is posted."""
-    from . import es_local, trainui
-
-    url = node_of(a)
-    node = NodeClient(url)
-    if not es_local.accepts(node.get("/genesis")):
-        sys.exit(es_local.LOCAL_ONLY)
-    if a.data is not None:
-        sys.exit("an Evo job trains on Countdown puzzles drawn from the chain, so it takes no data file: leave it out")
-    model = a.base or es_local.MODEL
-    print(f"{es_local.TAGLINE}. Reading {model}'s config…", file=sys.stderr)
-    try:
-        found = es_local.find(model, config_only=True)
-        spec = es_local.spec_for(found)
-    except (RuntimeError, ValueError, OSError) as e:
-        sys.exit(f"error: {e}")
-    stem = re.sub(r"[^a-z0-9._-]+", "-", found.repo.split("/")[-1].lower()).strip("-._")[:30] or "model"
-    job_id = a.id or f"evo-{stem}-{secrets.token_hex(2)}"
-    fee = es_local.FEE if a.fee is None else a.fee
-    try:
-        job = es_local.job(spec, job_id, "", a.budget, fee)
-    except InvalidJob as e:
-        sys.exit(f"error: {e}")
-    home = _job_home(job_id)
-    if home.exists():
-        sys.exit(f"you already have a job called {job_id}; pick another name with --id")
-    rounds = a.budget // fee if fee else 0
-    print(f"Evo job {job_id}: training by evolution, the chain is the model\n"
-          f"  model     {found.folder if found.base.startswith('hf:local/') else found.repo + ' at ' + found.base[-40:][:7]}: "
-          f"{spec.n:,} numbers evolve "
-          f"({', '.join(spec.tensors)})\n"
-          f"  method    {spec.pairs} twin pairs a generation ({2 * spec.pairs} nudged copies, sigma {spec.sigma:g}), "
-          f"{spec.problems} Countdown puzzles each, starting at level {spec.level}\n"
-          f"  budget    {fmt(a.budget)}: up to {rounds} generations at {fmt(fee)} each, paid only for work that passes "
-          "its checks\n"
-          + (f"  workers   only this computer's: a model's folder is in no one else's cache\n"
-             if found.base.startswith("hf:local/") else
-             f"  workers   need {found.repo} in their Hugging Face cache (a `testnet --evo`'s have it)\n"))
-    if not ask("Post it?", a.yes):
-        print("Nothing was posted, and nothing was spent.")
-        return
-    keys = load_wallet(wallet_of(a))
-    home.mkdir(parents=True)
-    (home / "job.json").write_text(json.dumps({"job_id": job_id, "node": url, "kind": "es", "base": spec.base,
-                                               "budget": a.budget, "fee": fee}, indent=2))
-    try:
-        node.send_tx(keys, "post_job", "system", a.budget, job.spec_json())
-    except NodeError:
-        shutil.rmtree(home, ignore_errors=True)
-        raise
-    settings.save(last_job=job_id)
-    print(f"Posted Evo job {job_id}")
-    if trainui.supported(a.plain):
-        _follow(job_id, url, budget=a.budget, posted=True, evo=True)
-    else:
-        print(f"\nWatch it evolve:  {prog()} job watch")
-
-
 def cmd_train(a):
     """A CSV file in, a training job on the network out, with sensible model settings chosen for it. On a terminal
     it then follows the job on the live training dashboard. With `--base` and a file of chats or text, it fine-tunes
-    an open-weight model instead (_finetune); `--base` alone shows what that model would take. With `--evo`, an Evo
-    job (_evo)."""
+    an open-weight model instead (_finetune); `--base` alone shows what that model would take."""
     from . import catalog, tabular, trainui
     from .blobs import file_sha256
 
-    if getattr(a, "evo", False):
-        return _evo(a)
     if a.fee is None:
         a.fee = to_syn("10")
     if a.base is None and a.data is None and sys.stdin.isatty() and sys.stdout.isatty():
@@ -1783,13 +1526,12 @@ def cmd_job_status(a):
         print(f"Watch it train live: {prog()} job watch {job_id}")
 
 
-def _follow(job_id: str, url: str, budget: int | None = None, posted: bool = False, plain: bool = False,
-            evo: bool = False) -> None:
+def _follow(job_id: str, url: str, budget: int | None = None, posted: bool = False, plain: bool = False) -> None:
     """Follow a training job until its budget is spent, or Ctrl+C: the live dashboard on a terminal, else a log line
-    per event. Then say where it stands, and what's next. `evo`: an Evo job, shown as one before the node says."""
+    per event. Then say where it stands, and what's next."""
     from . import records, trainui
 
-    watch = trainui.JobWatch(job_id, url, budget=budget, posted=posted, evo=evo)
+    watch = trainui.JobWatch(job_id, url, budget=budget, posted=posted)
     folder = records.job_folder(job_id)
     if folder is not None:  # its rounds, kept in ~/.vibehash/jobs/<job> as they land
         watch.history = records.JobHistory(job_id, folder, watch.api)
@@ -1838,8 +1580,6 @@ def cmd_job_download(a):
 
     job_id = _job_of(a)
     node = _job_node(a, job_id)
-    if _evo_job(node, job_id):  # an Evo job keeps no weights: its model is worked out from the chain (a whole model)
-        return _evo_export(node, job_id, a.out, dtype="float32" if a.float32 else "bfloat16")
     try:
         info, raw = node.download_model(job_id)
     except NodeError as e:
@@ -1919,9 +1659,8 @@ def _download_merged(a, node: NodeClient, job, weights, about: dict, source, tra
 
     spec = job.spec
     if spec.kind != "lora":
-        sys.exit("error: a DeepSeek job's merged model would be the whole of DeepSeek-V4.1-Flash, hundreds of GB, "
-                 "rewritten with its top layers changed: download its adapter (without --merged), which loads on the "
-                 "base with PEFT or vLLM")
+        sys.exit("error: --merged folds a language model's LoRA adapter into its base; download this job's weights "
+                 "without it")
     out = Path(a.out or (f"{Path(source).stem}-merged" if source else f"{job.job_id}-merged"))
     try:
         manifest = _base_manifest(node, job)
@@ -1991,62 +1730,6 @@ def _base_manifest(node: NodeClient, job):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(manifest.to_bytes())
     return manifest
-
-
-def _evo_job(node: NodeClient, job_id: str) -> bool:
-    """Whether `job_id` is an Evo job (its model is worked out from the chain, not downloaded)."""
-    from . import es_export
-    try:
-        return bool(es_export.job_of(node, job_id).es)
-    except (NodeError, KeyError, ValueError):
-        return False  # download_model says what's wrong with it
-
-
-def _evo_export(node: NodeClient, job_id: str, out, device: str | None = None, dtype: str = "bfloat16") -> None:
-    """An Evo Hash job's model, worked out from the chain, saved as a Hugging Face folder (es_export.py)."""
-    import logging
-
-    from . import es_export
-    from .finetune import available
-
-    if not available():
-        sys.exit(f"exporting an Evo model needs PyTorch: {prog()} install-gpu (or pip install vibehash[evo])")
-    out = Path(out or f"{job_id}-model")
-    print(f"Working out {job_id}'s model from {node.url}'s chain: every round of it and of the jobs it started "
-          "from, each checked against its block. A line a worker on this computer saved makes it quick; without one "
-          "it's about 5 s a round on the CPU.", flush=True)
-    worker_log = logging.getLogger("vibehash.worker")
-    if not worker_log.handlers and not logging.getLogger().handlers:  # the rebuild's progress lines, on screen
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("  %(message)s"))
-        worker_log.addHandler(h)
-        worker_log.setLevel(logging.INFO)
-    try:
-        info = es_export.export(node, job_id, out, device=device, dtype=dtype)
-    except (NodeError, ValueError, FileNotFoundError, FileExistsError, RuntimeError) as e:
-        sys.exit(f"error: {e}")
-    settings.save(last_model=str(out.resolve()))
-    parents = len(info["lineage"])
-    print(f"saved {out}/: {info['base'].split('@')[0].removeprefix('hf:')} after Evo job {job_id} ({info['task']}, "
-          f"{info['rounds_learned']} rounds that changed it"
-          + (f", built on {parents} earlier job{'s' * (parents != 1)}" if parents else "")
-          + f"), as of block {info['block']}, {info['dtype']}, in {info['seconds']:.0f} s\n"
-          f"What it is and how to use it: {out / 'EVO.md'}")
-
-
-def cmd_evo_export(a):
-    """`vibehash evo export [JOB]`: an Evo Hash job's model as a Hugging Face folder; the newest Evo job by default."""
-    from . import es_export
-
-    node = NodeClient(normalise_url(a.node) if a.node else es_export.LOCAL_NODE)
-    try:
-        job_id = a.job_id or es_export.newest_job(node)
-    except NodeError as e:
-        sys.exit(f"error: {e}\n(is the Evo testnet running? Start it again with `{prog()} testnet --evo2`: it carries "
-                 "on where it stopped. Or name its node with --node)")
-    if not job_id:
-        sys.exit(f"{node.url} has no Evo Hash job with a round that changed its model yet")
-    _evo_export(node, job_id, a.out, device="cpu" if a.cpu else None, dtype="float32" if a.float32 else "bfloat16")
 
 
 # --- records of what happened: worker logs, and a job's history ------------------------------------------------
@@ -2128,9 +1811,6 @@ def cmd_job_history(a):
     print(f"job {job_id} on {node.url}: {len(rows):,} round{'s' * (len(rows) != 1)} scored, "
           f"{sum(1 for r in rows if r['units_accepted']):,} of them trained it"
           + (f"; {fmt(job.escrow)} of budget left" if job.escrow is not None else ""))
-    if isinstance(info.get("prep"), dict):  # a DeepSeek job: its prep rounds are paid but not scored, so not listed
-        print("  its prep (the frozen layers' pass) is " + ("done" if info["prep"].get("done") is True else
-              "still running; prep rounds aren't scored, so they aren't in this history (miners' rounds.jsonl has them)"))
     if rows:
         worked, latest = [r for r in rows if r["units_accepted"]], rows[-20:]
         # The latest 20 rounds; of a job that's mostly sat idle lately (fruit-demo has thousands of rounds nobody
@@ -2228,7 +1908,7 @@ def cmd_chain_verify(a):
     height, replayed, unrecorded, problems, records, certified = 1, 0, 0, [], {}, 0
     # Rounds whose checkpoints the node still keeps get their weight-based results re-run too.
     window = status.get("keeps_checkpoints_for", 0) if a.recheck else 0
-    first_kept, recheck_stats, rechecked_rounds = status["height"] - window + 1, {}, 0
+    first_kept, recheck_stats, rechecked_rounds, retired = status["height"] - window + 1, {}, 0, {}
     scratch = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)  # Windows holds memory-mapped files a moment
 
     def record_of(h: int) -> dict | None:
@@ -2259,7 +1939,8 @@ def cmd_chain_verify(a):
                     # The round's checkpoints are with the validator that led it.
                     source = NodeClient(leader) if leader and leader.rstrip("/") != node.url else node
                     kept = _Downloaded(source, Path(scratch.name)) if window and block.height >= first_kept else None
-                    found = replay_block(chain, block, record_of(block.height), kept, recheck_stats if kept else None,
+                    found = replay_block(chain, block, record_of(block.height), kept,
+                                         recheck_stats if kept else retired,
                                          datasets=_Downloaded(source, Path(scratch.name)))  # (disputes' referee)
                     problems += [f"block {block.height}: {p}" for p in found]
                     replayed += 1
@@ -2297,7 +1978,11 @@ def cmd_chain_verify(a):
         print(f"replayed {replayed} rounds from their records: "
               + ("every decision follows from the signed messages" if not replay_problems else f"{len(replay_problems)} problems")
               + (f" ({unrecorded} older rounds have no record)" if unrecorded else ""))
-        if rechecked_rounds:
+        old = retired.get("retired", 0) + recheck_stats.get("retired", 0)
+        if old:  # (replay.py: the code that ran them is gone; 0.5.28 re-runs them)
+            print(f"  of them, {old:,} rounds of DeepSeek jobs, a kind since removed, were taken as their validators "
+                  "certified them: their records match their blocks, and the ledger settled them, but they weren't "
+                  "re-run. `vibehash chain verify` from 0.5.28 re-runs them")
             redone, gone = recheck_stats.get("rechecked", 0), recheck_stats.get("unchecked", 0)
             disputed = sum(" check for " in p for p in replay_problems)
             print(f"re-ran {redone} weight-based checks in the last {rechecked_rounds} rounds from their checkpoints: "
@@ -2346,26 +2031,6 @@ def _in_onedrive(path: Path) -> bool:
     return any(r and path.resolve().is_relative_to(Path(r).resolve()) for r in roots)
 
 
-def _evo_round(node, block) -> str:
-    """A testnet's sealed Evo round in a line, from the node's own record of it (--plain)."""
-    from . import es_local, esui
-
-    record = node.store.load_record(block.height) if block.summary is not None else None
-    if not isinstance(record, dict) or not isinstance(record.get("es"), dict):
-        return ""
-    gen = esui.parse_generation(0, block.height, record)
-    reward = f"mean reward {gen.mean:.1%}" if gen.mean is not None else "no pair accepted"
-    e = record["es"]
-    if e.get("rule") == 2:  # Evo v2 (es2.py): its task and cycle instead of a level, and what its entry holds
-        m = re.match(r"^evo2-c(\d+)-", block.summary.job_id)
-        cycle = f" (cycle {m.group(1)})" if m else ""
-        return (f"Evo v2 job {block.summary.job_id}, {e.get('task')}{cycle}, {reward} over {gen.pairs} pairs, "
-                f"fitness {e.get('used') or e.get('fitness')}, {len(e.get('targets') or [])} targets, "
-                f"{es_local.chain_bytes(e)} B on chain")
-    return (f"Evo job {block.summary.job_id}, level {gen.level}, {reward} over {gen.pairs} pairs, "
-            f"{es_local.chain_bytes(record['es'])} B of seeds and scores on chain")
-
-
 def cmd_testnet(a):
     """A whole network on this computer: node, workers and a training job, from one command.
     Its wallets are unencrypted throwaway keys, so never send real coins to them."""
@@ -2393,9 +2058,7 @@ def _testnet(a, held: list) -> None:
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)  # keep our lines in order with the node's log, even when piped
-    evo2 = bool(getattr(a, "evo2", False))  # Evo v2 (es2.py): the fast recipe, averaged in cycles
-    evo = evo2 or bool(getattr(a, "evo", False) or getattr(a, "evo_model", None))  # Evo mode (es_local.py)
-    d = Path(a.dir) if a.dir else settings.home() / ("testnet-evo2" if evo2 else "testnet-evo" if evo else "testnet")
+    d = Path(a.dir) if a.dir else settings.home() / "testnet"
     if (d / "genesis.json").exists():  # a testnet already: refused at once if it's running, before --reset deletes it
         held.append(_hold_testnet(d))
     if a.reset and d.exists():
@@ -2410,31 +2073,8 @@ def _testnet(a, held: list) -> None:
               "use --dir somewhere else", file=sys.stderr)
     existing = json.loads((d / "genesis.json").read_text()) if (d / "genesis.json").exists() else None
     if existing is not None and existing.get("es") is True:
-        evo = True  # an Evo testnet carries on as one
-    elif existing is not None and evo:
-        sys.exit(f"{d} is a testnet made without Evo jobs: add --reset to start it over as an Evo one, or use another --dir")
-    found = evo_spec = None
-    if evo:  # the model first: a failed download leaves no half-made testnet
-        from . import es, es_local
-        kept = json.loads((d / "evo.json").read_text()).get("model") if (d / "evo.json").exists() else None
-        model = getattr(a, "evo_model", None) or kept or es_local.MODEL  # carrying on: the model its jobs were made for
-        print(f"{es_local.TAGLINE}. Finding {model} on this computer (or downloading it once)…", flush=True)
-        try:
-            found = es_local.find(model)
-            evo_spec = es_local.spec2_for(found, "countdown") if evo2 else es_local.spec_for(found)
-        except Exception as e:  # noqa: BLE001 - not on this computer and couldn't be downloaded, or not a model we can run
-            sys.exit(f"error: couldn't get {model} for Evo mode: {e}")
-        es_local.register(found)  # where this process's workers find it
-        es.cache_noise(512 if evo2 else es_local.noise_mb(evo_spec))  # one process plays every part: noise once
-        if evo2:
-            from . import es_tasks
-            evo2_tasks = []
-            for t in es_tasks.CURATED:  # the tasks this computer can serve (they need `datasets` and a download)
-                try:
-                    es_tasks.get(t).items(0, 1)
-                    evo2_tasks.append(t)
-                except es_tasks.TaskUnavailable as e:
-                    print(f"note: Evo v2 runs without {t}: {e}", file=sys.stderr)
+        sys.exit(f"{d} is an Evo testnet, and Evo was removed from VibeHash after 0.5.28: add --reset to start it over "
+                 "without it, or use another --dir")
     count = (len(existing.get("validators", {})) or 1) if existing else (a.validators or 1)
     if existing and a.validators and a.validators != count:
         sys.exit(f"this testnet has {count} validator{'s' * (count > 1)}; add --reset to start one with {a.validators}")
@@ -2458,11 +2098,7 @@ def _testnet(a, held: list) -> None:
                    "validators": {keys[v].address: f"http://{public}:{port}" for v, port in zip(validators, ports)},
                    "economics": econ.NEW_SCHEDULES["testnet"].to_dict(),
                    "decision": True}  # it takes fine-tunes of decision models like Laya (ledger.DECISION_GATE)
-        if evo:  # a chain that takes ES jobs (ledger.ES_GATE), whose workers are staked: nothing else here to earn it on
-            genesis |= {"es": True, "stakes": {keys[n].address: es_local.STAKE for n in worker_names}}
         (d / "genesis.json").write_text(json.dumps(genesis, indent=2))
-    if evo:
-        (d / "evo.json").write_text(json.dumps({"model": model, "base": found.base}, indent=2))
     genesis = json.loads((d / "genesis.json").read_text())
     named = genesis.get("validators", {})
     ports = [urlsplit(named[keys[v].address]).port for v in validators] if named else [a.port]
@@ -2474,12 +2110,10 @@ def _testnet(a, held: list) -> None:
         logging.getLogger("vibehash.worker").setLevel(logging.WARNING)  # the node's log tells the story
 
     times = PhaseTimes(a.register_s, a.compute_s, a.reveal_s, a.verify_s, idle_s=1.0)
-    big = {"max_job_bytes": 512 * 2**20} if evo else {}  # an Evo job's state is its evolving numbers (es_local_run's)
     nodes = []
     try:
         for v, port in zip(validators, ports):
-            nodes.append(Node(d / ("node-data" if v == "node" else f"{v}-data"), genesis, keys[v], a.host, port, times,
-                              **big))
+            nodes.append(Node(d / ("node-data" if v == "node" else f"{v}-data"), genesis, keys[v], a.host, port, times))
     except (OSError, FolderInUse) as e:
         for n in nodes:
             n.close()
@@ -2511,83 +2145,27 @@ def _testnet(a, held: list) -> None:
     port = urlsplit(node.url).port
     url = f"http://{_lan_ip() if a.host == '0.0.0.0' else urlsplit(node.url).hostname}:{port}"
     p = prog()
-    dash = (minerui.MinerDashboard(clients, node.url, footer=f"kept in {d}", **({"evo": True} if evo else {}))
-            if minerui.supported(a.plain) else None)
+    dash = minerui.MinerDashboard(clients, node.url, footer=f"kept in {d}") if minerui.supported(a.plain) else None
     say = dash.note if dash else (lambda text: print("  " + text))
     if watcher:
         say(f"watch the workers at {watcher.url}")
     posted = None
-
-    def next_cycle_job(s):
-        """Evo v2's next job: the next task in turn, starting where the last job ended (its whole change at full
-        weight, pinned by its final params_hash), so the model keeps what each task taught it and moves on once a
-        task's quick early gains are in. A cycle is one job per task; evo2.json keeps this cycle's jobs and the newest
-        one's parents."""
-        from . import es2
-        path = d / "evo2.json"
-        cyc = json.loads(path.read_text()) if path.exists() else {"cycle": 1, "jobs": [], "parents": []}
-        lost = [j for j in cyc["jobs"] if j not in node.chain.state.jobs]
-        mixed = es_local.V2_MIX
-
-        def mixed_spec(parents):  # one job a cycle: every task in every round, --evo2-rounds rounds' worth of each
-            return es_local.spec2_for(found, evo2_tasks[0], start=parents, rounds=a.evo2_rounds * len(evo2_tasks),
-                                      tasks=tuple(evo2_tasks))
-        if lost:  # posted, but the network stopped before its transaction reached a block: the same job again
-            spec = (mixed_spec(cyc["parents"]) if lost[0].endswith("-mix") else
-                    es_local.spec2_for(found, lost[0].split("-", 2)[2], start=cyc["parents"], rounds=a.evo2_rounds))
-            return es_local.job2(spec, lost[0], keys["requester"].address)
-        last = cyc["jobs"][-1] if cyc["jobs"] else None  # None only before the first job
-        if mixed:
-            if cyc["jobs"]:
-                cyc = {"cycle": cyc["cycle"] + 1, "jobs": []}
-            cyc["parents"] = [[last, 1.0, es2.hash_of(node.coord.start_params(last))]] if last else []
-            job = es_local.job2(mixed_spec(cyc["parents"]), f"evo2-c{cyc['cycle']}-mix", keys["requester"].address)
-            cyc["jobs"].append(job.job_id)
-            path.write_text(json.dumps(cyc, indent=2))
-            return job
-        if len(cyc["jobs"]) >= len(evo2_tasks):
-            cyc = {"cycle": cyc["cycle"] + 1, "jobs": []}
-        # start_params also rebuilds the last job's final state from the chain when another validator led its last round
-        cyc["parents"] = [[last, 1.0, es2.hash_of(node.coord.start_params(last))]] if last else []
-        task = evo2_tasks[len(cyc["jobs"])]
-        spec = es_local.spec2_for(found, task, start=cyc["parents"], rounds=a.evo2_rounds)
-        job = es_local.job2(spec, f"evo2-c{cyc['cycle']}-{task}", keys["requester"].address)
-        cyc["jobs"].append(job.job_id)
-        path.write_text(json.dumps(cyc, indent=2))
-        return job
 
     def ensure_job():
         nonlocal posted
         s = node.chain.state
         if a.job == "none" or any(v > 0 for v in s.escrow.values()) or (posted and posted not in s.jobs):
             return  # a job is running, or the one just posted hasn't reached a block yet
-        if evo2:  # Evo v2: the next task, starting where the last job ended
-            job = next_cycle_job(s)
-        elif evo:  # an Evo job, with the measured run's settings (es_local.py)
-            job = es_local.job(evo_spec, f"evo-{len(s.jobs) + 1}", keys["requester"].address, a.budget)
-        else:
-            job = template_job(f"demo-{len(s.jobs) + 1}", a.job == "gpu", keys["requester"].address, a.budget)
+        job = template_job(f"demo-{len(s.jobs) + 1}", a.job == "gpu", keys["requester"].address, a.budget)
         if s.balance(keys["requester"].address) >= job.budget + node.coord.config.min_fee:
             api.send_tx(keys["requester"], "post_job", "system", job.budget, job.spec_json())
             posted = job.job_id
-            if evo2:
-                cyc = json.loads((d / "evo2.json").read_text())
-                parents = ", ".join(j for j, _, _ in cyc["parents"]) or "the base model"
-                say(f"posted Evo v2 job {job.job_id}: cycle {cyc['cycle']}, {job.spec.task}, starting from {parents}; "
-                    f"{job.spec.pairs} twin pairs on every layer ({job.spec.n:,} weights), {job.spec.rounds} rounds")
-            elif evo:
-                say(f"posted Evo job {job.job_id}: {found.repo} evolving {evo_spec.n:,} numbers, {evo_spec.pairs} twin "
-                    f"pairs a generation, {evo_spec.problems} puzzles each; budget {job.budget / SYN_PER_VIBE:,.0f} VIBE")
-            else:
-                say(f"posted job {job.job_id}: {job.spec.n_params:,} {job.spec.precision} weights, "
-                    f"budget {job.budget / SYN_PER_VIBE:,.0f} VIBE")
+            say(f"posted job {job.job_id}: {job.spec.n_params:,} {job.spec.precision} weights, "
+                f"budget {job.budget / SYN_PER_VIBE:,.0f} VIBE")
 
     hints = (f"Try these in another terminal:\n"
              f"  {p} balance --node {url} --wallet {_q(d / 'worker-1.json')}\n"
              f"  {p} chain verify --node {url} --genesis {_q(d / 'genesis.json')}")
-    if evo:
-        hints += (f"\n  {p} train --evo --node {url} --wallet {_q(d / 'requester.json')}   (another Evo job)\n"
-                  f"  {p} job watch evo-1 --node {url}   (a generation at a time)")
     if a.host == "0.0.0.0":
         hints += (f"\nOther computers join with `{p} setup --node {url}`. Send each one VIBE to stake:\n"
                   f"  {p} send --node {url} --wallet {_q(d / 'requester.json')} --to THEIR-ADDRESS --amount 20")
@@ -2597,7 +2175,6 @@ def _testnet(a, held: list) -> None:
               + (f"  validators {len(nodes)}, on ports {', '.join(str(p) for p in ports)}; they take turns leading rounds "
                  f"and vote on every block\n" if len(nodes) > 1 else "")
               + f"  workers  {len(clients)}, training on {clients[0][1].backend.describe()}\n"
-              + (f"  evo      {es_local.TAGLINE}: {found.repo}, {evo_spec.n:,} numbers evolving\n" if evo else "")
               + f"  logs     {d / 'node.log'} (the node's)" + (f"; the workers are {session.where()}" if session else "")
               + f"\n\n{hints}\nStop with Ctrl+C. Running it again carries on where it stopped; --reset starts over.\n")
     else:
@@ -2632,10 +2209,6 @@ def _testnet(a, held: list) -> None:
             s = node.chain.state
             earned = ", ".join(f"{n} {(s.balance(keys[n].address) + s.stake(keys[n].address) - start[n]) / SYN_PER_VIBE:.2f}"
                                for n in workers)
-            if evo:  # what the round put on the chain: a generation's seeds and scores
-                gen = _evo_round(node, tip)
-                if gen:
-                    print(f"  block {tip.height}: {gen}", flush=True)
             print(f"  block {tip.height}: earned this session {earned} VIBE; "
                   f"{sum(s.escrow.values()) / SYN_PER_VIBE:,.0f} VIBE of job budget left")
         if a.rounds is not None and rounds >= a.rounds:
@@ -2746,19 +2319,13 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--stake", type=to_syn, help="stake this much VIBE without asking")
     p.add_argument("--yes", action="store_true", help="install GPU support without asking. With no terminal (nohup, "
                    "Docker, a pod) nothing is asked: the wallet's password comes from $VIBEHASH_PASSWORD, its recovery "
-                   "words go to a file only you can read, and model files take the defaults")
-    p.add_argument("--deepseek", choices=["yes", "no"], help="whether `worker` takes DeepSeek work (its ~30 GB of model "
-                   "files) without asking; remembered")
-    p.add_argument("--models-dir", help="where big model files go (default: the drive with the most room)")
-    p.add_argument("--models-gb", type=float, help="the most space they may use, in GB (default 40)")
-    p.add_argument("--keep-models", choices=["yes", "no"], help="keep them after a job ends (default no)")
+                   "words go to a file only you can read")
     p.set_defaults(fn=cmd_setup)
     p.add_argument("--tls-fingerprint", metavar="SHA256", help="trust the https node's certificate with this fingerprint "
                    "(how workers trust a self-signed testnet node; ask its operator)")
     p.add_argument("--tls-ca", metavar="FILE", help="verify the https node's certificate with this CA file")
 
     p = sub.add_parser("update", help="install the latest Vibe Hash release, only if its signature checks out")
-    p.add_argument("--evo", action="store_true", help="also install what Evo Hash needs (transformers, datasets: a few hundred MB)")
     p.set_defaults(fn=cmd_update)
 
     p = sub.add_parser("install-gpu", help="find your graphics card and install the PyTorch build for it")
@@ -2783,16 +2350,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--watch", nargs="?", const=WATCH_PORT, type=int, metavar="PORT",
                    help=f"also serve what the dashboard shows, every worker's, as JSON at http://127.0.0.1:PORT/ "
                         f"(default port {WATCH_PORT}), for a window or a script on this computer to follow")
-    p.add_argument("--evo", action="store_true", help="Evo mode: training by evolution, the chain is the model. A "
-                   "network whose genesis takes Evo jobs, training an open model on Countdown puzzles, its blocks holding "
-                   f"only seeds and scores (default folder {settings.home() / 'testnet-evo'})")
-    p.add_argument("--evo2", action="store_true", help="Evo Hash (Evo v2): the fast recipe on every layer, a short job "
-                   "per task in turn (countdown, arithmetic, arc_easy, then round again), each starting where the last "
-                   "ended (es2.py)")
-    p.add_argument("--evo2-rounds", type=int, default=12, metavar="N", help="Evo v2: rounds a job runs, its step size "
-                   "planned over them (default 12: a task's quick early gains, then the next task)")
-    p.add_argument("--evo-model", metavar="MODEL", help="Evo mode's model: a Hugging Face name, from this computer's "
-                   "cache or downloaded once, or a model's folder (default Qwen/Qwen2.5-0.5B-Instruct, about 1 GB)")
     for name, default in (("register-s", 3.0), ("compute-s", 8.0), ("reveal-s", 3.0), ("verify-s", 4.0)):
         p.add_argument(f"--{name}", type=float, default=default, metavar="SECONDS",
                        help=f"how long a round's {name[:-2]} phase lasts (default {default:g})")
@@ -2848,8 +2405,6 @@ def parser() -> argparse.ArgumentParser:
                    help="stake for a first validator that votes but can never be withdrawn or spent; burned if it leaves")
     p.add_argument("--no-earn-in", dest="earn_in", action="store_false",
                    help="require workers to be given stake; by default they can start with none and earn it")
-    p.add_argument("--es", action="store_true",
-                   help="let Evo jobs run on this network (\"es\": true); it can't be turned on later")
     p.add_argument("--decision", action="store_true",
                    help="let fine-tunes of System 1 decision models like Laya run on this network (\"decision\": true), "
                         "a prototype for test networks; it can't be turned on later")
@@ -2935,9 +2490,6 @@ def parser() -> argparse.ArgumentParser:
                    help=f"also serve what the dashboard shows as JSON at http://127.0.0.1:PORT/ (default port "
                         f"{WATCH_PORT}), read-only and for this computer only, so a window or a script can follow the "
                         "worker step by step: its round, what it is doing, its counts, its account, the latest events")
-    p.add_argument("--deepseek", choices=["ask", "yes", "no"], default=None,
-                   help="take DeepSeek work (its ~30 GB of model files): yes, or no (the default; DeepSeek is frozen). "
-                        "ask is only for the pilot (VIBEHASH_DEEPSEEK_PILOT=1). Remembered")
     p.add_argument("--job", default="auto", metavar="JOB", help="mine only this job's rounds and sit the other jobs' out, "
                    "or several jobs' as JOB,JOB (default auto: every job this worker can do). saved: the jobs the app's "
                    "Pick your vibe chose, followed as they change. The dashboard's job line changes it while it runs: "
@@ -3030,13 +2582,6 @@ def parser() -> argparse.ArgumentParser:
                    "with how to add it to an authenticator app")
     p.set_defaults(fn=cmd_admin)
 
-    p = sub.add_parser("cache", help="big model files kept for jobs: where, how big and why; `cache clear` removes them")
-    p.add_argument("action", nargs="?", choices=["show", "clear", "sweep"], default="show",
-                   help="show: what is stored, where, how big and why (the default); clear: remove it all, or one job's "
-                        "files; sweep: remove files no job has used for a week, and stray partial downloads")
-    p.add_argument("job", nargs="?", help="with clear: only this job's files")
-    p.add_argument("--json", action="store_true", help="machine-readable output"); p.set_defaults(fn=cmd_cache)
-
     p = sub.add_parser("devices", help="list the CPUs and GPUs this computer can train on")
     p.add_argument("--json", action="store_true", help="machine-readable output"); p.set_defaults(fn=cmd_devices)
     from . import selftest
@@ -3108,11 +2653,8 @@ def parser() -> argparse.ArgumentParser:
                    "correct category.\")")
     p.add_argument("--labels", metavar="LABELS.json", help="decision models: a JSON object of {\"label\": "
                    "\"description\"}, read as the options and their order; Laya reads each as \"label: description\"")
-    p.add_argument("--evo", action="store_true", help="Evo mode: post an Evo job, training --base (default "
-                   "Qwen/Qwen2.5-0.5B-Instruct) by evolution on puzzles the chain draws, no data file. For local test "
-                   "networks for now (`testnet --evo`)")
     p.add_argument("--budget", type=to_syn, default="100", help="VIBE to spend, paid only for work that passes its checks (default 100)")
-    p.add_argument("--fee", type=to_syn, default=None, help="VIBE per round of training (default 10; an Evo job's 1)")
+    p.add_argument("--fee", type=to_syn, default=None, help="VIBE per round of training (default 10)")
     p.add_argument("--hidden", default="128,128", help="hidden layer widths (default 128,128)")
     p.add_argument("--id", help="job name (default: from the file name)")
     p.add_argument("--node", help=NODE); p.add_argument("--wallet", help=WALLET)
@@ -3151,7 +2693,7 @@ def parser() -> argparse.ArgumentParser:
                    "DATA-merged)")
     p.add_argument("--merged", action="store_true", help="a fine-tune: the base model with the adapter folded into its "
                    "weights, a model folder that loads as the base does, no PEFT (downloads the base's weights once)")
-    p.add_argument("--float32", action="store_true", help="with --merged (or an Evo job): save float32 weights, which "
+    p.add_argument("--float32", action="store_true", help="with --merged: save float32 weights, which "
                    "keep the change whole, not the base's bf16 (twice the size)")
     p.add_argument("--node", help=NODE); p.set_defaults(fn=cmd_job_download)
     p = j.add_parser("history", help="a job's rounds one by one (loss, accuracy, units, VIBE paid, budget left), from the "
@@ -3164,42 +2706,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="job.json", help="file to write (default job.json)")
     p.add_argument("--id", default="my-first-job", help="the job's name (default my-first-job)")
     p.add_argument("--gpu", action="store_true", help="a larger float32 model sized for GPUs")
-    p.add_argument("--evo", metavar="MODEL", help="an Evo job on MODEL that never ends, taking its tasks in turn: a "
-                                                  "genesis starter job (genesis create --es --starter-job)")
-    p.add_argument("--tasks", default="curated", help="with --evo: the tasks, comma-separated, curated (the default: "
-                   "the ones a small model learns from), vibe (the Qwen3.5-0.8B job's, for max_tokens 384-512) "
-                   "or all")
-    p.add_argument("--rounds", type=int, default=12, help="with --evo: rounds on each task before the next (default 12)")
-    p.add_argument("--max-tokens", type=int, metavar="N", help="with --evo: the longest answer, in tokens (default 64; "
-                   "512 with --tasks vibe, whose math and instructions need room to reason)")
-    p.add_argument("--loop-stop", metavar="PERIOD,RUN", help="with --evo: end an answer once RUN tokens in a row each "
-                   "repeat the token up to PERIOD before (a loop), or off (default 32,48 with --tasks vibe, else off)")
-    p.add_argument("--task-tokens", metavar="TASK=N,...", help="with --evo: shorter answers for some tasks, such as "
-                   "math=448,gsm8k=384, or off (default math=448,gsm8k=384,ifeval=256 with --tasks vibe, else off)")
-    p.add_argument("--cross-margin", metavar="X", help="with --evo: the margin, in logits, between machines that do "
-                   "the arithmetic differently, with 0.1 for alike ones and checkers paired by setup (default 0.5), or "
-                   "off for one margin of 0.5 and no pairing")
-    p.add_argument("--fixed-step", action="store_true", help="with --evo: on by default, kept so old commands work")
-    p.add_argument("--no-fixed-step", action="store_true", help="with --evo: a round where only some units land takes "
-                   "a full step out of fewer members, instead of a step its share of the size (the default)")
-    p.add_argument("--problems", type=int, metavar="N", help="with --evo: problems each member answers a round (default "
-                   "16); more problems a round puts more work into each round without extra noise cost")
-    p.add_argument("--gold", action="store_true", help="with --evo: score each round's members on its own problems' "
-                   "right answers, so the model learns from what it gets wrong too, instead of only on answers it "
-                   "already got right (needs nodes on 0.5.28+)")
-    p.add_argument("--target-tokens", type=int, metavar="N", help="with --evo and a pool task (vibe_reason): the most "
-                   "tokens a problem's target reply is scored on (default 1024; needs nodes on 0.5.28+)")
     p.set_defaults(fn=cmd_job_template)
-
-    e = sub.add_parser("evo", help="Evo Hash's models").add_subparsers(dest="ecmd", required=True)
-    p = e.add_parser("export", help="save an Evo Hash job's model (the tuned Qwen) as a Hugging Face folder, worked "
-                     "out from the chain")
-    p.add_argument("job_id", nargs="?", help="default: the newest Evo job that has trained")
-    p.add_argument("--out", help="folder to save (default JOB-model)")
-    p.add_argument("--node", help="the Evo network's node (default http://127.0.0.1:8545, testnet --evo2's)")
-    p.add_argument("--cpu", action="store_true", help="work it out on the CPU even with a GPU")
-    p.add_argument("--float32", action="store_true", help="save float32 weights (twice the size) instead of bfloat16")
-    p.set_defaults(fn=cmd_evo_export)
 
     c = sub.add_parser("chain", help="audit the chain yourself, without trusting the node").add_subparsers(dest="ccmd", required=True)
     p = c.add_parser("verify", help="download every block, re-check it from genesis, and replay every round")

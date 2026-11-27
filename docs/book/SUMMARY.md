@@ -13,8 +13,6 @@
 * [How mining works](mining/how-mining-works.md)
 * [The worker](mining/worker.md)
 * [GPUs](mining/gpus.md)
-* [Evo Hash](mining/evo-hash.md)
-* [DeepSeek jobs](mining/deepseek.md)
 * [Troubleshooting](mining/troubleshooting.md)
 
 ## Your wallet
@@ -65,7 +63,6 @@
   * [vibehash avatar](reference/avatar.md)
   * [vibehash window](reference/window.md)
   * [vibehash admin](reference/admin.md)
-  * [vibehash cache](reference/cache.md)
   * [vibehash devices](reference/devices.md)
   * [vibehash selftest](reference/selftest.md)
   * [vibehash balance](reference/balance.md)
@@ -80,6 +77,5 @@
   * [vibehash models](reference/models.md)
   * [vibehash predict](reference/predict.md)
   * [vibehash job](reference/job.md)
-  * [vibehash evo](reference/evo.md)
   * [vibehash chain](reference/chain.md)
 <!-- end of reference -->

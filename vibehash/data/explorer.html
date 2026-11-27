@@ -257,7 +257,7 @@ async function showJob(id) {
   const j = await api("/job/" + encodeURIComponent(id));
   const spec = j.spec || {};
   const rounds = Array.isArray(j.rounds) ? j.rounds : [];
-  const kind = spec.es ? "Evo (evolution strategies)" : spec.deepseek ? "DeepSeek" : spec.base ? `fine-tune of ${spec.base}` : "MLP";
+  const kind = spec.es ? "Evo (removed)" : spec.deepseek ? "DeepSeek (removed)" : spec.base ? `fine-tune of ${spec.base}` : "MLP";
   const pct = (x) => (typeof x === "number" ? (x * 100).toFixed(1) + "%" : "–");
   const num = (x) => (typeof x === "number" ? x.toPrecision(4) : "–");
   render(el("h1", {}, "Job ", el("span", {class: "mono"}, id)), card(null, dl([

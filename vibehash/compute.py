@@ -53,8 +53,8 @@ def pin_precision() -> None:
     if getattr(torch.version, "hip", None):
         # On ROCm "cublas" is rocBLAS. PyTorch's default there on RDNA3/4, MI200/300/350 and Strix Halo is hipBLASLt,
         # which deterministic mode doesn't cover, AMD's own table marks only partly safe in graphs, and has an open
-        # report of graph replays sharing its split-K state ("hangs or wrong results"); Evo replays graphs of bf16
-        # matmuls (docs/GPUS.md, risk 3). rocBLAS is slower on some shapes: not measured yet.
+        # report of graph replays sharing its split-K state ("hangs or wrong results") for graphs of bf16 matmuls
+        # (docs/GPUS.md, risk 3). rocBLAS is slower on some shapes: not measured yet.
         try:
             torch.backends.cuda.preferred_blas_library("cublas")
         except (AttributeError, RuntimeError):  # an older PyTorch without the switch

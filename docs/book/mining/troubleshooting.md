@@ -65,7 +65,7 @@ Update with `python -m pip install -U vibehash`, or run the one-line installer a
 Check three things. Your memory must be at least what the job needs: graphics memory for GPU jobs, system RAM otherwise (add `--memory-mb` if it's detected wrong). New workers get at most 4 units until they've delivered once, so the first round is small. And while you're still earning your stake, you only get units staked workers didn't need, so on a busy network the first rounds can pass with none. That changes once your first 5 VIBE is in.
 
 **`job ... waits: ... it needs 2 staked workers ...`**
-Fine-tunes and Evo jobs need at least two staked workers with enough GPU memory, one to train and one to check. If you're still earning your stake, there's nothing to do but keep mining: you earn the rest on other jobs, then take this one too. `vibehash balance` shows the stake filling up.
+Fine-tunes need at least two staked workers with enough GPU memory, one to train and one to check. If you're still earning your stake, there's nothing to do but keep mining: you earn the rest on other jobs, then take this one too. `vibehash balance` shows the stake filling up.
 
 **`stake at least 500000000 syn to take work`**
 This network requires stake instead of letting workers earn it in, and yours is under 5 VIBE. Ask whoever runs it for some VIBE, then stake it with `vibehash stake --amount 5`.
@@ -74,7 +74,7 @@ This network requires stake instead of letting workers earn it in, and yours is 
 Close what else uses it (games, browsers, video, another worker on the same card); the next round tries again. Or pick another card with `--device`, or the CPU with `--device cpu` (CSV jobs only).
 
 **The disk is full**
-Free some space, or move Vibe Hash to a bigger drive: set `VIBEHASH_HOME` to a folder there, and `vibehash setup --models-dir FOLDER` for big model files. `vibehash cache` shows what model files take up. See [DeepSeek jobs](deepseek.md#vibehash-cache).
+Free some space, or move Vibe Hash to a bigger drive: set `VIBEHASH_HOME` to a folder there.
 
 **`censored: round N: the node signed a receipt for your commit but sealed the round without it`**
 The node accepted your message, promised in a signed receipt to record it, then left it out, which can cost that round's pay and reputation. Your receipts are proof, in `~/.vibehash/cache/YOUR-ADDRESS/receipts.jsonl`. Anyone can check them with `vibehash chain verify --receipts receipts.jsonl`, so share the file with whoever runs the network.

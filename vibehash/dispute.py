@@ -50,19 +50,8 @@ class WeightsUnavailable(Exception):
 # --- the base model's weights -----------------------------------------------------------------------------------------
 
 def decode(dtype: str, raw: bytes, cols: int) -> np.ndarray:
-    """Stored weights as float64, exactly: bf16 and f16 widen without rounding, and DeepSeek's FP8 (E4M3), ue8m0
-    scales and FP4 (E2M1 codes packed two to an I8 byte, low nibble first: `cols` packed bytes give 2·cols values)
-    decode from their bits (referee_deepseek)."""
-    if dtype in ("F8_E4M3", "F8_E8M0", "I8"):
-        from . import referee_deepseek as rd
-
-        b = np.frombuffer(raw, np.uint8).reshape(-1, cols)
-        if dtype == "F8_E4M3":
-            return rd.E4M3[b]
-        if dtype == "F8_E8M0":
-            return rd.decode_e8m0(b)
-        return np.stack([rd.FP4[b & 15], rd.FP4[b >> 4]], -1).reshape(b.shape[0], 2 * cols)
-    if dtype in ("I32", "I64"):  # integer tables (DeepSeek's engram token map), exact up to 2^53
+    """Stored weights as float64, exactly: bf16 and f16 widen without rounding."""
+    if dtype in ("I32", "I64"):  # integer tables, exact up to 2^53
         return np.frombuffer(raw, "<i4" if dtype == "I32" else "<i8").astype(np.float64).reshape(-1, cols)
     if dtype == "BF16":
         a = (np.frombuffer(raw, "<u2").astype(np.uint32) << 16).view(np.float32)
@@ -83,7 +72,7 @@ def _rows(shape) -> int:
     return int(shape[0]) if len(shape) > 1 else 1
 
 
-_ITEM = {"BF16": 2, "F16": 2, "F32": 4, "F8_E4M3": 1, "F8_E8M0": 1, "I8": 1, "I32": 4, "I64": 8}
+_ITEM = {"BF16": 2, "F16": 2, "F32": 4, "I32": 4, "I64": 8}
 
 
 class HubWeights:
@@ -161,9 +150,8 @@ class Outside:
         return self._got[key]
 
     def lora_a(self, k) -> np.ndarray:
-        if k not in self._a:  # a spec may draw its own (referee_deepseek.LoraLayout: DeepSeek's adapters)
-            fn = getattr(self.spec, "lora_a_of", None)
-            self._a[k] = (fn(k) if fn is not None else lora_a_one(self.spec, k)).astype(np.float64)
+        if k not in self._a:
+            self._a[k] = lora_a_one(self.spec, k).astype(np.float64)
         return self._a[k]
 
     def tokens(self, seq):

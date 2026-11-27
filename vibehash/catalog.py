@@ -3,19 +3,18 @@
 `vibehash train DATA --base NAME` fine-tunes a model one GPU holds, of a family finetune.py trains (`ready`), on a
 network whose node runs this version (it needs no GPU: workers check and score the work): a local `testnet` today, the
 public network once its node is updated (FINETUNING.md). Models that need a
-team of GPUs are coming (DEEPSEEK.md). `vibehash models` lists them all, `vibehash train --base NAME` alone describes
+team of GPUs are coming (SHARDING.md). `vibehash models` lists them all, `vibehash train --base NAME` alone describes
 one and posts nothing, and the guide's command builder shows the same list, baked into the page
 (scripts/bake_models.py).
 
 The choice of models is ours: the most downloaded text models of the big open-weight makers on Hugging Face in
 November 2026, across sizes, with the small ones first. A model that one gaming GPU holds is what the network will
-fine-tune first (DEEPSEEK.md §5). The facts come live from Hugging Face (hub.Hub.describe): parameters, weight size,
+fine-tune first. The facts come live from Hugging Face (hub.Hub.describe): parameters, weight size,
 licence, gated or not, experts and layers. They're cached for a day in ~/.vibehash/cache/models.json, so the list comes
 back at once after the first time, and from the cache, however old, when the Hub can't be reached.
 
-"What it takes" is DEEPSEEK.md §2's maths: a team holds the weights as stored, whole layers per GPU, with a quarter of
-each card's memory left for activations, adapters and the CUDA context. For DeepSeek-V4.1-Flash that gives the 40, 20
-and 14 GPUs DEEPSEEK.md measured.
+"What it takes": a team holds the weights as stored, whole layers per GPU, with a quarter of each card's memory left for
+activations, adapters and the CUDA context.
 """
 from __future__ import annotations
 
@@ -75,11 +74,6 @@ CATALOG = (
     Model("gpt-oss-120b", "gpt-oss 120B", "openai/gpt-oss-120b"),
     Model("glm-5.3-flash", "GLM-5.3-Flash", "zai-org/GLM-5.3-Flash"),
     Model("glm-5.3", "GLM-5.3", "zai-org/GLM-5.3"),
-    # DEEPSEEK.md §1-2, measured from its files: the two engram tables become per-job slices of the rows a job's text
-    # reads, and a text fine-tune never loads the draft (MTP and DSpark) layers or the vision tower.
-    Model("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4.1-Flash",
-          left_out=(("the engram tables", "each job gets a slice of the rows its data reads", 203_100_000_000),
-                    ("the draft layers and vision tower", "a text fine-tune doesn't use them", 8_900_000_000))),
 )
 
 
@@ -129,7 +123,7 @@ class Facts:
     @classmethod
     def from_summary(cls, s: ModelSummary) -> "Facts":
         # Models that also read images (Gemma 4, Qwen 3.5, DeepSeek-V4.1) keep their language model's shape in
-        # config.json's text_config, which describe() doesn't look in yet (DEEPSEEK.md §5 step 3).
+        # config.json's text_config, which describe() doesn't look in yet.
         text = s.config.get("text_config") if isinstance(s.config.get("text_config"), dict) else {}
         experts = s.experts or next((text[k] for k in ("n_routed_experts", "num_local_experts", "num_experts")
                                      if type(text.get(k)) is int), None)
@@ -267,7 +261,7 @@ def lookup(refs, *, refresh: bool = False) -> tuple[dict[str, Facts], dict[str, 
 # --- what training would take --------------------------------------------------------------
 
 def held_bytes(facts: Facts, model: Model | None = None) -> int | None:
-    """The bytes a team holds on its GPUs: the weights as stored, less what DEEPSEEK.md cuts out."""
+    """The bytes a team holds on its GPUs: the weights as stored, less what the model's entry leaves out."""
     if facts.weight_bytes is None:
         return None
     return max(0, facts.weight_bytes - sum(b for _, _, b in (model.left_out if model else ())))
@@ -373,7 +367,7 @@ def table(facts: dict[str, Facts], errors: dict[str, str], width: int = 120, pro
         return "  ".join(c.ljust(w) for c, w in zip(cells, widths)).rstrip()
     out = [status_line(prog), "", line(head)] + [line(r) for r in rows] + [""]
     out.append(f"GPUs: how many cards of each size hold the weights between them, a quarter of each card's memory left "
-               "for training (DEEPSEEK.md, section 2). \"-\": one layer doesn't fit.")
+               "for training. \"-\": one layer doesn't fit.")
     for m in CATALOG:
         f = facts.get(m.repo)
         if f and m.left_out:
@@ -436,7 +430,7 @@ def preflight(ref: str, model: Model | None, f: Facts, data: Path | None = None,
             lines += [f"GPUs      {say}",
                       f"          holding {held} of weights between them, a quarter of each card left for training"]
         for what, why, b in (model.left_out if model else ()):
-            lines.append(f"          leaving out {what}, {size_text(b)}: {why} (DEEPSEEK.md)")
+            lines.append(f"          leaving out {what}, {size_text(b)}: {why}")
     if f.has_tokenizer is False:
         lines.append("Tokenizer no tokenizer.json, which turning text into training data needs")
     if data is not None:

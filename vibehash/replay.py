@@ -22,6 +22,13 @@ field by field. It checks:
     taken from the record);
   * every verdict, slash, missed deadline and payment share.
 
+A round of a job kind that was cut (tasks.RetiredJob) isn't re-run: the code that ran it is gone. Only DeepSeek jobs'
+rounds can be on a chain this code takes (it refuses an Evo genesis), in blocks before ledger.RETIRED_VERSION: the
+public network has 28,695 of them, five of which paid out (heights 7542 to 7550). Their records must still match the
+hashes their blocks commit to, and their blocks still apply (the ledger settles them); what the rounds decided is taken
+as the validators who signed those blocks checked it. `vibehash chain verify` counts them apart, and 0.5.28 re-runs
+them in full.
+
 Given the round's checkpoints (`checkpoints`: something with .array(blob_id,
 job) and .attach(job)), it also re-runs every check that needs the model's
 weights: Merkle openings and sanity, the coordinator's own replays,
@@ -36,9 +43,9 @@ from __future__ import annotations
 from . import shards as sh
 from .coordinator import Coordinator, CoordinatorConfig, ProtocolError
 from .crypto import h256
-from .ledger import Block, Chain, canonical
+from .ledger import RETIRED_VERSION, Block, Chain, canonical
 from .merkle import MerkleError
-from .tasks import InvalidJob, Reveal
+from .tasks import InvalidJob, RetiredJob, Reveal
 from .wire import WireError, commitment_in, open_envelope
 
 
@@ -51,28 +58,44 @@ def _sender(env: dict, kind: str, chain: Chain, round_no: int) -> tuple[str, dic
     return addr, body
 
 
+def _retired(chain: Chain, job_id: str) -> bool:
+    """Whether the chain holds `job_id` as a job of a kind that was cut (tasks.RetiredJob)."""
+    if job_id not in chain.state.jobs:
+        return False
+    try:
+        chain.state.job(job_id)
+    except RetiredJob:
+        return True
+    except InvalidJob:
+        pass
+    return False
+
+
 def replay_block(chain: Chain, block: Block, record: dict, checkpoints=None, stats: dict | None = None,
-                 datasets=None, roots=None, records=None, es_states=None) -> list[str]:
+                 datasets=None, roots=None) -> list[str]:
     """Problems found re-running `block`'s round on `chain`, which must be the chain just before `block`.
     An empty list means every decision in the block follows from its record (and, with `checkpoints`, every
     weight-based result it records checks out). `stats` collects how many results were re-checked or couldn't be.
     `datasets` (a node's Store, or anything with .attach(job)) gives a fine-tune's data to a round with disputes,
-    whose referee needs it; other rounds replay without any. `records` (job -> store, as Node.prep_store) is a DeepSeek
-    job's bucket, which its disputes' referee reads the records from. `es_states((job, start hash))` gives an ES
-    job's state the round started from, when the replayer has it: the round's level and update are then worked out
-    again rather than read from the record (es.rebuild_chain does it from the chain alone)."""
+    whose referee needs it; other rounds replay without any. A round of a cut job kind is taken as its block's
+    validators certified it (see above), and counted in stats["retired"]."""
     s = block.summary
     if s is None:
         return []
     if h256(canonical(record)).hex() != s.record_hash:
         return ["the record doesn't match the hash the block commits to"]
+    if _retired(chain, s.job_id):
+        if block.version >= RETIRED_VERSION:
+            return [f"job {s.job_id} is of a kind that was cut: no round of it is sealed from block version "
+                    f"{RETIRED_VERSION} on"]
+        if stats is not None:
+            stats["retired"] = stats.get("retired", 0) + 1
+        return []
     try:
         rules = record["rules"]
         c = Coordinator(chain, config=CoordinatorConfig(**rules), replay=record, recheck=checkpoints)
         c.datasets = datasets
         c.roots = roots if roots is not None else checkpoints
-        c.records = records
-        c.es_states = es_states
         c.open_round()
         if c.r.job_id != s.job_id:
             return [f"the record is for job {c.r.job_id}, the block for {s.job_id}"]

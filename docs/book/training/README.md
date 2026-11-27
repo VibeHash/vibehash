@@ -8,15 +8,10 @@ This section is for you if you want a model trained: you bring data and a VIBE b
 |---|---|---|---|
 | A small model trained from scratch | a CSV table of examples | a model file that labels new rows | `vibehash train data.csv` |
 | A fine-tune of an open-weight language model | a file of chats or text | a LoRA adapter for the base model | `vibehash train chats.jsonl --base NAME` |
-| An Evo job | nothing: the network draws puzzles itself | the tuned model, worked out from the chain | `vibehash train --evo` |
 
 **Tables (CSV).** This is what the public network trains today. Your CSV has a header row, numeric input columns, and one column to predict, such as a fruit's name from its measurements. The model learns to sort rows into those categories (from 2 up to 1,000 of them). `train` sizes the model to your data for you. Start with the [quick start](quickstart.md).
 
 **Fine-tunes.** You give a file of example conversations and pick a base model, such as Qwen3 0.6B. Workers with GPUs train a small add-on (a LoRA adapter) that changes how the model answers. This works for models one gaming GPU can hold, on a network whose node runs a version that supports it: a test network on your own computer today, and the public network once its node is updated. See [Fine-tuning a language model](fine-tuning.md).
-
-**Evo jobs.** These train a model by evolution on puzzles the chain draws, with no data file. `train --evo` only works on networks set up to take them, such as a test network on your computer (`vibehash testnet --evo`). The public Evo network runs its own job, which miners join; see [Evo Hash](../mining/evo-hash.md).
-
-**DeepSeek jobs** are run by the network's owner, not posted by users. They're described under [DeepSeek jobs](../mining/deepseek.md).
 
 ## The life of a job
 

@@ -28,7 +28,6 @@ vibehash genesis create --chain-id my-testnet-1 --out genesis.json --bootstrap N
 | `--validator ADDR=URL` | A validator and the address other nodes reach it at. Without any, one node runs the chain alone |
 | `--economics testnet\|mainnet` | Issuance schedule (default `testnet`); see [Economics](../concepts/economics.md) |
 | `--no-earn-in` | Workers must be given stake. By default they start with none and their first 5 VIBE of pay becomes their stake |
-| `--es` | Let Evo jobs run. It can't be turned on later |
 | `--starter-job SPEC.json` | A job on chain from block one, owned by nobody and paying only new coins, so a network with no starting coins can still mine |
 
 A validator needs at least 5 VIBE of stake in the genesis, from `--stake` or `--bootstrap`. For several validators, give each its own wallet, stake and `--validator ADDR=URL`; they find each other from the addresses in the genesis.
@@ -41,7 +40,7 @@ The genesis hash commits to everything in the file, so it identifies the network
 vibehash genesis check genesis.json
 ```
 
-This holds the file against what a network meant to carry value needs, and needs no node or wallet, so anyone can run it before agreeing to validate. Each finding is `ok`, `warn` (a choice to make on purpose, such as a premine or Evo off), `fail` or `info`. Among the failures: a test network's chain id, no supply cap, no validators, or fewer than 4 validators or one holding a third or more of the stake. The command exits with status 1 if anything fails, and `--json` prints the findings for scripts.
+This holds the file against what a network meant to carry value needs, and needs no node or wallet, so anyone can run it before agreeing to validate. Each finding is `ok`, `warn` (a choice to make on purpose, such as a premine), `fail` or `info`. Among the failures: a test network's chain id, no supply cap, no validators, or fewer than 4 validators or one holding a third or more of the stake. The command exits with status 1 if anything fails, and `--json` prints the findings for scripts.
 
 ## Start the node
 

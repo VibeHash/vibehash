@@ -62,7 +62,7 @@ MAX_PAGES = 1000  # of a file listing (1000 entries each)
 CHUNK = 8 * 2**20
 # A run of back-to-back tensors comes down in one ranged request, but no more than this per request unless one tensor is
 # bigger, and DOWNLOADS requests at once: the Hub's CDN slows a single long stream to about 1.5 MiB/s after a couple of
-# minutes, while fresh requests get 30 MiB/s or more each (DEEPSEEK.md §5 step 3).
+# minutes, while fresh requests get 30 MiB/s or more each (measured on a 30 GB download, 2026-11).
 MAX_RUN = 64 * 2**20
 DOWNLOADS = 6
 RETRIES = 5

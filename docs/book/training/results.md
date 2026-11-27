@@ -43,7 +43,6 @@ vibehash job download
 
 - **A table model** is saved as one file named after your data, such as `my-data-model.npz`. Beside it go `my-data-model-training-history.csv` and `my-data-model-TRAINING.md`, a short page on how it was trained.
 - **A fine-tune** is saved as a folder, such as `chats-lora/`, holding the adapter and the same record. See [Fine-tuning a language model](fine-tuning.md).
-- **An Evo job** keeps no weight files: its model is worked out from the chain and saved as a Hugging Face folder.
 
 You can download while the job is still training to get the model so far. `--out` picks the file or folder name.
 

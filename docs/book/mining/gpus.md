@@ -36,16 +36,14 @@ Workers use the first GPU they find. `--device cpu|cuda|cuda:1|xpu|mps` picks an
 
 | Hardware | Status |
 |---|---|
-| **NVIDIA RTX 20-series and newer** | Mines everything: classic jobs, Evo Hash and fine-tunes. The tested path. RTX 50-series needs a recent driver (570 or newer); `install-gpu` picks a build that has it. |
-| **Older NVIDIA** (GTX 10-series, Titan V, V100) | Works, but PyTorch 2.14 is the last version for these cards. Evo runs slowly. |
+| **NVIDIA RTX 20-series and newer** | Mines everything: classic jobs and fine-tunes. The tested path. RTX 50-series needs a recent driver (570 or newer); `install-gpu` picks a build that has it. |
+| **Older NVIDIA** (GTX 10-series, Titan V, V100) | Works, but PyTorch 2.14 is the last version for these cards. |
 | **AMD on Linux** (Radeon RX 7000 and 9000, Instinct, Ryzen AI Max) | Runs the same code as NVIDIA, through PyTorch's ROCm build. RX 6000 works unofficially. Not yet measured against NVIDIA checkers. |
 | **AMD on Windows** | Mines on the CPU for now: PyTorch's AMD builds are Linux-only. |
-| **Intel Arc and Core Ultra graphics** | Classic jobs and fine-tunes; Evo in a slower mode. |
+| **Intel Arc and Core Ultra graphics** | Classic jobs and fine-tunes. |
 | **Apple M-series Macs** | Like Intel. The newest PyTorch needs macOS 15 to use the GPU; on macOS 14, `install-gpu` installs an older PyTorch that still does. |
 | **NPUs** (Intel AI Boost, AMD XDNA, Qualcomm) | Not used for mining yet. On an NPU laptop, mine on its built-in Intel or AMD graphics. |
 | **CPU only** | Works. Slow but correct, and the reference that classic jobs are checked against. |
-
-DeepSeek jobs are narrower: they need an NVIDIA card with 8 GB or more. See [DeepSeek jobs](deepseek.md).
 
 ## How much graphics memory
 
@@ -56,8 +54,6 @@ The worker reports your graphics memory, and you're only given jobs that fit in 
 | Classic jobs (small models on spreadsheets) | Small; each job states its own need |
 | Fine-tune of Qwen3-0.6B | About 3.5 GB (measured) |
 | Fine-tune of Qwen3-4B | About 11 GB (measured) |
-| The public Evo network | A GPU of 8 GB or more |
-| DeepSeek jobs | NVIDIA, 8 GB or more, plus 16 GB of system memory |
 
 ## Different hardware, same answers
 
@@ -65,6 +61,5 @@ Chips round numbers very slightly differently, so a GPU's result and a CPU's rep
 
 - **Shortcuts are off.** Workers turn off GPU modes that trade accuracy for speed, such as NVIDIA's TF32, and use repeatable calculations.
 - **Checks allow for rounding.** A classic job's replay must match within a tolerance hundreds of times wider than the differences measured between machines, but too tight to let skipped work through.
-- **Evo matches like with like.** Evo Hash compares the model's word choices, where the gaps between kinds of hardware are bigger. Each worker tells the network its number setup (kind of chip, number format, PyTorch version), and Evo jobs can use a tight margin between matching machines, a wider one across kinds, and a matching machine as referee. Before taking an Evo job, a worker also checks that its card reproduces its own answers exactly.
 
 NVIDIA's RTX 40-series is the tested path; other families are supported by PyTorch but less measured.

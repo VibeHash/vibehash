@@ -10,8 +10,6 @@ import numpy as np
 
 from .crypto import h256
 from .decision import DecisionDataset, DecisionSpec, is_decision_npz, is_decision_spec
-from .deepseek_job import DeepSeekData, DeepSeekSpec, TokenFile, is_deepseek_spec
-from .es import ES_KEYS, EsSpec, is_es_spec
 from .finetune import LoraSpec, TokenDataset
 from .model import PRECISIONS, Dataset, ModelSpec, evaluate
 
@@ -49,8 +47,47 @@ class InvalidJob(ValueError):
     pass
 
 
-NO_VOCAB_MSG = ("an Evo (rule 2) job's spec must record its model's vocab size (model.vocab), so a node can drop "
-                "replay targets the model has no token for")
+# The last code with the job kinds this version no longer runs: git commit 458a849 on main, released as 0.5.28.
+RETIRED_IN = "0.5.28 (git commit 458a849)"
+
+
+class RetiredJob(InvalidJob):
+    """A spec of a job kind that was cut from VibeHash: an Evo (evolution strategies) job or a DeepSeek-V4.1 top-layers
+    job. Neither runs any more. It's an InvalidJob, so everything that runs, lists or relays jobs refuses it or skips it
+    as it would any job it can't load. Only the ledger looks inside, because a chain may already hold one: the public
+    network posted two DeepSeek jobs, and five of their rounds paid out. Applying those blocks needs the job's id, its fee
+    a round and its units a round (ledger._terms), so this keeps them, read as the old code read them; nothing else of
+    the old spec is checked or used."""
+
+    def __init__(self, kind: str, d: dict):
+        self.kind = kind  # "deepseek" or "evo"
+        name = {"deepseek": "a DeepSeek top-layers job", "evo": "an Evo (evolution strategies) job"}[kind]
+        super().__init__(f"{name} can't be posted or run: that kind of job was removed from VibeHash after "
+                         f"{RETIRED_IN}")
+        self.job_id = d.get("id") if isinstance(d.get("id"), str) else ""
+        self.fee_per_round = _whole(d.get("fee_per_round"))
+        self.units_per_round = _whole(d.get("units_per_round"))
+
+
+def _whole(v) -> int:
+    """A spec's integer as the old parsers took it (int() of the JSON value), or 0 when it isn't one."""
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def retired_kind(d) -> str | None:
+    """Which cut job kind a parsed spec is, or None. A DeepSeek job's spec is a fine-tune's shape (lora, a model without
+    n_in) with a "deepseek" field; an Evo job's has an "es" object and a model without n_in or lora. These are the
+    tests the old code made (deepseek_job.is_deepseek_spec, es.is_es_spec), so no spec changes kind."""
+    if not (isinstance(d, dict) and isinstance(d.get("model"), dict) and "n_in" not in d["model"]):
+        return None
+    if "deepseek" in d and "lora" in d:
+        return "deepseek"
+    if isinstance(d.get("es"), dict) and "lora" not in d:
+        return "evo"
+    return None
 
 
 @dataclass
@@ -59,7 +96,7 @@ class TrainingJob:
     requester: str
     budget: int  # syn escrowed by the requester
     fee_per_round: int  # syn released to the reward pool per fully-verified round
-    spec: ModelSpec | LoraSpec | EsSpec = field(default_factory=ModelSpec)  # LoraSpec: a fine-tune; EsSpec: es.py
+    spec: ModelSpec | LoraSpec = field(default_factory=ModelSpec)  # LoraSpec: a fine-tune
     data_source: dict = field(default_factory=lambda: {"kind": "synthetic", "seed": 7})
     init_seed: int = 11
     lr: float = 0.1
@@ -73,7 +110,7 @@ class TrainingJob:
     compute_s: float = 0.0  # a compute phase the job asks for, in seconds; 0: sized from the job (phase_lengths)
     shards: int = 1  # blocks of layers a unit is split into, one worker each (shards.py, SHARDING.md); 1: whole units
     # True: nodes serve its model to anyone, even set to owner-only (node.job_model); None: unsaid. MLP specs only:
-    # accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28; until then a
+    # accepted for fine-tune specs only from the next block version, once every validator runs >=0.5.28; until then a
     # `public` key there would split validators.
     public: bool | None = None
     _data: Dataset | TokenDataset | None = field(default=None, repr=False)
@@ -83,23 +120,8 @@ class TrainingJob:
 
     @property
     def finetune(self) -> bool:
-        """Whether it fine-tunes a pretrained model's LoRA adapters (finetune.py) rather than training an MLP. A
-        DeepSeek top-layers job (deepseek_job.py) is one too: its training rounds are a fine-tune's."""
+        """Whether it fine-tunes a pretrained model's LoRA adapters (finetune.py) rather than training an MLP."""
         return isinstance(self.spec, LoraSpec)
-
-    @property
-    def es(self) -> bool:
-        """Whether it trains by evolution strategies (es.py): rounds of seeds and scores, the update worked out by
-        every node from them."""
-        return isinstance(self.spec, EsSpec)
-
-    def no_vocab(self) -> bool:
-        """Whether it's a rule-2 Evo job whose spec records no vocab size (dims["vocab"]). Checked only when a job is
-        posted (a node relaying it, the CLI posting it), never when a chain is replayed: a scored reveal with no
-        log-probabilities is fraud to the node, and an honest miner sends none when every replay target has a token id
-        its model lacks, which the node drops (since 0.5.27) only if the job records its vocab."""
-        from . import es2
-        return isinstance(self.spec, es2.Spec2) and not self.spec.model.get("vocab")
 
     @property
     def decision(self) -> bool:
@@ -107,20 +129,9 @@ class TrainingJob:
         decision model's and whose data is decision items."""
         return isinstance(self.spec, DecisionSpec)
 
-    @property
-    def deepseek(self) -> bool:
-        """Whether it's a DeepSeek-V4.1 top-layers job: a prep of the frozen layers, then training rounds."""
-        return isinstance(self.spec, DeepSeekSpec)
-
     # --- on-chain spec -------------------------------------------------------
 
     def to_spec(self) -> dict:
-        if self.es:  # a shape of its own too (es.ES_KEYS)
-            spec = {"id": self.job_id, "fee_per_round": self.fee_per_round, **self.spec.to_json(),
-                    "init_seed": self.init_seed, "units_per_round": self.units_per_round, "memory_mb": self.memory_mb}
-            if self.compute_s:
-                spec["compute_s"] = self.compute_s
-            return self._with_public(spec)
         if self.finetune:  # a shape of its own, so MLP specs stay exactly as they were
             spec = {"id": self.job_id, "fee_per_round": self.fee_per_round, **self.spec.to_json(),
                     "data": self.data_source, "init_seed": self.init_seed, "lr": self.lr, "batch_size": self.batch_size,
@@ -160,10 +171,9 @@ class TrainingJob:
             raise InvalidJob("job spec too large")
         try:
             d = json.loads(text)
-            if is_deepseek_spec(d):
-                return cls._from_finetune(d, requester, budget, deepseek=True)
-            if is_es_spec(d):
-                return cls._from_es(d, requester, budget)
+            kind = retired_kind(d)
+            if kind:
+                raise RetiredJob(kind, d)
             if is_finetune_spec(d):
                 return cls._from_finetune(d, requester, budget)
             m = d["model"]
@@ -182,19 +192,21 @@ class TrainingJob:
                 # and refusing it would fork validators. Anything else reads as unsaid (not public, not re-emitted).
                 public=d["public"] if isinstance(d.get("public"), bool) else None,
             )
+        except InvalidJob:
+            raise
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError, json.JSONDecodeError) as e:
             # (OverflowError: int() of 1e999, JSON's Infinity; RecursionError: JSON nested too deep. Either escaped
             # check_tx, and build_block, which drops only an InvalidJob, then failed instead of leaving the tx out.)
             raise InvalidJob(f"malformed job spec: {e}") from e
 
     @classmethod
-    def _from_finetune(cls, d: dict, requester: str, budget: int, deepseek: bool = False) -> "TrainingJob":
-        keys = FINETUNE_KEYS | ({"deepseek"} if deepseek else set()) | ({"budgets"} if is_decision_spec(d) else set())
+    def _from_finetune(cls, d: dict, requester: str, budget: int) -> "TrainingJob":
+        keys = FINETUNE_KEYS | ({"budgets"} if is_decision_spec(d) else set())
         if set(d) - keys:
             raise InvalidJob(f"a fine-tune's spec has no field {sorted(set(d) - keys)[0]!r}")
         return cls(
             job_id=d["id"], requester=requester, budget=budget, fee_per_round=int(d["fee_per_round"]),
-            spec=(DeepSeekSpec if deepseek else DecisionSpec if is_decision_spec(d) else LoraSpec).from_json(
+            spec=(DecisionSpec if is_decision_spec(d) else LoraSpec).from_json(
                 d, seed=int(d["init_seed"])),
             data_source=dict(d["data"]),
             init_seed=int(d["init_seed"]), lr=float(d["lr"]), batch_size=int(d["batch_size"]),
@@ -203,39 +215,13 @@ class TrainingJob:
             max_update_ratio=float(d["max_update_ratio"]), compute_s=float(d.get("compute_s", 0)),
         )
 
-    @classmethod
-    def _from_es(cls, d: dict, requester: str, budget: int) -> "TrainingJob":
-        if set(d) - ES_KEYS:
-            raise InvalidJob(f"an ES job's spec has no field {sorted(set(d) - ES_KEYS)[0]!r}")
-        from . import es2
-        spec = es2.Spec2.from_json(d) if es2.is_v2(d) else EsSpec.from_json(d)  # rule 2 (es2.py) or rule 1
-        # The fields an ES job doesn't use are fixed, so the code every job shares reads sense: a unit is one step of
-        # one segment, the whole of the unit's members answering every problem.
-        return cls(job_id=d["id"], requester=requester, budget=budget, fee_per_round=int(d["fee_per_round"]), spec=spec,
-                   data_source={"kind": "es"}, init_seed=int(d["init_seed"]), lr=spec.alpha, batch_size=1,
-                   steps_per_unit=1, checkpoint_every=1, units_per_round=int(d["units_per_round"]),
-                   memory_mb=int(d["memory_mb"]), tolerance=1e-4, max_update_ratio=10.0,
-                   compute_s=float(d.get("compute_s", 0)))
-
     def validate(self) -> None:
         def need(cond, msg):
             if not cond:
                 raise InvalidJob(msg)
 
         need(isinstance(self.job_id, str) and _JOB_ID.match(self.job_id), "job id must be 1-64 chars of a-z 0-9 . _ -")
-        need(self.public is None or not (self.es or self.finetune or self.deepseek),
-             "a fine-tune's or ES job's spec has no field 'public'")
-        if self.es:
-            problems = self.spec.problems_list()
-            need(not problems, "; ".join(problems))
-            need(self.units_per_round == self.spec.units, "an ES job's units a round are its pairs / pairs_per_unit")
-            need(self.spec.n_params * 4 <= MAX_CHECKPOINT_BYTES, "an ES state is at most 1 GB")
-            need(1 <= self.memory_mb <= 1_000_000, "memory out of range")
-            need(self.fee_per_round >= 0 and self.budget >= 0, "negative fee or budget")
-            need(self.compute_s == 0 or 5 <= self.compute_s <= MAX_COMPUTE_S,
-                 f"compute_s is 0 (sized from the job) or 5-{MAX_COMPUTE_S:.0f} seconds")
-            need(self.shards == 1 and self.data_source == {"kind": "es"}, "an ES job has no dataset and no shards")
-            return
+        need(self.public is None or not self.finetune, "a fine-tune's spec has no field 'public'")
         if self.finetune:
             return self._validate_finetune(need)
         need(self.spec.precision in PRECISIONS, "precision must be 'float64' or 'float32'")
@@ -278,39 +264,23 @@ class TrainingJob:
         need(self.compute_s == 0 or 5 <= self.compute_s <= MAX_COMPUTE_S,
              f"compute_s is 0 (sized from the job) or 5-{MAX_COMPUTE_S:.0f} seconds")
         need(self.shards == 1, "fine-tunes train whole models: shards is 1")
-        if self.deepseek:
-            return self._validate_deepseek_data(need)
         need(self.data_source.get("kind") == "tokens" and set(self.data_source) == {"kind", "sha256"}
              and re.fullmatch(r"[0-9a-f]{64}", str(self.data_source.get("sha256", ""))),
              'a fine-tune\'s data is {"kind": "tokens", "sha256": ...}')
         # Its disputes must be playable from a home connection, or a slow honest defender loses to a false accuser
-        # (the third review's finding B). (A DeepSeek job's program will count its own: deepseek_program.)
-        if not getattr(self, "deepseek", False):
-            from .program import dispute_size
+        # (the third review's finding B).
+        from .program import dispute_size
 
-            moves, split = dispute_size(self.spec, self.batch_size, self.n_segments, self.checkpoint_every)
-            need(split <= MAX_SPLIT_BYTES,
-                 f"a dispute over one of its units would upload {split / 2**20:.0f} MB of states in one move, more than "
-                 f"{MAX_SPLIT_BYTES // 2**20} MB: use fewer steps a segment, shorter sequences or fewer LoRA targets")
-            # (At the reference speeds, as when this rule was made, rather than move_seconds' slower ones: a job that
-            # was valid stays valid, so the blocks that posted one still apply.)
-            took = moves * (self.unit_flops / self.n_segments / REF_GPU_FLOPS + split / REF_UPLOAD + split / REF_DOWNLOAD)
-            need(took <= MAX_PHASE_S,
-                 f"a dispute over one of its units would take {took / 60:.0f} minutes at home upload speeds, more than "
-                 f"the {MAX_PHASE_S / 60:.0f} a dispute phase has: use fewer steps a segment or shorter sequences")
-
-    def _validate_deepseek_data(self, need) -> None:
-        """A DeepSeek job's data: its text as token ids (deepseek_prep's .npz), and which sequences train and which
-        are held back for the scorers: {"kind": "deepseek", "sha256", "train": [first, end], "heldback": [...]}."""
-        d = self.data_source
-
-        def span(x):
-            return isinstance(x, list) and len(x) == 2 and all(type(v) is int for v in x) and 0 <= x[0] < x[1]
-        need(d.get("kind") == "deepseek" and set(d) == {"kind", "sha256", "train", "heldback"}
-             and re.fullmatch(r"[0-9a-f]{64}", str(d.get("sha256", ""))) and span(d.get("train"))
-             and span(d.get("heldback")) and (d["train"][1] <= d["heldback"][0] or d["heldback"][1] <= d["train"][0]),
-             "a DeepSeek job's data is {\"kind\": \"deepseek\", \"sha256\": ..., \"train\": [first, end], "
-             "\"heldback\": [first, end]}, the two apart")
+        moves, split = dispute_size(self.spec, self.batch_size, self.n_segments, self.checkpoint_every)
+        need(split <= MAX_SPLIT_BYTES,
+             f"a dispute over one of its units would upload {split / 2**20:.0f} MB of states in one move, more than "
+             f"{MAX_SPLIT_BYTES // 2**20} MB: use fewer steps a segment, shorter sequences or fewer LoRA targets")
+        # (At the reference speeds, as when this rule was made, rather than move_seconds' slower ones: a job that
+        # was valid stays valid, so the blocks that posted one still apply.)
+        took = moves * (self.unit_flops / self.n_segments / REF_GPU_FLOPS + split / REF_UPLOAD + split / REF_DOWNLOAD)
+        need(took <= MAX_PHASE_S,
+             f"a dispute over one of its units would take {took / 60:.0f} minutes at home upload speeds, more than "
+             f"the {MAX_PHASE_S / 60:.0f} a dispute phase has: use fewer steps a segment or shorter sequences")
 
     # --- data ------------------------------------------------------------------
 
@@ -322,19 +292,10 @@ class TrainingJob:
             self._data = Dataset.synthetic(self.spec, self.data_source["seed"])
         return self._data
 
-    def attach_data(self, data: Dataset | TokenDataset | TokenFile, file_sha256: str) -> None:
+    def attach_data(self, data: Dataset | TokenDataset, file_sha256: str) -> None:
         """Attach a downloaded dataset after checking it's the one the requester committed to."""
         if file_sha256 != self.data_source.get("sha256"):
             raise InvalidJob("dataset hash does not match the job's commitment")
-        if self.deepseek or isinstance(data, TokenFile):
-            if not (self.deepseek and isinstance(data, TokenFile)):
-                raise InvalidJob("a DeepSeek job's data is its token file (deepseek_job.TokenFile), and no other job's")
-            try:
-                data.check(self.spec, self.data_source)
-            except ValueError as e:
-                raise InvalidJob(f"the dataset doesn't suit the job: {e}") from None
-            self._data = DeepSeekData(data, dict(self.data_source))
-            return
         if self.finetune != isinstance(data, TokenDataset):
             raise InvalidJob("a fine-tune trains on token sequences, and other jobs on tables")
         if self.decision != isinstance(data, DecisionDataset):
@@ -350,15 +311,7 @@ class TrainingJob:
 
     def evaluate(self, params: np.ndarray, backend=None) -> tuple[float, float]:
         """(loss, accuracy) of these weights on the job's held-back data: for an MLP, cross-entropy and the share of
-        rows classified right; for a fine-tune, cross-entropy and the share of reply tokens predicted right. For an ES
-        job, from its state alone: 1 − and the last round's mean reward (the node never runs the model)."""
-        if self.es:
-            from .es import CTRL
-            mean = float(np.asarray(params)[-CTRL + 5])
-            return 1.0 - mean, mean
-        if self.deepseek:
-            from . import deepseek_unit
-            return deepseek_unit.evaluate(self.spec, self.data, params, backend)
+        rows classified right; for a fine-tune, cross-entropy and the share of reply tokens predicted right."""
         if self.finetune:
             from . import finetune
             return finetune.evaluate(self.spec, self.data, params, backend)
@@ -392,10 +345,6 @@ class TrainingJob:
         of checkpoints whose upload failed; in verify, fetch and replay the challenged segments of two units. A job
         can ask for a longer compute phase (compute_s), for bigger units. Nodes use these or their own phase
         lengths, whichever are longer."""
-        if self.es:  # fetch the state, answer, upload the answers (small); a check is one forward pass a member
-            unit = self.checkpoint_bytes / REF_DOWNLOAD + self.unit_flops / REF_GPU_FLOPS
-            check = self.checkpoint_bytes / REF_DOWNLOAD + 2 * self.spec.check_flops() / REF_GPU_FLOPS
-            return {"compute": max(self.compute_s, 1.25 * unit), "reveal": 5.0, "verify": 2 * check}
         b, ref = self.checkpoint_bytes, REF_GPU_FLOPS if self.finetune else REF_FLOPS
         unit = b / REF_DOWNLOAD + self.unit_flops / ref + self.n_segments * b / REF_UPLOAD
         check = 2 * CHECKED_SEGMENTS * b / REF_DOWNLOAD + CHECKED_SEGMENTS * self.unit_flops / self.n_segments / ref
@@ -430,17 +379,17 @@ def is_finetune_spec(d) -> bool:
 
 
 # Every field a fine-tune's spec may have (TrainingJob.to_spec): anything else is refused rather than ignored.
-# `public` is accepted for fine-tune/ES specs only from the next block version, once every validator runs >=0.5.28;
+# `public` is accepted for fine-tune specs only from the next block version, once every validator runs >=0.5.28;
 # until then a `public` key there would split validators.
 FINETUNE_KEYS = {"id", "fee_per_round", "base", "manifest", "model", "lora", "seq_len", "optimizer", "precision", "data",
                  "init_seed", "lr", "batch_size", "steps_per_unit", "checkpoint_every", "units_per_round", "memory_mb",
                  "tolerance", "max_update_ratio", "compute_s"}
 
 
-def load_dataset(path, max_bytes: int | None = None) -> Dataset | TokenDataset | TokenFile:
+def load_dataset(path, max_bytes: int | None = None) -> Dataset | TokenDataset | DecisionDataset:
     """A dataset file of any kind: a table for an MLP (model.Dataset), token sequences for a fine-tune
-    (finetune.TokenDataset), or a DeepSeek job's token file (deepseek_job.TokenFile), told apart by the arrays inside.
-    Never unpickles; refuses anything else."""
+    (finetune.TokenDataset), or decision items (decision.DecisionDataset), told apart by the arrays inside. Never
+    unpickles; refuses anything else."""
     import zipfile
 
     try:
@@ -449,7 +398,7 @@ def load_dataset(path, max_bytes: int | None = None) -> Dataset | TokenDataset |
     except zipfile.BadZipFile as e:
         raise ValueError(f"not a dataset (.npz): {e}") from e
     if names == {"tokens", "lengths", "learn"}:
-        return TokenFile.from_npz(path, max_bytes)
+        raise ValueError("a DeepSeek job's token file: that kind of job was removed from VibeHash after " + RETIRED_IN)
     if is_decision_npz(names):
         return DecisionDataset.from_npz(path, max_bytes)
     return TokenDataset.from_npz(path, max_bytes) if "train_ids" in names else Dataset.from_npz(path, max_bytes)

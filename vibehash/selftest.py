@@ -20,7 +20,7 @@ computer agrees with. `--json` is for scripts.
             refused), download speed from it, and whether huggingface.co answers (fine-tunes fetch weights there).
   Wallet    whether setup has run, the saved node and wallet, its address (read from the file, no password), balance
             and stake, and how long earning the stake should take at the network's recent pace.
-  Disk      free space for the cache (fine-tunes' weights) and the model store (DeepSeek's ~30 GB, modelstore.py).
+  Disk      free space for the cache (fine-tunes' weights).
 """
 from __future__ import annotations
 
@@ -52,7 +52,6 @@ PYPI = "https://pypi.org/pypi/vibehash/json"
 FRUIT_ARRAYS = "60107810e50f4a90efaf0d9e845ac457756be0887c23652ae6bf252992591ccf"
 SKEW_WARN_S = 30  # a clock this far off still works, but drifts: worth fixing before it doesn't
 CACHE_FOR_FINETUNES = 10e9  # Qwen3-4B's 8 GB of weights, plus room
-STORE_FOR_DEEPSEEK = 40e9  # DeepSeek's ~30 GB of model files, hand-offs and modelstore's 2 GB margin (the menu says 40)
 # The ready models' shapes, from their config.json (Qwen/Qwen3-0.6B and Qwen/Qwen3-4B), so the summary needs no
 # download: what finetune.memory_mb sizes a fine-tune's workers by, at the longest sequences `train` makes (512).
 SHAPES = {
@@ -66,7 +65,6 @@ TINY = {"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "vocab_siz
         "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 16,
         "intermediate_size": 48, "rms_norm_eps": 1e-6, "rope_theta": 10000.0, "tie_word_embeddings": True,
         "hidden_act": "silu", "max_position_embeddings": 512, "attention_bias": False}
-PREFIX, SUFFIX = "This PC can't take DeepSeek work: ", ". It keeps earning on other jobs."  # deepseek_worker.can_take's
 UNICODE = {"ok": "✓", "warn": "!", "fail": "✗", "skip": "·"}
 ASCII = {"ok": "ok", "warn": "!!", "fail": "XX", "skip": "--"}
 
@@ -542,34 +540,6 @@ def finetune_check(rep: Report, device: Device | None, found: list[Device]) -> N
                 device=gpu.id, worst=got["worst"])
 
 
-def evo_check(rep: Report, device: Device | None, found: list[Device]) -> None:
-    """Evo on the GPU it would mine on: its own answers on a tiny Qwen3.5, checked by itself, are exactly greedy
-    (evo_selftest). A card that fails takes no Evo work."""
-    from . import compute
-
-    gpu = device if device is not None and device.id != "cpu" else next((d for d in found if d.id != "cpu" and not d.problem), None)
-    if not compute.torch_available():
-        rep.add("evo", "skip", "Evo check: skipped (needs PyTorch; `vibehash install-gpu` installs it for a GPU)")
-        return
-    if gpu is None:
-        rep.add("evo", "skip", "Evo check: skipped (Evo mines on a GPU, and none is usable here)")
-        return
-    from . import evo_selftest
-    try:
-        got = evo_selftest.check(gpu.id)
-    except Exception as e:  # noqa: BLE001
-        rep.add("evo", "fail", f"Evo check on {gpu.id}: failed ({type(e).__name__}: {str(e)[:200]}). This computer "
-                "won't take Evo jobs, and can still mine the others", device=gpu.id)
-        return
-    if got["ok"]:
-        rep.add("evo", "ok", f"Evo check on {gpu.id} (a tiny Qwen3.5, {got['seconds']:.1f} s): its own answers check "
-                "exactly (gap 0)" + (f", and a twin's answers claimed as its own are caught ({got['swap']:.3g} below)"
-                                     if got["swap"] is not None else ""), device=gpu.id, worst=got["worst"])
-    else:
-        rep.add("evo", "fail", f"Evo check on {gpu.id}: {evo_selftest.problem_of(gpu.id, got)}. This computer won't "
-                "take Evo jobs, and can still mine the others", device=gpu.id, worst=got["worst"])
-
-
 def model_unit(name: str, device: str, yes: bool = False, ask=None, say=print) -> dict:
     """One real unit of a ready model on `device`: its weights fetched as a worker fetches them (asked first), 16 Adam
     steps at the batch a job would use, on synthetic chats of 512 tokens (the longest `train` makes), timed, with
@@ -913,9 +883,8 @@ def wallet(rep: Report, net: Net, path: Path | None, address: str | None, storag
         rep.add("setup", "warn", f"setup hasn't been run here ({home} has no settings): `vibehash setup` makes a wallet "
                 "and picks the node", home=str(home))
     else:
-        rep.add("setup", "ok", f"setup saved its settings in {home}{where}: node {cfg.get('node') or settings.node_url()}"
-                + (f"; DeepSeek work: {cfg['deepseek']}" if cfg.get("deepseek") else ""), home=str(home),
-                node=cfg.get("node"))
+        rep.add("setup", "ok", f"setup saved its settings in {home}{where}: node {cfg.get('node') or settings.node_url()}",
+                home=str(home), node=cfg.get("node"))
     if address is None:
         rep.add("wallet", "warn", "no wallet yet: `vibehash setup` makes one" if not path or not path.exists()
                 else f"{path} isn't a wallet file Vibe Hash can read", path=str(path) if path else None)
@@ -945,13 +914,19 @@ def wallet(rep: Report, net: Net, path: Path | None, address: str | None, storag
             f"balance {_vibe(a['balance'])}, {state}", balance=a["balance"], stake=a["stake"], min_stake=need)
 
 
-def disk(rep: Report) -> dict:
-    from . import modelstore
+def free_space(folder: Path) -> int:
+    """Free bytes on the drive `folder` is (or would be) on."""
+    p = Path(folder)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return shutil.disk_usage(p).free
 
+
+def disk(rep: Report) -> dict:
     rep.title("Disk")
     cache = settings.home() / "cache"
     try:
-        free = modelstore.free_space(cache)
+        free = free_space(cache)
     except OSError:
         free = 0
     rep.add("cache", "ok" if free >= CACHE_FOR_FINETUNES else "warn" if free >= 2e9 else "fail",
@@ -961,18 +936,7 @@ def disk(rep: Report) -> dict:
                                                     if free >= 2e9 else
                                                     ": too little for fine-tunes; free some, or set VIBEHASH_HOME to a "
                                                     "bigger drive"), path=str(cache), free=free)
-    try:
-        store = modelstore.Store.from_settings()
-        sfree = modelstore.free_space(store.folder)
-    except OSError:
-        return {"cache": free, "store": 0, "cap": 0}
-    roomy = sfree >= STORE_FOR_DEEPSEEK and store.cap >= 32e9
-    rep.add("models", "ok" if roomy else "warn",
-            f"model store {store.folder}: {_bytes(sfree)} free, up to {_bytes(store.cap)} allowed" +
-            (": room for DeepSeek's ~30 GB" if roomy else
-             f": DeepSeek work needs about {_bytes(STORE_FOR_DEEPSEEK)} free and allowed (`vibehash setup --models-dir "
-             "FOLDER --models-gb 40`)"), path=str(store.folder), free=sfree, cap=store.cap)
-    return {"cache": free, "store": sfree, "cap": store.cap}
+    return {"cache": free}
 
 
 # --- what it can take -------------------------------------------------------------------------------------------------
@@ -1023,30 +987,13 @@ def summary(rep: Report, found: list[Device], trained: Device | None, net: Net, 
                  + (": only just, so close other programs using the GPU" if snug else "") + ")"
                  + ("" if hf is not False else ", once huggingface.co answers"))
     for job_id, spec in net.jobs.items():
-        if "base" in spec and "deepseek" not in spec and gpu_mb is not None:
+        if "base" in spec and "deepseek" not in spec and gpu_mb is not None:  # (a cut DeepSeek job's isn't one)
             need = int(spec.get("memory_mb", 0))
             fits = torch and lora_ok and gpu_mb >= need
             line(f"job {job_id}", fits, f"job {job_id} on this node (fine-tunes {spec['base'].split('@')[0][3:]}): "
                  f"{'yes' if fits else 'no'} (needs {_mb(need)} of GPU memory)")
-    deepseek = False
-    if torch and gpu is not None and gpu.id.startswith("cuda"):
-        from .deepseek_worker import can_take
-        mach = {"gpu": {"name": gpu.label, "gb": (gpu.total_mb or 0) / 1024}, "ram_gb": hardware.total_memory_mb() / 1024}
-        for stage in ("prep", "train"):
-            ok, why = can_take(stage, mach)
-            if ok and room["store"] < STORE_FOR_DEEPSEEK:
-                ok, why = False, f"needs about {_bytes(STORE_FOR_DEEPSEEK)} free for its model files (see Disk)"
-            take[f"deepseek {stage}"] = ok
-            deepseek = deepseek or ok
-        reason = "" if deepseek else f" ({why.removeprefix(PREFIX).removesuffix(SUFFIX)})"
-        line("deepseek", deepseek, f"DeepSeek pilot (prep and training): {'yes' if deepseek else 'no'}{reason}"
-             + ("; about 30 GB of model files, asked first" if deepseek else ""))
-    else:
-        take["deepseek prep"] = take["deepseek train"] = False
-        line("deepseek", False, "DeepSeek pilot: no (needs an NVIDIA GPU with 8 GB, PyTorch, 16 GB of memory)")
     gpus = [d for d in found if d.id != "cpu" and not d.problem]
     cfg = settings.load()
-    has_deepseek_job = any("deepseek" in spec for spec in net.jobs.values())
     if rep.failed("versions"):
         nxt = f"{advice.UPGRADE}, then `vibehash selftest` again"
     elif rep.failed("clock"):
@@ -1057,8 +1004,6 @@ def summary(rep: Report, found: list[Device], trained: Device | None, net: Net, 
         nxt = "fix the device problems above, then `vibehash selftest` again"
     elif address is None or not cfg:
         nxt = "vibehash setup" + (f" --node {net.url}" if net.url != settings.PUBLIC_NODE else "")
-    elif settings.deepseek_pilot() and deepseek and has_deepseek_job and cfg.get("deepseek") != "yes":
-        nxt = "vibehash worker --deepseek yes   (or plain `vibehash worker` to leave DeepSeek out)"
     else:
         nxt = "vibehash worker" + (f" --device {want}" if want != "auto" else "")
     rep.say("\nTonight this computer can take:")
@@ -1087,7 +1032,6 @@ def run(node: str | None = None, device: str = "auto", offline: bool = False, mo
     found = devices(rep)
     trained = training(rep, found, device)
     finetune_check(rep, trained, found)
-    evo_check(rep, trained, found)
     if model:
         model_check(rep, model, trained if trained is not None and trained.id != "cpu" else None, yes)
     path, address, storage = wallet_address()

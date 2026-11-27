@@ -23,9 +23,11 @@ import urllib.request
 
 from . import crypto, settings
 
+# All required; extra fields are tolerated. requirements_evo named Evo's set of packages; Evo was cut after 0.5.28, and
+# a manifest still carries the field, naming the base file, for readers up to then (scripts/release_manifest.py).
 FIELDS = ("version", "wheel", "wheel_sha256", "requirements", "requirements_sha256", "requirements_evo",
-          "requirements_evo_sha256", "published", "min_launcher")  # (all required; extra fields are tolerated)
-VARIANTS = {"base": ("requirements", "requirements_sha256"), "evo": ("requirements_evo", "requirements_evo_sha256")}
+          "requirements_evo_sha256", "published", "min_launcher")
+VARIANTS = {"base": ("requirements", "requirements_sha256")}
 
 
 class Verified(dict):
@@ -98,8 +100,8 @@ def is_newer(manifest: dict, installed: str | None = None) -> bool:
 
 def install(manifest: dict, variant: str = "base", fetch=fetch, run=subprocess.call, say=print) -> int:
     """pip's exit code for installing exactly the requirements file `manifest` (from check()) names, with
-    --require-hashes: the "base" file (the launcher's set: finetune and app) or the "evo" one (those plus the Evo extras,
-    a few hundred MB more); nonzero, with nothing run, when the file isn't the one the manifest hashes."""
+    --require-hashes: the "base" file (the launcher's set: finetune and app); nonzero, with nothing run, when the file
+    isn't the one the manifest hashes."""
     if variant not in VARIANTS:
         say(f"not installing: no such set of packages as {variant!r}")
         return 1
@@ -127,8 +129,8 @@ def install(manifest: dict, variant: str = "base", fetch=fetch, run=subprocess.c
 def update(reinstall: bool = False, variant: str = "base", fetch=fetch, run=subprocess.call, say=print,
            installed: str | None = None) -> int:
     """The whole thing, for `vibehash update` and the menu: check, say which version was verified, install. Nothing
-    newer: nothing is done, unless `reinstall` (put back the current release's packages, e.g. for the Evo extras,
-    which the requirements include); an older release is never installed. -> an exit code (0: done or already current)."""
+    newer: nothing is done, unless `reinstall` (put back the current release's packages); an older release is never
+    installed. -> an exit code (0: done or already current)."""
     manifest = check(fetch=fetch, say=say)
     if manifest is None:
         return 1

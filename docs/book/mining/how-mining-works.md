@@ -75,4 +75,4 @@ Half of any slashed stake goes to whoever caught the problem, and the other half
 
 ## Other kinds of jobs
 
-Most of the above is how classic jobs (small models trained on spreadsheets) work. [Evo Hash](evo-hash.md) jobs and [DeepSeek jobs](deepseek.md) follow the same pattern of train, commit, check and pay, with their own checks. Your worker takes whatever jobs your computer can do, unless you pick one with `--job` (see [The worker](worker.md)).
+Most of the above is how classic jobs (small models trained on spreadsheets) work. Fine-tunes follow the same pattern of train, commit, check and pay, with their own checks. Your worker takes whatever jobs your computer can do, unless you pick one with `--job` (see [The worker](worker.md)).

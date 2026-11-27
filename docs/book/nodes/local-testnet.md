@@ -66,22 +66,6 @@ vibehash train my-data.csv --node http://127.0.0.1:8545 --wallet ~/.vibehash/tes
 
 A testnet's rounds are shorter than a real node's: register 3 s, compute 8 s, reveal 3 s and verify 4 s by default. `--register-s`, `--compute-s`, `--reveal-s` and `--verify-s` change them, and `--min-fee` sets the relay fee.
 
-## Evo Hash
-
-```bash
-vibehash testnet --evo2
-```
-
-This runs Evo Hash, training by evolution: a node and two miners train Qwen2.5-0.5B-Instruct on many tasks, and each block keeps only the seeds and scores of the round. It needs an NVIDIA GPU with PyTorch (`vibehash install-gpu`) and `pip install vibehash[evo]`, and downloads the model and the tasks' datasets once.
-
-- It lives in its own folder, `~/.vibehash/testnet-evo2`, with a genesis that takes Evo jobs and workers that start staked.
-- `--evo2-rounds N` sets each job's length (default 12).
-- `--evo-model MODEL` picks another Hugging Face model.
-- `--evo` is the first, simpler version (one layer, Countdown only), in `~/.vibehash/testnet-evo`.
-- `vibehash evo export`, in another terminal, writes the tuned model out as a Hugging Face folder.
-
-An existing testnet folder made without Evo jobs can't become an Evo one: use `--reset` or another `--dir`.
-
 ## Letting other computers join
 
 ```bash

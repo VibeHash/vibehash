@@ -31,9 +31,9 @@ no C library: exp, log, sin and cos are written below from those operations. So 
 or NumPy, compute bit-identical values and bounds, and so identical verdicts. (The workers' kernels are where libm and
 CUDA differ by an ulp or two, which is what the 4-ulp allowance is for.)
 
-The table below is keyed by op kind; program.py says which ops a step runs. An op family with other arithmetic, like
-DeepSeek's FP8 and FP4 dequantization, its mixture-of-experts router (where a near-tie between experts would need a
-margin rule) or hyper-connections, is added as more entries here and in tracer.py.
+The table below is keyed by op kind; program.py says which ops a step runs. An op family with other arithmetic, like FP8
+dequantization or a mixture-of-experts router (where a near-tie between experts would need a margin rule), is added as
+more entries here and in tracer.py.
 """
 from __future__ import annotations
 

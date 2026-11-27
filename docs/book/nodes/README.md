@@ -53,7 +53,7 @@ By default a node listens on 127.0.0.1, port 8545. `--host 0.0.0.0` lets other c
 
 ## In this section
 
-- [A test network on your computer](local-testnet.md): `vibehash testnet`, with validators, workers and Evo jobs, all on one machine.
+- [A test network on your computer](local-testnet.md): `vibehash testnet`, with validators, workers and jobs, all on one machine.
 - [A public node](public-node.md): `deploy/setup-node.sh` on a fresh Ubuntu server, locking the server down, and upgrading.
 - [Genesis and TLS](genesis-and-tls.md): making the file a network starts from, and serving HTTPS.
 - [Validators](validators.md): joining, leaving, the stake it takes, and why four validators survive an outage when two or three don't.

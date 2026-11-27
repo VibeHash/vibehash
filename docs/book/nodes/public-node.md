@@ -48,21 +48,19 @@ journalctl -u vibehash-node -f
 
 The node's files are in `/var/lib/vibehash`, and its wallet password is in `/etc/vibehash/env`. Include both in backups.
 
-For a network that takes Evo jobs, it also installs `datasets`, fetches the Evo tasks' questions (the node re-scores miners' answers with them) and gives rounds a 180-second verify phase.
-
 To turn on the [admin app](admin-app.md)'s routes, add `VIBEHASH_ADMIN_TOKEN=...` and `VIBEHASH_ADMIN_MFA=...` lines to `/etc/vibehash/env` (made with `vibehash admin --new-token` and `--new-mfa`) and run `systemctl restart vibehash-node`. Running the script again keeps them.
 
 ## A second network on the same server
 
-One server can run another network's node beside the first, such as an Evo Hash testnet. Give it a name, its own domain (an A record to the same server), a port other than 443 and its own chain id:
+One server can run another network's node beside the first, such as a staging testnet. Give it a name, its own domain (an A record to the same server), a port other than 443 and its own chain id:
 
 ```bash
-ssh -t YOU@SERVER sudo bash setup-node.sh --name evo --domain evo.example.org --port 8443 --chain-id my-evo-1 --es --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
+ssh -t YOU@SERVER sudo bash setup-node.sh --name staging --domain staging.example.org --port 8443 --chain-id my-staging-1 --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
 ```
 
-- `--name evo` keeps it apart: `/var/lib/vibehash-evo`, `/etc/vibehash-evo`, the service `vibehash-node-evo` and its own certificate. The first node is left as it is.
+- `--name staging` keeps it apart: `/var/lib/vibehash-staging`, `/etc/vibehash-staging`, the service `vibehash-node-staging` and its own certificate. The first node is left as it is.
 - A named node must have its own `--chain-id`; the script refuses the default.
-- `--es` makes it take Evo Hash jobs. `--stake ADDR=VIBE` starts a wallet staked: an Evo job's work is checked only by staked workers, so someone must be staked before newcomers can earn theirs.
+- `--stake ADDR=VIBE` starts a wallet staked: a fine-tune's work is checked only by staked workers, so someone must be staked before newcomers can earn theirs.
 
 Both nodes share the server's Vibe Hash install, so after upgrading one, restart the others too:
 

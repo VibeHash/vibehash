@@ -9,8 +9,7 @@ Face transformers and PEFT. Proven end to end with Qwen3-0.6B (below), the
 second time with a node that had no PyTorch installed. Supported: the Llama,
 Mistral, Qwen2, Qwen3 and SmolLM3 families (`llm.py`); `vibehash models` marks
 the ones a gaming GPU holds as ready. What 3–4B models on the public network
-take is the last section. Models too big for one GPU need teams: DEEPSEEK.md
-and SHARDING.md.
+take is the last section. Models too big for one GPU need teams: SHARDING.md.
 
 How it works inside (A frozen and B trained so averaging is exact, Adam in the
 checkpoints, the checks, the tolerances measured) is DESIGN.md §8, "Fine-tuning
@@ -263,10 +262,6 @@ to bf16 moves each weight a little. The command reports by how much. On the
 averages out: held-back loss is 1.10475 for the base with the adapter, for
 the bf16 merge and for a float32 one, and the bf16 merge predicts 1 token in
 12,238 differently. `--float32` keeps the change whole at twice the size.
-
-A DeepSeek job has no `--merged`: its merged model would be the whole of
-DeepSeek-V4.1-Flash rewritten. Its adapter loads on the base with PEFT or
-vLLM.
 
 ## Working
 
