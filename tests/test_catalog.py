@@ -44,18 +44,18 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(catalog.find(m.name.upper()), m)
             self.assertEqual(catalog.find(m.repo.lower()), m)
             self.assertEqual(catalog.resolve(m.url), (m.repo, m))
-        for name in ("qwen3-0.6b", "llama-3.2-1b", "qwen3.8-27b", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash"):
+        for name in ("qwen3-0.6b", "llama-3.2-1b", "qwen3.8-27b", "glm-5.3", "glm-5.3-flash"):
             self.assertIn(name, names)
-        self.assertEqual(names[0], "qwen3-0.6b")  # one gaming GPU's worth first, as DEEPSEEK.md's build order has it
-        self.assertEqual(names[-1], "deepseek-v4.1-flash")
+        self.assertEqual(names[0], "qwen3-0.6b")  # one gaming GPU's worth first
+        self.assertEqual(names[-1], "glm-5.3")
 
     def test_what_people_type_as_a_base(self):
-        deepseek = catalog.find("deepseek-v4.1-flash")
-        self.assertEqual(catalog.resolve("DeepSeek-V4.1-Flash"), (deepseek.repo, deepseek))
-        self.assertEqual(catalog.resolve("deepseek-ai/DeepSeek-V4.1-Flash"), (deepseek.repo, deepseek))
+        glm = catalog.find("glm-5.3-flash")
+        self.assertEqual(catalog.resolve("GLM-5.3-Flash"), (glm.repo, glm))
+        self.assertEqual(catalog.resolve("zai-org/GLM-5.3-Flash"), (glm.repo, glm))
         self.assertEqual(catalog.resolve("hf:acme/tiny"), ("acme/tiny", None))
         self.assertEqual(catalog.resolve("https://huggingface.co/acme/tiny/tree/v2"), ("acme/tiny@v2", None))
-        self.assertEqual(catalog.resolve("deepseek-ai/DeepSeek-V4.1-Flash@main"), (deepseek.repo + "@main", None))
+        self.assertEqual(catalog.resolve("zai-org/GLM-5.3-Flash@main"), (glm.repo + "@main", None))
         with self.assertRaisesRegex(ValueError, "did you mean qwen3-8b, .*`vibehash models` lists them"):
             catalog.resolve("qwen3")
         with self.assertRaisesRegex(ValueError, "no model called 'nothing-like-it'"):
@@ -63,11 +63,11 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             catalog.resolve("https://example.com/acme/tiny")
 
-    def test_what_a_team_needs_is_deepseek_mds_maths(self):
-        deepseek = catalog.find("deepseek-v4.1-flash")
-        f = facts(510_296_708_312, 40)  # DEEPSEEK.md §1: 510.3 GB, 40 layers
-        self.assertEqual(round(catalog.held_bytes(f, deepseek) / 1e9, 1), 298.3)  # less the tables and draft layers
-        self.assertEqual(catalog.team(f, deepseek), {12: 40, 24: 20, 32: 14})  # DEEPSEEK.md §2's table
+    def test_what_a_team_needs(self):
+        part = Model("big", "Big", "acme/big", left_out=(("a table", "never on a GPU", 211_996_708_312),))
+        f = facts(510_296_708_312, 40)  # 510.3 GB in 40 layers
+        self.assertEqual(round(catalog.held_bytes(f, part) / 1e9, 1), 298.3)  # less what its entry leaves out
+        self.assertEqual(catalog.team(f, part), {12: 40, 24: 20, 32: 14})
         self.assertEqual(catalog.team(facts(1_503_300_328, 28)), {12: 1, 24: 1, 32: 1})  # Qwen3 0.6B on any card
         self.assertEqual(catalog.team(facts(755_632_050_320, 78)), {12: None, 24: 78, 32: 39})  # a layer > 9 GB
         self.assertEqual(catalog.gpus(30 * 10**9, None, 12), 4)  # no layer count: shared out evenly

@@ -281,17 +281,6 @@ class ApiTests(Home):
             self.assertFalse(self.api.words_seen()["ok"])
         opened.assert_not_called()
 
-    def test_deepseek_is_remembered_and_a_running_app_restarts_its_worker(self):
-        with mock.patch.object(app, "_winreg", return_value=None):
-            self.assertEqual(self.api.settings()["deepseek"], "no")
-            self.assertEqual(self.api.set_deepseek(True), {"ok": True, "deepseek": "yes"})
-            self.assertEqual(settings.load()["deepseek"], "yes")  # what `vibehash worker` reads as it starts
-            self.assertIsNone(app.take_order())  # no app running: the setting is enough
-            self.alive()
-            self.api.set_deepseek(False)
-            self.assertEqual(self.api.settings()["deepseek"], "no")
-            self.assertEqual(app.take_order(), "restart")
-            self.assertFalse(self.api.set_deepseek("yes")["ok"])
 
     def test_settings_the_avatar_and_the_welcome(self):
         with mock.patch.object(app, "_winreg", return_value=None):
@@ -431,21 +420,6 @@ class ApiTests(Home):
         self.assertNotIn("secret_stuff", got[0])
         self.assertEqual(len(self.api.history(1)["rows"]), 1)
 
-    def test_the_model_store_clears_only_while_nothing_mines(self):
-        from vibehash import modelstore
-        folder = Path(self.tmp.name) / "models"
-        settings.save(models={"folder": str(folder), "cap_gb": 40})
-        c = self.api.cache()
-        self.assertTrue(c["ok"])
-        self.assertEqual((c["used"], c["cap"]), (0, 40 * modelstore.GB))
-        self.assertTrue(self.api.set_cache_cap(100)["ok"])
-        self.assertEqual(self.api.cache()["cap"], 100 * modelstore.GB)
-        for bad in (1, 5000, True, "50"):
-            self.assertFalse(self.api.set_cache_cap(bad)["ok"], bad)
-        self.alive()  # mining
-        self.assertFalse(self.api.clear_cache()["ok"])
-        self.alive(paused=True)
-        self.assertEqual(self.api.clear_cache(), {"ok": True, "freed": 0})
 
     def test_the_check_runs_with_the_environments_python_under_the_launcher(self):
         """VibeHash.exe --window hosts this module in the frozen launcher, whose sys.executable doesn't know -m."""

@@ -207,7 +207,7 @@ class SelfTestTests(Home):
                                                                     "tolerance": 1e-4, "moved": 1e-3, "steps": 4}):
             code, report, out = self.run_test(*fake_devices(), mock.patch.object(compute, "torch_available",
                                                                                   return_value=True),
-                                              mock.patch("vibehash.modelstore.free_space", return_value=500 * 10**9),
+                                              mock.patch.object(selftest, "free_space", return_value=500 * 10**9),
                                               offline=True)
         self.assertEqual(code, 0, out)
         self.assertEqual(check(report, "train")["data"]["device"], "cuda:0")

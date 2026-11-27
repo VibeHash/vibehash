@@ -6,7 +6,6 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import numpy as np
 
 from vibehash import compute
 from vibehash.model import Dataset, ModelSpec
@@ -106,18 +105,6 @@ class DeviceFactsTests(unittest.TestCase):
         self.assertEqual(compute.gpu_kind(SimpleNamespace(version=SimpleNamespace(hip="6.4.43482"))), "ROCm")
         self.assertEqual(compute.gpu_kind(SimpleNamespace(version=SimpleNamespace(hip=None, cuda="12.6"))), "CUDA")
         self.assertEqual(compute.gpu_kind(torch), "ROCm" if torch.version.hip else "CUDA")
-
-
-@unittest.skipUnless(HAVE_TORCH and torch.cuda.is_available(), "needs a CUDA (or ROCm) GPU")
-class SameGpuTests(unittest.TestCase):
-    def test_an_engine_refuses_a_model_on_another_gpu(self):
-        from vibehash import es_fast
-        es_fast._same_gpu(torch.device("cpu"))
-        es_fast._same_gpu(torch.device("cuda"))
-        es_fast._same_gpu(torch.device("cuda", torch.cuda.current_device()))
-        other = torch.cuda.current_device() + 1  # (needn't exist: refused before anything touches it)
-        with self.assertRaisesRegex(RuntimeError, f"CUDA_VISIBLE_DEVICES={other}"):
-            es_fast._same_gpu(torch.device("cuda", other))
 
 
 if __name__ == "__main__":

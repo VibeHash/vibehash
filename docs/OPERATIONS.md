@@ -33,7 +33,7 @@ private login. When an owner changes, hand the role over and rotate the secrets 
 ## Deploy a node
 
 On a fresh Ubuntu 24.04 server, run `deploy/setup-node.sh` (its header lists the flags: `--domain`,
-`--chain-id`, `--name`, `--es`, `--stake`, `--enable-tor`). Running it again upgrades the node and
+`--chain-id`, `--name`, `--stake`, `--follow`, `--enable-tor`). Running it again upgrades the node and
 keeps its wallet and chain. Then lock down SSH as `README.md` "Lock down the server" says.
 
 The node's files are in `/var/lib/vibehash`; its settings and secrets are in `/etc/vibehash/env`.

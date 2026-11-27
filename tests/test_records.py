@@ -167,7 +167,7 @@ class RoundLogTests(Home):
         b = block(worker_flops={ME: 2_000_000, OTHER: 3_000_000},
                   rewards=[(ME, 150_000_000, "work"), (ME, 25_000_000, "verify"), (OTHER, 10 ** 9, "work")],
                   slashes=[[OTHER, ME, "false accusation"]], slash_txs=[(OTHER, ME, 40_000_000, "false accusation")])
-        log.sealed(7, b, {"attempt": "a1", "prep": False}, {"balance": 1_234_500_000, "stake": 500_000_000,
+        log.sealed(7, b, {"attempt": "a1"}, {"balance": 1_234_500_000, "stake": 500_000_000,
                                                             "reputation": 0.987654})
         [line] = self.lines()
         self.assertRegex(line.pop("time"), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4}$")
@@ -208,17 +208,6 @@ class RoundLogTests(Home):
         self.assertEqual((e["accepted"], e["earned_vibe"], e["paid"]), (0, 0.0, {}))
         self.assertEqual(e["outcome"], "no units for this worker")
         self.assertEqual(e["note"], "this fine-tune waits for 2 staked workers")
-
-    def test_a_deepseek_round_kind_comes_from_its_record(self):
-        log = self.log()
-        log.begin(11, job_id="think-shorter-pilot", kind="deepseek")
-        self.assertEqual(log.sealed(11, block(11, job="think-shorter-pilot"), {"attempt": None, "prep": True})["kind"],
-                         "deepseek-prep")
-        log.begin(12, job_id="think-shorter-pilot", kind="deepseek")
-        log.note(12, prep=[{"unit": "layers 0-4 chunk 3", "seconds": 412.5, "tokens_per_s": 318.0, "peak_gpu_gb": 9.8}])
-        line = log.sealed(12, block(12, job="think-shorter-pilot"), {"attempt": None, "prep": False})
-        self.assertEqual(line["kind"], "deepseek-training")
-        self.assertEqual(line["prep"][0]["peak_gpu_gb"], 9.8)
 
     def test_a_block_that_cant_be_fetched_and_a_stop(self):
         log = self.log()

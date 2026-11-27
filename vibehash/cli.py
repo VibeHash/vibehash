@@ -1983,6 +1983,7 @@ def cmd_chain_verify(a):
             print(f"  of them, {old:,} rounds of DeepSeek jobs, a kind since removed, were taken as their validators "
                   "certified them: their records match their blocks, and the ledger settled them, but they weren't "
                   "re-run. `vibehash chain verify` from 0.5.28 re-runs them")
+        if rechecked_rounds:
             redone, gone = recheck_stats.get("rechecked", 0), recheck_stats.get("unchecked", 0)
             disputed = sum(" check for " in p for p in replay_problems)
             print(f"re-ran {redone} weight-based checks in the last {rechecked_rounds} rounds from their checkpoints: "

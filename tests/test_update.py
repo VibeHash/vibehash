@@ -165,24 +165,17 @@ class InstallTests(Base):
         self.assertEqual(calls, [])
         self.assertIn("hash", self.said[-1])
 
-    def test_the_evo_variant_installs_the_evo_file_and_checks_its_own_hash(self):
+    def test_only_the_base_set_installs_even_from_a_manifest_with_an_evo_file(self):
+        """A 0.5.28 manifest named a second, Evo requirements file. Evo was cut: only the base file is ever installed,
+        and asking for the Evo set installs nothing."""
         seen = []
 
         def run(cmd, **kw):
-            seen.append((cmd[6], Path(cmd[6]).read_bytes()))
+            seen.append(cmd[6])
             return 0
-        rc = update.install(self.verified(), variant="evo", fetch=self.fetcher(self.files()), run=run, say=self.said.append)
-        self.assertEqual(rc, 0)
-        self.assertTrue(seen[0][0].endswith("requirements-9.9.9-evo.txt"))
-        self.assertEqual(seen[0][1], self.evo)
-        files = self.files()
-        files[f"{RELEASES}/requirements-9.9.9-evo.txt"] = self.evo + b"evil==1\n"
-        calls = []
-        rc = update.install(self.verified(), variant="evo", fetch=self.fetcher(files), run=lambda c, **k: calls.append(c) or 0,
-                            say=self.said.append)
-        self.assertNotEqual(rc, 0)
-        self.assertEqual(calls, [])
-        self.assertNotEqual(update.install(self.verified(), variant="nope", fetch=self.fetcher(self.files()),
+        self.assertEqual(update.install(self.verified(), fetch=self.fetcher(self.files()), run=run, say=self.said.append), 0)
+        self.assertTrue(seen[0].endswith("requirements-9.9.9.txt"))
+        self.assertNotEqual(update.install(self.verified(), variant="evo", fetch=self.fetcher(self.files()),
                                            run=lambda c, **k: 0, say=self.said.append), 0)
 
     def test_a_manifest_that_did_not_come_from_check_is_refused(self):
@@ -215,7 +208,7 @@ class UpdateFlowTests(Base):
         rc, calls = self.go(self.files(), installed="9.9.9")
         self.assertEqual((rc, calls), (0, []))
         self.assertTrue(any("up to date" in line for line in self.said))
-        rc, calls = self.go(self.files(), installed="9.9.9", reinstall=True)  # (what installing the Evo extras does)
+        rc, calls = self.go(self.files(), installed="9.9.9", reinstall=True)
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
 
@@ -229,11 +222,6 @@ class UpdateFlowTests(Base):
         rc, calls = self.go(self.files(), installed="0.5.28.dev0")
         self.assertNotEqual(rc, 0)
         self.assertEqual(calls, [])
-
-    def test_evo_variant_reinstalls_even_when_current(self):
-        rc, calls = self.go(self.files(), installed="9.9.9", reinstall=True, variant="evo")
-        self.assertEqual(rc, 0)
-        self.assertTrue(calls[0][6].endswith("-evo.txt"))
 
     def test_verification_failure_is_nonzero_and_installs_nothing(self):
         with mock.patch.object(settings, "RELEASE_PUBKEYS", []):
@@ -249,10 +237,9 @@ class CliTests(unittest.TestCase):
         self.assertIs(args.fn, cli.cmd_update)
         with mock.patch.object(update, "update", return_value=0) as upd:
             cli.cmd_update(args)
-        upd.assert_called_once_with(reinstall=False, variant="base")
-        with mock.patch.object(update, "update", return_value=0) as upd:
-            cli.cmd_update(cli.parser().parse_args(["update", "--evo"]))
-        upd.assert_called_once_with(reinstall=True, variant="evo")
+        upd.assert_called_once_with()
+        with self.assertRaises(SystemExit):  # (--evo went with Evo)
+            cli.parser().parse_args(["update", "--evo"])
         with mock.patch.object(update, "update", return_value=1), self.assertRaises(SystemExit) as ctx:
             cli.cmd_update(args)
         self.assertEqual(ctx.exception.code, 1)
