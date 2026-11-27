@@ -158,11 +158,15 @@ class Outside:
         n = int(self.data.train_len[seq])
         return self.data.train_ids[seq, :n].astype(np.int64), self.data.train_mask[seq, :n]
 
+    def item(self, i, val=False):
+        """A decision item: (ids, marker positions, target probabilities, question type) (decision.DecisionDataset)."""
+        return self.data.item(int(i), bool(val))
+
     def rope(self, op, rows, r):
-        key = (op.attrs["hd"], op.attrs["theta"], tuple(op.attrs["scaling"]), rows)
+        scaling = tuple(op.attrs.get("scaling") or ())  # (a decision model's rope2 has none)
+        key = (op.attrs["hd"], op.attrs["theta"], scaling, rows)
         if key not in self._rope:
-            arch = types.SimpleNamespace(head_dim=op.attrs["hd"], rope_theta=op.attrs["theta"],
-                                         rope_scaling=tuple(op.attrs["scaling"]))
+            arch = types.SimpleNamespace(head_dim=op.attrs["hd"], rope_theta=op.attrs["theta"], rope_scaling=scaling)
             self._rope = {key: referee.rope_tables(arch, rows)}
         cos, sin = self._rope[key]
         return cos[r], sin[r]
@@ -239,6 +243,9 @@ class Inputs:
 
     def tokens(self, seq):
         return self.outside.tokens(seq)
+
+    def item(self, i, val=False):
+        return self.outside.item(i, val)
 
     def rope(self, op, r):
         return self.outside.rope(op, self.shape(op.ins[0])[0], r)

@@ -119,9 +119,8 @@ vibehash job download
   fitted to the base and not to the fine-tune.
 
 What isn't done yet:
-- The referee has no arithmetic for these ops. A cheat that stays inside
-  Adam's bound is rejected by its checkers but keeps its stake: its dispute
-  ends unchecked. That is the step before the public network.
+- A CUDA worker's step hasn't been held against the CPU referee on a decision
+  model yet (the referee's entries are measured on CPU steps).
 - Laya's default `rlcd` loss isn't here. Its random noise would have to be
   drawn the same way in every replay.
 - Nobody has measured a fine-tune of the real Laya on a test network

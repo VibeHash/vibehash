@@ -123,6 +123,26 @@ def dsincos(x) -> tuple[np.ndarray, np.ndarray]:
     return sin, cos
 
 
+_TWO_OVER_SQRT_PI = 1.12837916709551257390
+ERF_TERMS = 200  # enough for |x| ≤ ERF_FLAT: the series' terms fall below 2⁻⁵³ of its sum well before that
+ERF_FLAT = 6.0  # beyond it erf is ±1 to float64 (1 − erf(6) ≈ 2·10⁻¹⁷)
+
+
+def derf(x) -> np.ndarray:
+    """erf from + − × ÷ and dexp alone: e^−x² · 2/√π · Σ 2ⁿ x²ⁿ⁺¹ / (1·3·…·(2n+1)), whose terms are all of one sign,
+    so nothing cancels, a fixed ERF_TERMS of them (the same work, and bits, on every machine); ±1 beyond ERF_FLAT."""
+    x = np.asarray(x, dtype=np.float64)
+    a = np.minimum(np.abs(x), ERF_FLAT)
+    a2 = 2.0 * a * a
+    term, total = a.copy(), a.copy()
+    for n in range(1, ERF_TERMS):
+        term = term * a2 / (2 * n + 1)
+        total = total + term
+    v = np.minimum(1.0, _TWO_OVER_SQRT_PI * dexp(-a * a) * total)
+    v = np.where(np.abs(x) >= ERF_FLAT, 1.0, v)
+    return np.where(np.isnan(x), np.nan, np.sign(x) * v)
+
+
 def rope_tables(arch, length: int) -> tuple[np.ndarray, np.ndarray]:
     """cos and sin, [length, head_dim], as llm.rope_table makes them (rounded to float32), from + − × ÷ alone."""
     d = arch.head_dim
@@ -209,6 +229,14 @@ def exp(a: E) -> E:
     with np.errstate(invalid="ignore", over="ignore"):
         e = np.where(a.e > 0, v * a.e * dexp(a.e), 0.0)  # e^x·(e^δ − 1) ≤ e^x·δ·e^δ
     return _r(v, e, TRANS)
+
+
+def erf(a: E) -> E:
+    """erf, its input's error carried by its slope (2/√π·e^−x², at most 2/√π), plus TRANS ulps of its own (CUDA's erff
+    is within 2 ulps of the true value, the CPU's within 1)."""
+    v = derf(a.v)
+    lo = np.maximum(np.abs(a.v) - a.e, 0.0)
+    return _r(v, a.e * _TWO_OVER_SQRT_PI * dexp(-lo * lo), TRANS)
 
 
 def log(a: E) -> E:
@@ -604,8 +632,176 @@ def op_adam_b(op, x, r, c0, c1):
     return sub(E(b), scale(div(div(E(m), E(a["c1"])), den), a["lr"]))
 
 
+# --- a decision model's ops (decision_program.py, as decision_tracer.py runs them) --------------------------------------
+
+_INV_SQRT2, _INV_SQRT_2PI = f32(1.0 / math.sqrt(2.0)), f32(1.0 / math.sqrt(2.0 * math.pi))
+
+
+def _mean(a: E) -> E:
+    """The mean along the last axis: a sum of its K terms, then ÷K (or ×1/K)."""
+    k = a.v.shape[-1]
+    s = esum(a)
+    return _r(s.v / k, s.e / k, 2.0)
+
+
+def _centred(xs: np.ndarray) -> E:
+    """x − mean(x) for each row (decision_tracer._centre)."""
+    return sub(E(xs), bcast(_mean(E(xs))))
+
+
+def _ln_r(xc: E, eps: float) -> E:
+    """rsqrt(mean((x − mean)²) + eps) for each row (decision_tracer._rstd)."""
+    ms = _mean(mul(xc, xc))
+    return rsqrt(_r(ms.v + f32(eps), ms.e))
+
+
+def op_d_embed(op, x, r, c0, c1):
+    ids = x.item(op.attrs["item"], op.attrs["val"])[0]
+    return E(x.weight(op.attrs["weight"], int(ids[r]), int(ids[r]) + 1)[0, c0:c1])
+
+
+def op_ln(op, x, r, c0, c1):
+    """LayerNorm of row r: (x − mean) · rsqrt(mean square of that + eps) · weight (+ bias)."""
+    xc = _centred(x.row(op.ins[0], r)[None])
+    w = x.weight(op.attrs["weight"], 0, 1)[0]
+    y = mul(mul(xc, bcast(_ln_r(xc, op.attrs["eps"]))), E(w[None]))
+    bias = op.attrs.get("bias")
+    if bias:
+        y = add(y, E(x.weight(bias, 0, 1)[0][None]))
+    return y[0][c0:c1]
+
+
+def op_ln_bwd(op, x, r, c0, c1):
+    """dx of LayerNorm from dy: r · (dy·w − mean(dy·w) − xc · r² · mean(dy·w · xc)) (+ the third input)."""
+    xs, dy = (x.row(n, r)[None] for n in op.ins[:2])
+    xc = _centred(xs)
+    rr = _ln_r(xc, op.attrs["eps"])
+    dyw = mul(E(dy), E(x.weight(op.attrs["weight"], 0, 1)[0][None]))
+    inner = mul(xc, bcast(mul(mul(rr, rr), _mean(mul(dyw, xc)))))
+    dx = mul(bcast(rr), sub(sub(dyw, bcast(_mean(dyw))), inner))[0][c0:c1]
+    return add(E(x.get(op.ins[2], r, r + 1, c0, c1)[0]), dx) if len(op.ins) > 2 else dx
+
+
+def op_cols(op, x, r, c0, c1):
+    a = op.attrs["c0"]
+    return E(x.get(op.ins[0], r, r + 1, a + c0, a + c1)[0])
+
+
+def op_cat(op, x, r, c0, c1):
+    """Its inputs side by side: columns [c0, c1) taken from whichever inputs they fall in."""
+    parts, at = [], 0
+    for n in op.ins:
+        w = x.shape(n)[1]
+        lo, hi = max(c0, at), min(c1, at + w)
+        if lo < hi:
+            parts.append(E(x.get(n, r, r + 1, lo - at, hi - at)[0]))
+        at += w
+    return _cat(*parts)
+
+
+def op_attn_bi(op, x, r, c0, c1):
+    """Bidirectional scores q·kᵀ·c of one query position against keys [c0, c1), −∞ beyond the layer's window."""
+    q, k = op.ins
+    _, _, hd, G = _heads(op)
+    T = op.shape[1]
+    h, tq = divmod(r, T)
+    g = h // G
+    s = scale(contract(E(x.get(q, tq, tq + 1, h * hd, (h + 1) * hd)), x.get(k, c0, c1, g * hd, (g + 1) * hd))[0],
+              f32(op.attrs["c"]))
+    w = op.attrs["window"]
+    far = np.abs(np.arange(c0, c1) - tq) > w if w else np.zeros(c1 - c0, dtype=bool)
+    return E(np.where(far, -np.inf, s.v), np.where(far, 0.0, s.e))
+
+
+def _gelu(u: np.ndarray) -> E:
+    """(0.5·x) · (1 + erf(x · 1/√2)), as decision_tracer._gelu."""
+    return mul(scale(E(u), 0.5), add(E(1.0), erf(scale(E(u), _INV_SQRT2))))
+
+
+def _gelu_grad(u: np.ndarray) -> E:
+    """0.5 · (1 + erf(x/√2)) + x · (e^(−0.5·x²) · 1/√(2π)), as decision_tracer._gelu_grad."""
+    cdf = scale(add(E(1.0), erf(scale(E(u), _INV_SQRT2))), 0.5)
+    pdf = scale(exp(scale(mul(E(u), E(u)), -0.5)), _INV_SQRT_2PI)
+    return add(cdf, mul(E(u), pdf))
+
+
+def op_gelu(op, x, r, c0, c1):
+    return _gelu(x.get(op.ins[0], r, r + 1, c0, c1)[0])
+
+
+def op_gelu_bwd(op, x, r, c0, c1):
+    u, dy = (x.get(n, r, r + 1, c0, c1)[0] for n in op.ins)
+    return mul(E(dy), _gelu_grad(u))
+
+
+def op_geglu(op, x, r, c0, c1):
+    """gelu of the first half of the gate's columns times the second half."""
+    f = op.attrs["f"]
+    a, g = x.get(op.ins[0], r, r + 1, c0, c1)[0], x.get(op.ins[0], r, r + 1, f + c0, f + c1)[0]
+    return mul(_gelu(a), E(g))
+
+
+def op_geglu_bwd(op, x, r, c0, c1):
+    """[(dm·g)·gelu'(a), dm·gelu(a)]: columns [0, f) the gate's gradient, [f, 2f) the other half's."""
+    wi, dm = op.ins
+    f = op.attrs["f"]
+    parts = []
+    for lo, hi, second in ((c0, min(c1, f), False), (max(c0, f), c1, True)):
+        if lo >= hi:
+            continue
+        j0, j1 = (lo - f, hi - f) if second else (lo, hi)
+        a, d = x.get(wi, r, r + 1, j0, j1)[0], E(x.get(dm, r, r + 1, j0, j1)[0])
+        if second:
+            parts.append(mul(d, _gelu(a)))
+        else:
+            parts.append(mul(mul(d, E(x.get(wi, r, r + 1, f + j0, f + j1)[0])), _gelu_grad(a)))
+    return _cat(*parts)
+
+
+def op_relu(op, x, r, c0, c1):
+    return E(np.maximum(x.get(op.ins[0], r, r + 1, c0, c1)[0], 0.0))
+
+
+def op_relu_bwd(op, x, r, c0, c1):
+    u, dy = (x.get(n, r, r + 1, c0, c1)[0] for n in op.ins)
+    return E(np.where(u > 0, dy, 0.0))
+
+
+def op_d_type(op, x, r, c0, c1):
+    """The question type's embedding added to every position."""
+    t = x.weight(op.attrs["weight"], op.attrs["row"], op.attrs["row"] + 1)[0, c0:c1]
+    return add(E(x.get(op.ins[0], r, r + 1, c0, c1)[0]), E(t))
+
+
+def op_d_gather(op, x, r, c0, c1):
+    m = int(x.item(op.attrs["item"], op.attrs["val"])[1][r])
+    return E(x.get(op.ins[0], m, m + 1, c0, c1)[0])
+
+
+def op_d_scatter(op, x, r, c0, c1):
+    hit = np.flatnonzero(x.item(op.attrs["item"])[1] == r)
+    if not len(hit):
+        return E(np.zeros(c1 - c0))
+    return E(x.get(op.ins[0], int(hit[0]), int(hit[0]) + 1, c0, c1)[0])
+
+
+def op_d_loss(op, x, r, c0, c1):
+    """(softmax over the item's options − its target probabilities) · 1/items, of option r: one column."""
+    z = x.get(op.ins[0], 0, x.shape(op.ins[0])[0], 0, 1)[:, 0]
+    target = x.item(op.attrs["item"])[2]
+    ex = exp(_r(z - z.max(), 0.0))
+    p = div(ex[r:r + 1], esum(E(ex.v[None], ex.e[None]))[0:1])
+    return scale(sub(p, E([float(target[r])])), f32(op.attrs["ic"]))[c0:c1]
+
+
 OPS = {name[3:]: fn for name, fn in globals().items() if name.startswith("op_")}
-EXACT = {"embed", "scatter"}  # copies: no rounding at all
+# The rotary ops of a decision model's encoder (decision_tracer.r_rope2): a language model's, with each layer's own base
+# and no scaling (dispute.Outside.rope reads both from the op).
+OPS |= {"rope2": op_rope, "rope2_bwd": op_rope_bwd}
+DECISION = {"d_embed", "ln", "ln_bwd", "cols", "cat", "attn_bi", "gelu", "gelu_bwd", "geglu", "geglu_bwd", "relu",
+            "relu_bwd", "d_type", "d_gather", "d_scatter", "d_loss", "rope2", "rope2_bwd"}  # a decision model's kinds
+# copies and choices of sign: no rounding at all
+EXACT = {"embed", "scatter", "d_embed", "cols", "cat", "relu", "relu_bwd", "d_gather", "d_scatter"}
 # kind -> fn(op, said) giving why a tile's numbers can't be an honest output's (a dtype they can't be in), or None
 FORMATS: dict = {}
 # kind -> fn(op, x, r, row) giving (whether row r of the output is a choice its inputs allow, why): ops that choose
@@ -639,11 +835,8 @@ def judge(op, x, leaf: int, said: np.ndarray) -> tuple[bool, str]:
     """Whether the worker's numbers `said` for one tile of `op`'s output are what float32 can make of its inputs.
     (passed, why) — `why` names the worst number either way, for the record.
 
-    A decision model's ops (decision_program.py) have no entries here yet, its known kinds included (their bounds
-    weren't measured on its windowed attention, LayerNorms or f16 weights): every tile of one is Unresolved, so its
-    disputes end unchecked rather than slash an honest party. Such jobs run only where ledger.DECISION_GATE allows."""
-    if getattr(getattr(x, "outside", None) and x.outside.spec, "kind", None) == "decision":
-        raise Unresolved(f"{op.kind} → {op.out}: a decision model's ops aren't refereed yet")
+    A decision model's ops (decision_program.py) are the language model's kinds plus DECISION's, with their bounds
+    measured on honest CPU traces (tests/test_decision.py, RefereeTests)."""
     if op.kind in CHOICES:  # a choice: judged by whole rows of the output against the scores it was chosen from
         said = np.asarray(said, dtype=np.float64)
         at = 0

@@ -459,6 +459,71 @@ class ExportTests(unittest.TestCase):
 
 
 @needs_torch
+class RefereeTests(unittest.TestCase):
+    """The referee's entries for a decision model's ops (referee.DECISION, and the language model's kinds it shares):
+    every tile of every op of an honest CPU step passes, and one number changed by 0.1% is caught, as
+    tests/test_dispute.py's RefereeTests check a language model's."""
+
+    def judge_step(self, targets=None, every=1):
+        from vibehash import dispute, merkle, referee
+        from vibehash.decision_program import DecisionProgram
+        from vibehash.decision_tracer import DecisionExecutor
+        from vibehash.program import split_theta
+        from vibehash.tracer import TorchWeights
+
+        tiny = TinyLaya(tmpdir(self)).use(self)
+        data = tiny.dataset(20)
+        spec = tiny.spec(seq_len=data.train_ids.shape[1], **({"targets": targets} if targets else {}))
+        rt = finetune.runtime(spec, data, "cpu")
+        prog = DecisionProgram(spec, data, 1e-2, 2, 5)
+        theta = spec.init_params()
+        theta[spec.parts[0]] = np.random.default_rng(0).normal(0, 0.05, spec.n_adapter)
+        st = {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in split_theta(spec, theta).items()}
+        outside = dispute.Outside(spec, data, TorchWeights(rt.model))
+        ex = DecisionExecutor(rt, spec, prog, room=0)
+        honest = caught = tampered = 0
+        kinds = set()
+        for k, op in enumerate(prog.step(0).ops()):
+            before = {n: t.numpy().copy() for n, t in st.items()}
+            ex.run(op, st)
+            if not op.out or k % every:
+                continue
+            kinds.add(op.kind)
+            out = st[op.out].numpy().reshape(-1)
+            x = dispute.Inputs({n: tuple(a.shape) for n, a in before.items()}, outside, full=before)
+            for leaf in range(merkle.n_leaves(*op.shape)):
+                said = out[leaf * merkle.LEAF:(leaf + 1) * merkle.LEAF]
+                ok, why = referee.judge(op, x, leaf, said)
+                self.assertTrue(ok, why)
+                honest += 1
+                j = len(said) // 2
+                if np.isfinite(said[j]) and abs(said[j]) > 1e-30:
+                    bad = said.copy()
+                    bad[j] *= 1.001
+                    tampered += 1
+                    caught += not referee.judge(op, x, leaf, bad)[0]
+        return honest, caught, tampered, kinds
+
+    def test_every_op_of_an_honest_step_passes_and_a_changed_number_doesnt(self):
+        from vibehash import referee
+
+        honest, caught, tampered, kinds = self.judge_step()
+        self.assertGreater(honest, 500)
+        self.assertGreater(caught, 0.98 * tampered)
+        self.assertEqual(referee.DECISION - kinds, set(), "a step runs every kind of a decision model's")
+        self.assertFalse(kinds - set(referee.OPS) - {"free"}, "every kind a step runs has an entry")
+
+    def test_erf_is_the_c_librarys(self):
+        import math
+
+        from vibehash import referee
+
+        xs = np.array([0.0, 1e-8, -0.3, 0.5, 1.0, -1.7, 2.5, 3.9, -5.5, 6.0, 7.5, -30.0])
+        want = np.array([math.erf(v) for v in xs])
+        np.testing.assert_allclose(referee.derf(xs), want, rtol=1e-14, atol=1e-16)
+
+
+@needs_torch
 class ProtocolTests(unittest.TestCase):
     """A decision model's fine-tune through the same Coordinator a node runs, with cheaters, then replayed and
     rechecked, as test_finetune's fine-tunes are."""
@@ -466,9 +531,8 @@ class ProtocolTests(unittest.TestCase):
     def test_rounds_train_pay_catch_cheats_and_replay(self):
         """Honest units are accepted and paid; no cheat is. A cheat that breaks Adam's bound (lazy, poisoner) is slashed
         on the node's own NumPy check. One that stays inside it (shortcut: half trained, half extrapolated) is rejected
-        by its checkers, but the dispute that follows ends unchecked, since the referee has no arithmetic for a decision
-        model's ops yet (referee.judge): it goes unpaid and keeps its stake. That gap is why these jobs are gated
-        (ledger.DECISION_GATE); this test changes when the referee closes it."""
+        by its checkers, and the dispute that follows ends at one op the referee checks (referee.DECISION): the cheat
+        loses it and is slashed, and a replay referees the game again."""
         from tests.protocol import Protocol
         from vibehash.coordinator import CoordinatorConfig
         from vibehash.replay import replay_block
@@ -495,13 +559,15 @@ class ProtocolTests(unittest.TestCase):
         for rep in reports:
             for res in rep.results:
                 kind = by[res.worker].behavior
-                want = {"honest": "accepted", "shortcut": "unchecked"}.get(kind, "failed_sanity")
-                self.assertEqual(res.verdict.value, want, kind)
+                # (a shortcut loses a checker's dispute, or one with an honest twin of its unit)
+                want = {"honest": {"accepted"}, "shortcut": {"failed_replay", "failed_redundancy"}}.get(
+                    kind, {"failed_sanity"})
+                self.assertIn(res.verdict.value, want, kind)
             self.assertTrue(np.isfinite(rep.val_loss))
             self.assertFalse(rep.params[job.spec.n_adapter:].any(), "the next round starts Adam afresh")
         for w in workers:
             stake = proto.chain.state.stake(w.address)
-            if w.behavior in ("lazy", "poisoner"):
+            if w.behavior in ("lazy", "poisoner", "shortcut"):
                 self.assertLess(stake, 10 * VIBE, w.behavior)
             else:
                 self.assertGreaterEqual(stake, 10 * VIBE, w.behavior)

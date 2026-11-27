@@ -51,10 +51,9 @@ EARN_IN = "earn-in"  # genesis memo: workers may start with no stake and earn it
 # a genesis outright (apply_block, Chain.from_genesis): running one without Evo would read its rounds wrongly. Only local
 # testnets and tests were ever made with it; the public network never was.
 ES_GATE = "es-prototype"
-# Genesis memo: the chain takes fine-tunes of System 1 decision models, like Laya (decision.py). The referee has no
-# entries for their ops yet (decision_program.py), so a dispute over one would end unchecked; until it has, only a chain
-# made with this memo (a local testnet, a test) can hold one. A node from before them reads a decision spec as a
-# fine-tune of an unknown family and refuses the block that posts one.
+# Genesis memo: the chain takes fine-tunes of System 1 decision models, like Laya (decision.py), whose ops the referee
+# checks (referee.DECISION). Only a chain made with this memo can hold one. A node from before them reads a decision spec
+# as a fine-tune of an unknown family and refuses the block that posts one.
 DECISION_GATE = "decision-prototype"
 EVO_GENESIS = ('this genesis takes Evo (evolution strategies) jobs ("es": true), and Evo was removed from VibeHash after '
                f"{RETIRED_IN}: run that chain with 0.5.28, or start a new one without it")

@@ -1017,17 +1017,33 @@ segments, Adam's bound, averaging B and the scorers are unchanged. The spec, the
   `laya.Agent(folder)` loads. The base's fitted temperatures belong to the base's logits, so they are reset to 1:
   the probabilities the job trained and was scored on.
 
-**Not refereed yet, so gated.** The referee (`referee.py`) has no arithmetic for the new kinds. Its bounds were never
-measured on windowed attention, LayerNorms or f16 weights, even for the kinds it does know. So every tile of a
-decision model's op is `Unresolved`, and a dispute over one ends unchecked. No party is slashed on a guess. Until
-the referee has those entries, only a chain whose genesis takes decision models can hold such a job. The genesis
-says `"decision": true`, which becomes the memo `ledger.DECISION_GATE`, and every new `testnet` has it.
+**Refereed (2026-11-26).** The referee (`referee.py`) has an entry for each of the new kinds (`referee.DECISION`),
+written as decision_tracer.py computes them, with the same running error analysis as the language model's:
+- LayerNorm (`ln`) and its backward (`ln_bwd`): the row's mean as a sum and a division, the centred row, the mean
+  square, rsqrt, the scale and the bias, each step's rounding carried through.
+- GELU and the gated GELU (`gelu`, `geglu` and their backwards): exact GELU, 0.5·x·(1 + erf(x/√2)). erf has no
+  correctly rounded library function, so the referee computes it from + − × ÷ and its own exp alone
+  (`referee.derf`: e^−x²·2/√π·Σ 2ⁿx²ⁿ⁺¹/(1·3·…·(2n+1)), terms all of one sign, a fixed 200 of them, ±1 past 6),
+  within 10⁻¹⁴ of the C library's, and allows 4 ulps for a worker's (CUDA's erff is within 2).
+- Bidirectional attention scores with a sliding window (`attn_bi`): the window's −∞ must match exactly, as the
+  causal mask's does.
+- Copies and sign choices (`d_embed`, `cols`, `cat`, `relu`, `relu_bwd`, `d_gather`, `d_scatter`): exact.
+- The question type's embedding (`d_type`), and the loss's gradient (`d_loss`: a softmax over the item's options,
+  minus its target, times 1/items).
+- The rotary ops (`rope2`, `rope2_bwd`) are the language model's, with each layer's own base and no scaling.
+Its weights are f16, which decode to float64 exactly. Measured on a tiny Laya-shaped model's honest CPU step
+(tests/test_decision.py, RefereeTests): all 4,571 tiles of all 37 op kinds pass, and 4,174 of the 4,178 tiles with one
+number changed by 0.1% are caught. In the protocol test a cheat that stays inside Adam's bound (half trained, half
+extrapolated) now loses its dispute and is slashed, where its dispute used to end unchecked. Not measured yet: a
+CUDA worker's step against the CPU referee on a decision model (the language model's is: tests/test_dispute.py).
+
+**Gated.** Only a chain whose genesis takes decision models can hold such a job. The genesis says
+`"decision": true`, which becomes the memo `ledger.DECISION_GATE`, and every new `testnet` has it.
 
 This needs no block version. On a chain without the gate, a decision job's post_job is refused by the new rule. A
 node from before refuses it too: it reads the spec as a fine-tune of an unknown family. So every block of every
 existing chain is valid or invalid exactly as before. A node from before can't join a gated chain by mistake, since
-it refuses the first block that posts a decision job. Taking decision jobs on the public chain
-will take the referee's entries, then a block version, as fine-tunes did (`FINETUNE_VERSION`).
+it refuses the first block that posts a decision job.
 
 ---
 

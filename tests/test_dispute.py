@@ -154,7 +154,8 @@ class RefereeTests(_Tiny):
                 honest, caught, tampered, kinds = self.tiny(family).judge_step()
                 self.assertGreater(honest, 1000)
                 self.assertGreater(caught, 0.98 * tampered)
-        self.assertEqual(kinds | {"embed"}, set(referee.OPS) - {"free"})
+        # (a decision model's own kinds are tests/test_decision.py's, RefereeTests)
+        self.assertEqual(kinds | {"embed"}, set(referee.OPS) - {"free"} - referee.DECISION)
 
     @unittest.skipUnless(CUDA, "needs a CUDA GPU")
     def test_a_cuda_step_passes_the_cpu_referee(self):

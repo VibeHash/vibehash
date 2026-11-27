@@ -17,8 +17,7 @@ two ops is well defined and any op can be checked on its own.
 
 The arithmetic is float32 with frozen weights cast exactly, attention written out (bidirectional, with the sliding
 layers' window as a mask of -inf), as program.py's. The ops' kinds that program.py doesn't have (LayerNorm, GELU and
-its gated form, ReLU, the option rows, the loss) are decision_tracer.py's; the referee has no entries for them yet,
-which is why a decision model's fine-tune runs only on a chain that takes them (ledger.DECISION_GATE).
+its gated form, ReLU, the option rows, the loss) are decision_tracer.py's, and the referee's (referee.DECISION).
 """
 from __future__ import annotations
 
