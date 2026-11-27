@@ -168,7 +168,7 @@ def for_base(base: str | None) -> Emblem | None:
     model (a model trained from scratch on a CSV file, which keeps the blade)."""
     if not base:
         return None
-    from . import catalog  # catalog names, such as deepseek-v4.1-flash
+    from . import catalog  # catalog names, such as qwen3-0.6b
 
     model = catalog.find(base)
     repo = model.repo if model else base.strip()

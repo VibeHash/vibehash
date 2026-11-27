@@ -6,7 +6,7 @@
 Everything in the file comes from cli.parser(): each command's help and description, its arguments and flags with
 their defaults and choices, so the reference can't say something `--help` doesn't. The one thing kept here by hand is
 EXAMPLES, a command line or two per command, most of them lifted from the README. A positional argument with choices
-(like `cache`'s show/clear/sweep) is written out one choice a line when its help names each choice as "choice: what
+(a command's show/clear choices, say) is written out one choice a line when its help names each choice as "choice: what
 it does", so it reads like the command groups (wallet, job, ...) do.
 """
 from __future__ import annotations
@@ -30,11 +30,10 @@ PROG = "vibehash"
 # A command line or two per command, by its full name. Anything not here just gets its usage line.
 EXAMPLES: dict[str, list[str]] = {
     "setup": ["vibehash setup", "vibehash setup --node 192.168.1.20",
-              "VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes --deepseek no > setup.log 2>&1"],
-    "update": ["vibehash update", "vibehash update --evo"],
+              "VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes > setup.log 2>&1"],
+    "update": ["vibehash update"],
     "install-gpu": ["vibehash install-gpu"],
-    "testnet": ["vibehash testnet", "vibehash testnet --validators 4", "vibehash testnet --job none --workers 3 --device cuda",
-                "vibehash testnet --evo2"],
+    "testnet": ["vibehash testnet", "vibehash testnet --validators 4", "vibehash testnet --job none --workers 3 --device cuda"],
     "wallet create": ["vibehash wallet create", "vibehash wallet create --out gpu1.json"],
     "wallet restore": ["vibehash wallet restore"],
     "wallet show": ["vibehash wallet show", "vibehash wallet show --wallet gpu1.json"],
@@ -51,7 +50,6 @@ EXAMPLES: dict[str, list[str]] = {
     "tls fingerprint": ["vibehash tls fingerprint node-cert.pem"],
     "worker": ["vibehash worker", "vibehash worker --device cuda:1 --wallet gpu1.json", "vibehash worker --job fruit-demo",
                "VIBEHASH_PASSWORD='choose-one' nohup vibehash worker --plain > worker.log 2>&1 &"],
-    "cache": ["vibehash cache", "vibehash cache clear", "vibehash cache clear fruit-demo", "vibehash cache sweep"],
     "devices": ["vibehash devices"],
     "selftest": ["vibehash selftest", "vibehash selftest --model qwen3-0.6b"],
     "balance": ["vibehash balance", "vibehash balance vibe1..."],

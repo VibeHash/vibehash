@@ -487,7 +487,7 @@ class Supervisor:
             self.paused = False
             self.next_start = 0.0
             self.say("resumed")
-        elif word == "restart" and self.worker_alive():  # a setting the worker reads as it starts (deepseek) changed
+        elif word == "restart" and self.worker_alive():  # a setting the worker reads as it starts changed
             self.stop_worker("restarting with new settings")
             self.next_start = 0.0
         self.update_hold(now)

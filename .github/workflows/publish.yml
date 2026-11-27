@@ -25,11 +25,11 @@ jobs:
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME doesn't match version $version in pyproject.toml"; exit 1
           fi
-      # A release runs the whole suite: every extra (finetune, evo, app) and CPU PyTorch, so the DeepSeek, Evo and window tests import, found by
+      # A release runs the whole suite: every extra (finetune, app) and CPU PyTorch, so the window tests import, found by
       # discovery so no module is ever left out of the list.
       - name: Install Vibe Hash and CPU PyTorch
         run: |
-          python -m pip install -e ".[finetune,evo,app]"
+          python -m pip install -e ".[finetune,app]"
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run the tests
         run: python -m unittest discover -s tests -p "test_*.py"
@@ -45,7 +45,7 @@ jobs:
       # The hash-pinned requirements for the release manifest are compiled here, where there is no signing key and no
       # environment, with uv installed from a hash-pinned file. They travel in their own artifact, not in dist/, which
       # the PyPI upload reads; the manifest job signs their hashes after PyPI has the wheel.
-      - name: Compile the hash-pinned requirements (the launcher's set, and the Evo set)
+      - name: Compile the hash-pinned requirements (the launcher's set)
         run: |
           python -m pip install --require-hashes -r scripts/uv-requirements.txt
           python scripts/release_manifest.py compile --out reqs
@@ -124,4 +124,4 @@ jobs:
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Vibe Hash $tag" --notes "See HANDOFF.md for what changed." || \
             gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
-          gh release upload "$tag" reqs/release.json reqs/release.sig "reqs/requirements-$version.txt" "reqs/requirements-$version-evo.txt" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$tag" reqs/release.json reqs/release.sig "reqs/requirements-$version.txt" --repo "$GITHUB_REPOSITORY" --clobber

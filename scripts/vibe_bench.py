@@ -2,7 +2,7 @@
 same items, prompts and settings for every model, and ~95% intervals so a real gain can be told from noise.
 
   python scripts/vibe_bench.py Qwen/Qwen3.5-0.8B [FOLDER_OR_REPO ...] [--bench mmlu_pro,ifeval] [--limit 200] [--full]
-      [--out ~/.vibehash/bench] [--engine auto|fast|hf] [--fresh] [--list] [--cap 64 --slots 120000]
+      [--out ~/.vibehash/bench] [--fresh] [--list] [--cap 64 --slots 120000]
 
 On a 12 GB card (an RTX 4070 SUPER) pass --cap 64 --slots 120000, and run one --bench at a time: past 12 GB the
 GPU spills into shared memory without a word and a chunk crawls for 10+ minutes, and memory grows across benchmarks
@@ -26,9 +26,8 @@ How it scores (the same for every model):
   the reply ran out of tokens and whether it was in the expected language, so format failures show up as numbers.
 * IFEval is scored by lm-evaluation-harness's port of Google's checker (strict and loose, prompt and instruction
   level): `pip install lm-eval langdetect nltk immutabledict`. MATH-500 uses `pip install math-verify`.
-* Engine: a Qwen3.5-style hybrid model (Gated DeltaNet layers) on CUDA decodes with vibehash's own es_hybrid engine
-  (continuous batching, CUDA graphs, ~3x transformers' generate here) with a zero twist; anything else, or
-  --engine hf, uses transformers' generate. Both are greedy; scores are only compared between runs of one engine.
+* Engine: transformers' generate, greedy. (Evo's faster engine went with Evo. Results it saved are marked with its
+  name and run again, so scores are only compared between runs of one engine.)
 
 Per-item results go to OUT/MODEL/BENCH.jsonl (the prompt, the reply, the answer read, right or wrong) beside a
 .meta.json; a later run reuses a model's saved results when its weights, the items, the prompts and the engine are
@@ -454,49 +453,12 @@ def slug(model: str, fp: str) -> str:
     return f"{re.sub(r'[^A-Za-z0-9._-]+', '_', name)}-{fp[:8]}"
 
 
-def _shared_in_parts(rt, rows, part_tokens: int = 16_000):
-    """es_hybrid._shared (the prompts' reading before decoding), the prompts read a few at a time into one set of
-    states, so a chunk of many long prompts fits the GPU: the engine then packs its 64 decoding slots from all of
-    them, and a chunk costs about as many steps as its longest answer rather than one long answer per few prompts."""
-    import torch
-    from vibehash import es
-
-    dev = next(rt.model.parameters()).device
-    ids, mask = es._left_pad(rows, rt.pad, dev)
-    W = ids.shape[1]
-    if W < 2:
-        raise ValueError("a prompt of one token has nothing to share")
-    pos = (mask.cumsum(-1) - 1).clamp(min=0)
-    K = rt.model.config.linear_conv_kernel_dim
-    step = max(1, part_tokens // W)
-    states = None
-    for lo in range(0, len(rows), step):
-        hi = min(len(rows), lo + step)
-        out = rt.model(input_ids=ids[lo:hi, :W - 1], attention_mask=mask[lo:hi, :W - 1],
-                       position_ids=pos[lo:hi, :W - 1], use_cache=True, logits_to_keep=1)
-        part = []
-        for kind, layer in zip(rt.model.config.layer_types, out.past_key_values.layers):
-            if kind == "linear_attention":
-                part.append((layer.conv_states[0][..., -(K - 1):], layer.recurrent_states[0]))
-            else:
-                part.append((layer.keys, layer.values))
-        if states is None:
-            states = [tuple(torch.empty((len(rows),) + t.shape[1:], dtype=t.dtype, device=t.device) for t in pair)
-                      for pair in part]
-        for full, pair in zip(states, part):
-            for f, t in zip(full, pair):
-                f[lo:hi].copy_(t)
-        del out, part
-    return ids, mask, pos, states
-
-
 class Generator:
     """A model on the GPU answering prompts greedily, in non-thinking mode, up to T tokens each."""
 
-    def __init__(self, folder: Path, engine: str, batch: int, cap: int | None = None, slots: int | None = None):
+    def __init__(self, folder: Path, batch: int, cap: int | None = None, slots: int | None = None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from vibehash import es_hybrid
 
         self.torch = torch
         self.model = AutoModelForCausalLM.from_pretrained(folder, dtype=torch.bfloat16, attn_implementation="sdpa")
@@ -514,28 +476,11 @@ class Generator:
                 eos.append(i)
         self.eos = tuple(dict.fromkeys(int(e) for e in eos))
         self.pad = self.tok.pad_token_id if self.tok.pad_token_id is not None else self.eos[0]
-        hybrid = es_hybrid.is_hybrid(self.model)
-        if engine == "fast" and not hybrid:
-            sys.exit("--engine fast is es_hybrid's engine, for Qwen3.5-style hybrid models only")
-        self.engine = "fast" if engine in ("auto", "fast") and hybrid else "hf"
+        self.engine = "hf"
         self.batch = batch
         self.cap, self.slots = cap, slots  # --cap, --slots: a chunk's most prompts, and rows x (prompt + T) tokens
-        if self.engine == "fast":
-            from vibehash import es
-            es_hybrid._ENGINE.clear()  # another model's engine (its buffers and graphs) must not be reused
-            self._was_shared = es_hybrid._shared
-            es_hybrid._shared = _shared_in_parts
-            self.rt = es.Runtime(self.model, self.tok, "cuda", self.eos, self.pad)
-            name, mod = next((n, m) for n, m in self.model.named_modules() if n.endswith("mlp.down_proj"))
-            self.linears = [(name, mod)]  # one twisted linear, its twist all zeros: the engine wants at least one
-            z = lambda *s: torch.zeros(*s, dtype=torch.bfloat16, device="cuda")  # noqa: E731
-            self.fac = {name: (z(1, mod.out_features, 1), z(1, mod.in_features, 1))}
 
     def close(self):
-        if self.engine == "fast":
-            from vibehash import es_hybrid
-            es_hybrid._ENGINE.clear()
-            es_hybrid._shared = self._was_shared
         del self.model
         self.torch.cuda.empty_cache()
 
@@ -549,9 +494,8 @@ class Generator:
         chunks that fit the GPU."""
         order = sorted(range(len(rows)), key=lambda i: -len(rows[i]))
         out: list = [None] * len(rows)
-        cap = 192 if self.engine == "fast" else self.batch  # fast: 192 prompts' states, ~3.6 GB on Qwen3.5-0.8B
-        cap = min(cap, self.cap) if self.cap else cap
-        budget = 10**9 if self.engine == "fast" else 16_000  # prompt tokens a chunk reads at once
+        cap = min(self.batch, self.cap) if self.cap else self.batch
+        budget = 16_000  # prompt tokens a chunk reads at once
         at, done = 0, 0
         while at < len(order):
             n = max(1, min(cap, budget // max(1, len(rows[order[at]]))))
@@ -559,18 +503,12 @@ class Generator:
                 n = max(1, min(n, self.slots // (len(rows[order[at]]) + T)))
             chunk = order[at:at + n]
             at += n
-            got = self._fast([rows[i] for i in chunk], T) if self.engine == "fast" else \
-                self._hf([rows[i] for i in chunk], T)
+            got = self._hf([rows[i] for i in chunk], T)
             for i, a in zip(chunk, got):
                 out[i] = a
             done += len(chunk)
             progress(done)
         return out
-
-    def _fast(self, rows, T):
-        from vibehash import es_hybrid
-        with self.torch.no_grad():
-            return es_hybrid.answer(self.rt, self.linears, self.fac, [(0, 1)], rows, T, 0.0, 1)[0]
 
     def _hf(self, rows, T):
         torch = self.torch
@@ -680,12 +618,10 @@ def main():
     p.add_argument("--limit", type=int, help="items per benchmark (default: each benchmark's own, 400 for most)")
     p.add_argument("--full", action="store_true", help="every item of every benchmark (hours)")
     p.add_argument("--out", default=str(Path.home() / ".vibehash" / "bench"), help="where results go")
-    p.add_argument("--engine", choices=("auto", "fast", "hf"), default="auto",
-                   help="fast: es_hybrid's engine (Qwen3.5-style models); hf: transformers' generate")
-    p.add_argument("--batch", type=int, default=64, help="rows a batch for --engine hf")
+    p.add_argument("--batch", type=int, default=64, help="rows a batch")
     p.add_argument("--max-new", type=int, help="tokens a reply may have, for every benchmark (default: each one's own)")
     p.add_argument("--fresh", action="store_true", help="run again even when saved results match")
-    p.add_argument("--cap", type=int, help="the most prompts a chunk decodes at once (default 192 with the fast engine;"
+    p.add_argument("--cap", type=int, help="the most prompts a chunk decodes at once (default --batch;"
                    " 64 keeps a 12 GB card from spilling into shared memory, where it crawls)")
     p.add_argument("--slots", type=int, help="the most rows x (prompt + reply) tokens a chunk holds (default: no limit;"
                    " 120000 on a 12 GB card)")
@@ -742,14 +678,14 @@ def main():
                     "source": b.source}
             if not a.fresh and path.exists() and meta_path.exists():
                 meta = json.loads(meta_path.read_text())
-                if all(meta.get(k) == v for k, v in want.items()) and (a.engine == "auto" or meta["engine"] == a.engine):
+                if all(meta.get(k) == v for k, v in want.items()) and meta["engine"] == "hf":
                     results[label][n] = [json.loads(line) for line in open(path, encoding="utf-8")]
                     engines[f"{label}|{n}"] = meta["engine"]
                     print(f"  {n}: saved results ({meta['engine']} engine, {meta['date']})", flush=True)
                     continue
             if gen is None:
                 t = time.time()
-                gen = Generator(folder, a.engine, a.batch, a.cap, a.slots)
+                gen = Generator(folder, a.batch, a.cap, a.slots)
                 print(f"  loaded in {time.time() - t:.0f}s; engine: {gen.engine}; stop tokens {gen.eos}", flush=True)
             t = time.time()
             results[label][n] = run_bench(gen, b, items, checkers, path)

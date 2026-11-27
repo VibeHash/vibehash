@@ -237,7 +237,7 @@ class Watch:
 
 
 def _kind(job) -> str:
-    for name in ("es", "deepseek", "finetune", "sharded"):
+    for name in ("finetune", "sharded"):
         if getattr(job, name, False):
             return name
     return "mlp"

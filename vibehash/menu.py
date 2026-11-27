@@ -88,49 +88,6 @@ def _post_job() -> list[list[str]] | None:
     return [["post-job", "--spec", spec, "--budget", budget]] if budget else None
 
 
-def _deepseek() -> list[list[str]] | None:
-    print("The DeepSeek job, think shorter's pilot, fine-tunes DeepSeek-V4.1-Flash's top layers. Your PC needs an\n"
-          "NVIDIA graphics card with 8 GB or more (RTX 20-series or newer), 16 GB of memory and about 40 GB free on an\n"
-          "SSD. It downloads about 30 GB of the model into the folder setup chose, and deletes it when the job ends,\n"
-          "unless you chose to keep it (`vibehash cache` shows what's there). A PC that can't take it keeps mining\n"
-          "other jobs.")
-    return [["worker", "--deepseek", "yes"]] if _yes("Mine it?") else None
-
-
-def _evo() -> list[list[str]] | None:
-    print("Evo Hash: mining by evolution, the chain is the model. Each round tries 128 nudged copies of the whole model\n"
-          "in twin pairs, scores them on problems, and its block keeps only their seeds and scores, from which anyone\n"
-          "can work the model out again.\n\n"
-          f"  1. Join the public Evo network ({settings.PUBLIC_EVO_NODE}): it tunes Qwen3.5-0.8B on 16 kinds of\n"
-          "     problem (math, instructions, science, common sense) to beat the official model. You need an NVIDIA\n"
-          "     graphics card with 8 GB or more; the model (about 1.7 GB) downloads once. A new wallet earns its first\n"
-          "     5 VIBE as stake, from work staked miners check.\n"
-          "  2. A test network on this computer: a node and two miners tuning Qwen2.5-0.5B-Instruct, nothing shared.")
-    choice = input("Which? [1/2, Enter for 1, q to cancel] ").strip().lower()
-    if choice in ("q", "n", "no"):
-        return None
-    if choice == "2":
-        return [["testnet", "--evo2"]] if _yes("Start the test network?") else None
-    if not _evo_ready():
-        return None
-    commands = [] if settings.wallet_path() is not None else [["wallet", "create"]]  # (worker needs one)
-    return commands + [["worker", "--node", settings.PUBLIC_EVO_NODE]]
-
-
-def _evo_ready() -> bool:
-    """Whether this Python has what an Evo miner runs on (PyTorch, transformers); offers to install transformers."""
-    from importlib.util import find_spec
-    if find_spec("torch") is None:
-        print("Evo Hash needs PyTorch for your graphics card first: More commands > Install GPU support, then come back.")
-        return False
-    if find_spec("transformers") is None or find_spec("huggingface_hub") is None:
-        if not _yes("Evo Hash needs transformers and datasets (a few hundred MB more). Install them now, from the signed release, checked by hash?"):
-            return False
-        if update.update(reinstall=True, variant="evo") != 0:  # the release's Evo requirements file
-            return False
-    return True
-
-
 def _cancel() -> list[list[str]] | None:
     return [["cancel-job"]] if _yes("Cancel your last training job?") else None
 
@@ -170,13 +127,9 @@ MORE = (
 SECTIONS = [
     ("Mine", [
         Item("Start mining", "earn VIBE with this computer", ("worker",)),
-        Item("Evo Hash", "mine by evolution on the public Qwen3.5 network", ask=_evo,
-             usage=f"worker --node {settings.PUBLIC_EVO_NODE}"),
         Item("My balance", "what you've earned and staked", ("balance",)),
         Item("What can this computer train on?", "its graphics cards and processor", ("devices",)),
         Item("Check this computer", "a real training test: is it ready, what can it take", ("selftest",)),
-        Item("Mine the DeepSeek job", "think shorter's pilot: ~30 GB, asked first", ask=_deepseek,
-             usage="worker --deepseek yes"),
     ]),
     ("Train", [
         Item("Train a model on a CSV file", "post it as a job; the network trains it", ask=_train,
@@ -191,7 +144,6 @@ SECTIONS = [
     ("Settings", [
         Item("Set up again", "network, wallet, graphics card, stake", ("setup",)),
         Item("My wallet", "its address and where its file is", ("wallet", "show")),
-        Item("Model files", "what big models take on this PC; clear them", ("cache",)),
         Item("Update Vibe Hash", "install the latest signed release", action=_update),
         Item("Open the guide", "vibehash.org/guide, in your browser", action=lambda: webbrowser.open(GUIDE)),
         Item("More commands", "send, stake, predict, validators and the rest", submenu=MORE),

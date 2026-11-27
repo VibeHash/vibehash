@@ -2,10 +2,10 @@
 
 The list is HANDOFF.md's mainnet checklist ("Before VIBE is a real, listed currency") and DESIGN §9, in the parts a
 genesis file decides. A chain can't change these later: there's no upgrade process for the genesis, so a network
-started with one validator, a testnet's chain id or no Evo gate keeps them. Anyone can run the check on a proposed
+started with one validator or a testnet's chain id keeps them. Anyone can run the check on a proposed
 genesis before agreeing to validate it; nothing here needs a node or a wallet.
 
-Each finding is "ok", "warn" (a choice to make on purpose: a premine, Evo off), "fail" (a network launched with it
+Each finding is "ok", "warn" (a choice to make on purpose: a premine, say), "fail" (a network launched with it
 can be halted, taken over or confused with a testnet by one party) or "info". The command exits 1 if anything fails.
 
 Voting: a block is final once validators holding more than two thirds of the voting stake sign it (consensus.py), so
@@ -165,12 +165,6 @@ def check(genesis: dict) -> list[Finding]:
         boot = sum(s.locked.get(a, 0) for a in voting)
         add("info", "validator stake", f"{_vibe(boot)} of the voting stake is bootstrap stake (never withdrawable); "
                                        f"{_vibe(total - boot)} is ordinary stake")
-
-    # What can't be added later.
-    if s.es:
-        add("ok", "Evo Hash", "on (\"es\": true): Evo jobs can run")
-    else:
-        add("warn", "Evo Hash", "off: Evo jobs are refused, and there's no upgrade process to turn them on later")
 
     # Keys made from recovery words. The path is the wallet's, not the genesis's, but a mainnet launch has to settle
     # it: with the testnet coin type, the same 24 words give the same key on every network.

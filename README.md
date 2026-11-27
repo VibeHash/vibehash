@@ -69,11 +69,10 @@ to `recovery-words-ADDRESS.txt` in the settings folder, readable only by you,
 and the log says where. Copy them somewhere offline and delete the file. (This is for headless runs: on
 a desktop the app keeps a password-less wallet's key in the OS credential store
 and saves no words file at all; see `vibehash wallet create --no-password`.)
-`setup --deepseek yes` (or `no`) answers the DeepSeek question in advance, and
 `--yes` installs GPU support without asking:
 
 ```bash
-VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes --deepseek no > setup.log 2>&1
+VIBEHASH_PASSWORD='choose-one' nohup vibehash setup --yes > setup.log 2>&1
 ```
 ```bash
 VIBEHASH_PASSWORD='choose-one' nohup vibehash worker --plain > worker.log 2>&1 &
@@ -124,10 +123,10 @@ It checks, one line each:
 - **wallet**: whether setup has run, the saved node and wallet, its balance
   and stake, and roughly how long earning the stake takes at the network's
   recent pace;
-- **disk**: room for fine-tunes' weights and for DeepSeek's model files.
+- **disk**: room for fine-tunes' weights.
 
 It ends with what this computer can take tonight (CSV jobs on its GPU or CPU,
-Qwen3-0.6B and Qwen3-4B fine-tunes by GPU memory, the DeepSeek pilot) and the
+Qwen3-0.6B and Qwen3-4B fine-tunes by GPU memory) and the
 command to run next. It exits with status 0 only if the computer can mine.
 `--node ADDRESS` checks against another network, `--device cuda:1` a
 particular GPU, `--offline` skips the network, and `--json` is for scripts.
@@ -351,7 +350,7 @@ python -m vibehash models
 ```
 
 It lists popular open-weight models (Qwen, Llama, Gemma, Mistral, Phi,
-gpt-oss, GLM and DeepSeek), smallest first, with what Hugging Face says about
+gpt-oss and GLM), smallest first, with what Hugging Face says about
 each: parameters, experts, weight size, licence and whether it's gated. It
 also shows how many graphics cards of 12, 24 or 32 GB a team would need to
 hold the model. The answers are cached for a day; `--refresh` asks again, and
@@ -495,73 +494,6 @@ proxy, and `vibehash setup --tor` remembers the choice (the `proxy` and
 - **Operators.** `admin --tor` also turns the admin app's place lookups off, so
   no address is sent outside the proxy.
 
-## Evo mode: training by evolution, the chain is the model
-
-Evo jobs train a model by evolution strategies. Each round, miners answer puzzles with
-slightly twisted copies of the model, and a block keeps only the twists' seeds and how
-they scored. Every node works the model out from those, so the trained model is a
-function of the chain: about 2 KB a round, no weight files.
-
-It needs an NVIDIA GPU with PyTorch (`vibehash install-gpu`) and `pip install vibehash[evo]`.
-
-### The public Evo network
-
-`https://evo.vibehash.org:8443` (`vibehash-evo-1`) is a public network for Evo jobs, apart
-from the main one. Its job tunes Qwen3.5-0.8B on 16 kinds of problem (math, following
-instructions, science, common sense) to beat the official model. Join it with a GPU of 8 GB
-or more:
-
-```
-vibehash worker --node https://evo.vibehash.org:8443
-```
-
-or run `vibehash` and pick **Evo Hash** under Mine. The miner downloads the job's model once
-(about 1.7 GB) and the tasks' datasets. A new wallet starts with no stake and earns its
-first 5 VIBE as stake. Until then, its work counts only while a staked miner is online to
-check it: an Evo unit is never checked by the miner who answered it. With several GPUs, run
-a worker for each with its own wallet and `--device cuda:N` ("Several GPUs" above).
-
-transformers may suggest installing `causal_conv1d` or `flash-linear-attention` for speed.
-Don't: every miner has to compute exactly the same way, and those kernels round differently,
-so your answers would fail other miners' checks.
-
-### A test network on this computer
-
-```
-vibehash testnet --evo2
-```
-
-This is Evo Hash ([white paper](docs/evo-hash.pdf); also in the menu: run `vibehash` and pick it under Mine). It runs a node
-and two miners on this computer, training Qwen2.5-0.5B-Instruct on 17 tasks at once, every
-round's questions drawn from all of them: science, commonsense, word-problem math, sentiment,
-news and emotion questions from public datasets (ARC, SciQ, CommonsenseQA, OpenBookQA, PIQA, Social IQa,
-WinoGrande, HellaSwag, BoolQ and more; downloaded once, about 1 GB, each pinned to one version
-so every computer reads the same questions). A right answer counts whether or not the model
-wrote it in the asked-for format, so the model is paid for being right. Each step is anchored
-to the original model, so long runs don't drift it to pieces, and GSM8K and MMLU are never
-trained on, so they show whether what it learns carries over. Each job is
-short, because evolution makes most of its gains on a task in the first dozen rounds, and
-each starts where the last one ended, so the model keeps what every task taught it. The
-dashboard shows each generation incubating in the open block. `--evo2-rounds N` sets a
-job's length (default 12). `vibehash testnet --evo` is the first, simpler version: one layer
-of the model, Countdown only.
-
-To take the tuned Qwen out, while the testnet runs (or after starting it again: it carries on
-where it stopped), in another terminal:
-
-```
-vibehash evo export
-```
-
-It works the newest Evo job's model out from the chain the way a miner does, every round
-checked against its block, and saves it as an ordinary Hugging Face folder (`JOB-model/`:
-safetensors in bfloat16, the tokenizer and chat template, and an `EVO.md` saying which chain,
-job and block it is). Name a job to take an earlier one (`vibehash evo export evo2-c1-arc_easy`),
-`--out DIR` for the folder, `--float32` for unrounded weights. A line a miner on this computer
-saved makes it quick; on another computer it replays every round on the CPU (about 5 s a round),
-and needs Qwen2.5-0.5B-Instruct in its Hugging Face cache. `vibehash job download JOB` does the
-same for an Evo job.
-
 ## The Muse agents: a fine-tune from a sentence
 
 `agents/` puts an LLM (Meta's Muse Spark) on either side of a fine-tune. The Job Architect
@@ -656,7 +588,7 @@ doesn't have) attaches three files to the tag's GitHub release:
   --universal --no-emit-package torch`, then `scripts/release_manifest.py` puts the
   built wheel's hash on the `vibehash==` line). PyTorch is left out on purpose, so
   the GPU build `vibehash install-gpu` chose is never replaced. It includes the
-  `finetune`, `app` and `evo` extras, so there is one update path for the launcher,
+  `finetune` and `app` extras, so there is one update path for the launcher,
   the menu and `vibehash update`.
 - `release.json`: the manifest, with `version`, `wheel`, `wheel_sha256`,
   `requirements`, `requirements_sha256`, `published` and `min_launcher`.
@@ -771,22 +703,20 @@ ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --domain node.vibehash.org
 
 ### A second network on the same server
 
-One server can run another network's node beside the first: an Evo Hash
+One server can run another network's node beside the first: a staging
 testnet, say. Give it a name, its own domain (an A record to the same
 server), a port other than 443 and its own chain id:
 
 ```bash
-ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --name evo --domain evo.vibehash.org --port 8443 --chain-id vibehash-evo-1 --es --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
+ssh -t YOU@SERVER sudo bash deploy/setup-node.sh --name staging --domain staging.example.org --port 8443 --chain-id example-staging-1 --stake YOUR-GPU-WALLET=10 --fund YOUR-WALLET-ADDRESS=10000
 ```
 
-- `--name evo` keeps it apart: `/var/lib/vibehash-evo`, `/etc/vibehash-evo`,
-  the service `vibehash-node-evo` and its own certificate. The first node is
-  left as it is.
-- `--es` makes a network that takes Evo Hash jobs.
-- `--stake` starts a wallet with stake. An Evo job's work is checked only by
+- `--name staging` keeps it apart: `/var/lib/vibehash-staging`,
+  `/etc/vibehash-staging`, the service `vibehash-node-staging` and its own
+  certificate. The first node is left as it is.
+- `--stake` starts a wallet with stake. A fine-tune's work is checked only by
   staked workers, so someone must be staked before newcomers can earn theirs.
-- `--es`, `--stake` and `--fund` only count the first time, when the genesis
-  is made.
+- `--stake` and `--fund` only count the first time, when the genesis is made.
 
 Both nodes share the server's Vibe Hash install, so after upgrading one,
 restart the other too: `sudo systemctl restart 'vibehash-node*'`.
@@ -795,7 +725,7 @@ restart the other too: `sudo systemctl restart 'vibehash-node*'`.
 
 Losing the server loses the chain unless it is backed up. The script sets up a
 daily backup, a health check every five minutes, and an alert for either
-failing. A named node gets its own copies (`vibehash-backup-evo.timer`, and so
+failing. A named node gets its own copies (`vibehash-backup-staging.timer`, and so
 on). Also turn on weekly snapshots for the droplet in the DigitalOcean control
 panel.
 
@@ -873,7 +803,7 @@ python -m vibehash wallet create --out alice.json
 python -m vibehash wallet create --out requester.json
 ```
 
-2. Write a genesis file (use the addresses printed above). `--validator` names the node as a validator, with the address other machines reach it at, and `--bootstrap` gives it **bootstrap stake**: enough to vote on block one, but it can never be withdrawn or spent, and it's burned if the validator leaves. Workers need nothing. By default they start with no stake and **earn it in**: their first 5 VIBE of pay goes into their stake, and until then they get small batches of work and don't check anyone else's. So every spendable coin starts from work. `--no-earn-in` makes workers be given stake instead (`--stake`). `--economics mainnet` picks the long issuance schedule (3.125 VIBE in each round that pays for work, halving every 3.32M such rounds, at least ~4 years, 21M VIBE at most) instead of the fast testnet one. With either, a round in which nobody's work is accepted mints nothing and doesn't count toward a halving (DESIGN §10, "Issuance schedule"). `--starter-job SPEC.json` (a spec as `vibehash job template` writes) puts a job on chain from block one, owned by nobody and paying only new coins, so a network with no starting coins can still mine; `--es` lets Evo jobs run. `vibehash genesis check FILE` then holds the file against what a mainnet needs. The genesis hash commits to all of it. Here only the requester is handed coins, to pay for training:
+2. Write a genesis file (use the addresses printed above). `--validator` names the node as a validator, with the address other machines reach it at, and `--bootstrap` gives it **bootstrap stake**: enough to vote on block one, but it can never be withdrawn or spent, and it's burned if the validator leaves. Workers need nothing. By default they start with no stake and **earn it in**: their first 5 VIBE of pay goes into their stake, and until then they get small batches of work and don't check anyone else's. So every spendable coin starts from work. `--no-earn-in` makes workers be given stake instead (`--stake`). `--economics mainnet` picks the long issuance schedule (3.125 VIBE in each round that pays for work, halving every 3.32M such rounds, at least ~4 years, 21M VIBE at most) instead of the fast testnet one. With either, a round in which nobody's work is accepted mints nothing and doesn't count toward a halving (DESIGN §10, "Issuance schedule"). `--starter-job SPEC.json` (a spec as `vibehash job template` writes) puts a job on chain from block one, owned by nobody and paying only new coins, so a network with no starting coins can still mine. `vibehash genesis check FILE` then holds the file against what a mainnet needs. The genesis hash commits to all of it. Here only the requester is handed coins, to pay for training:
 
 ```bash
 python -m vibehash genesis create --chain-id my-testnet-1 --out genesis.json --bootstrap NODE_ADDR=10 --validator NODE_ADDR=http://192.168.1.20:8545 --alloc REQUESTER_ADDR=500

@@ -116,7 +116,7 @@ def disk(path, free: int | None = None, need: int | None = None) -> str:
     amounts = (f" ({free / 1e9:.1f} GB free" + (f", {need / 1e9:.1f} GB needed" if need else "") + ")"
                if free is not None else "")
     return (f"The disk holding {path} is full{amounts}. Free some space, or keep Vibe Hash on a bigger drive: set "
-            "VIBEHASH_HOME to a folder there (and `vibehash setup --models-dir FOLDER` for big model files).")
+            "VIBEHASH_HOME to a folder there.")
 
 
 def no_stake(min_stake: int) -> str:

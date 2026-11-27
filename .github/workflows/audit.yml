@@ -1,5 +1,5 @@
 # Known vulnerabilities in what Vibe Hash installs: pip-audit against PyPI's advisory database (OSV), over the package
-# with every extra (finetune, evo, app) as `pip install vibehash[...]` would resolve them today. Weekly, on pushes to
+# with every extra (finetune, app) as `pip install vibehash[...]` would resolve them today. Weekly, on pushes to
 # main, and on pull requests that change dependencies. Not a required check: a new advisory can turn it red without
 # blocking a merge, and the fix is a Dependabot PR (dependabot.yml) or a raised lower bound in pyproject.toml.
 # PyTorch is left out: no extra declares it (`vibehash install-gpu` picks its build).
@@ -29,7 +29,7 @@ jobs:
       - name: Install Vibe Hash with every extra
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[finetune,evo,app]" pip-audit
+          python -m pip install ".[finetune,app]" pip-audit
       - name: Audit what was installed
         # Not --strict: that also fails on a package it can't look up, and vibehash itself (built here from the
         # checkout) is one. A known vulnerability in anything installed still fails the step.

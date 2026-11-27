@@ -18,7 +18,7 @@ This repository is public under MIT. Anything pushed here can be copied and used
 Treat every commit as published.
 
 Belongs here:
-- The chain, the miner, public jobs, Evo, and the open domain models with their published recipes.
+- The chain, the miner, public jobs, and the open domain models with their published recipes.
 - The task scorer and the receipt format. Customers trust a scorer they can read and run on their own test set.
 
 Never here (it goes in the private repository, or nowhere):
@@ -71,7 +71,8 @@ Rules:
 ## No new workload in `coordinator.py`
 
 - New job kinds wait for the plugin boundary. Do not wire one into the coordinator.
-- DeepSeek is frozen. The `deepseek` setting defaults to `no`; the pilot prompt is behind `VIBEHASH_DEEPSEEK_PILOT=1`.
+- Evo and DeepSeek were removed after 0.5.28 (main at 458a849 is the last code with them). The ledger still reads the
+  public chain's two old DeepSeek jobs (`tasks.RetiredJob`); never let a new one in.
 
 ## Networking
 
@@ -85,14 +86,14 @@ Rules:
 ## Updates and releases
 
 - A release carries a signed manifest (`release.json`, `release.sig`) made by `scripts/release_manifest.py`. Clients
-  check it against `RELEASE_PUBKEYS`. `vibehash update [--evo]` (`vibehash/update.py`) installs only a verified release.
+  check it against `RELEASE_PUBKEYS`. `vibehash update` (`vibehash/update.py`) installs only a verified release.
 - Never bypass `--require-hashes` in the launcher or `vibehash/update.py`. Hashed installs are the supply-chain check.
 - A release is a version bump in `pyproject.toml` plus a `v*` tag. Workflow `uses:` stay pinned to commit SHAs.
 
 ## Tests and CI
 
 - Before a PR run `python -m unittest discover -s tests -p "test_*.py"`. It needs torch and the extras
-  (`pip install -e ".[finetune,evo,app]"`). Without torch, run the modules for what you touched.
+  (`pip install -e ".[finetune,app]"`). Without torch, run the modules for what you touched.
 - New modules get a test module. Never add a module to a hand-written CI list: `discover` must reach it.
 - The `nightly` job runs the whole suite; the `gitleaks` job scans the tree. Both live in `.github/workflows/tests.yml`.
 - `tests/protocol.py` and `tests/reference/` hold the old reference protocol, transformer and MoE code that tests

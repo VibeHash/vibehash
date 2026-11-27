@@ -13,7 +13,6 @@ server's own configuration, never in the repository.
 | Role | What it is | Where it is configured |
 |---|---|---|
 | Public validator | The main network's node: HTTPS on port 443, the chain database, blob checkpoints, the node wallet | `deploy/setup-node.sh` on one small Linux server |
-| Evo validator | A second, named node on the same server for the Evo network (`--name`, its own port, chain id and data folder) | the same script, run again with `--name` and `--es` |
 | Website | The static site, built by `scripts/build_site.py` and published on GitHub Pages | the repository's Pages settings |
 | PyPI project | The `vibehash` package that users install | PyPI, which trusts the release workflow (below) |
 | Release workflow | `.github/workflows/publish.yml`: tests, build, publish on a `v*` tag | the repository's Actions settings and its `pypi` environment |
@@ -34,7 +33,7 @@ private login. When an owner changes, hand the role over and rotate the secrets 
 ## Deploy a node
 
 On a fresh Ubuntu 24.04 server, run `deploy/setup-node.sh` (its header lists the flags: `--domain`,
-`--chain-id`, `--name`, `--es`, `--stake`, `--enable-tor`). Running it again upgrades the node and
+`--chain-id`, `--name`, `--stake`, `--follow`, `--enable-tor`). Running it again upgrades the node and
 keeps its wallet and chain. Then lock down SSH as `README.md` "Lock down the server" says.
 
 The node's files are in `/var/lib/vibehash`; its settings and secrets are in `/etc/vibehash/env`.
@@ -73,10 +72,9 @@ Each release:
 1. Raise the version in `pyproject.toml` and merge it to `main` with the tests green.
 2. Tag it and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. `publish.yml` checks the tag matches the version, runs the whole test suite, builds the wheel and
-   source archive, compiles the hash-pinned `requirements-<version>.txt` and
-   `requirements-<version>-evo.txt` (for Python 3.10 and up), and publishes to PyPI. Its `manifest` job
-   then signs `release.json` with `RELEASE_SIGNING_KEY` and attaches `release.json`, `release.sig` and
-   the two requirements files to the tag's GitHub release, where the launcher and `vibehash update`
+   source archive, compiles the hash-pinned `requirements-<version>.txt` (for Python 3.10 and up), and
+   publishes to PyPI. Its `manifest` job then signs `release.json` with `RELEASE_SIGNING_KEY` and
+   attaches `release.json`, `release.sig` and the requirements file to the tag's GitHub release, where the launcher and `vibehash update`
    fetch them. Without the secret it warns and attaches nothing: the release is on PyPI, but installers
    don't update to it. Follow it under the repository's Actions tab, and check that the release lists
    those four files and the installer.

@@ -154,8 +154,7 @@ class RefereeTests(_Tiny):
                 honest, caught, tampered, kinds = self.tiny(family).judge_step()
                 self.assertGreater(honest, 1000)
                 self.assertGreater(caught, 0.98 * tampered)
-        # (DeepSeek's ds_ ops, registered once referee_deepseek is imported, are tests/test_deepseek_program.py's)
-        self.assertEqual(kinds | {"embed"}, {k for k in referee.OPS if not k.startswith("ds_")} - {"free"})
+        self.assertEqual(kinds | {"embed"}, set(referee.OPS) - {"free"})
 
     @unittest.skipUnless(CUDA, "needs a CUDA GPU")
     def test_a_cuda_step_passes_the_cpu_referee(self):

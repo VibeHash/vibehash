@@ -25,10 +25,10 @@ def starter(job_id: str = "starter-mlp", **over) -> dict:
 
 def mainnet(**over) -> dict:
     """A genesis that passes: four validators on four public HTTPS hosts with equal bootstrap stake, no premine,
-    earn-in, Evo on, the mainnet schedule counting paid rounds, and a starter job."""
+    earn-in, the mainnet schedule counting paid rounds, and a starter job."""
     vals = {addr(i): f"https://v{i}.example.org:8545" for i in range(1, 5)}
     g = {"chain_id": "vibehash-1", "timestamp": 1_800_000_000, "allocations": {}, "stakes": {},
-         "validators": vals, "bootstrap": {a: 10 * V for a in vals}, "earn_in": True, "es": True,
+         "validators": vals, "bootstrap": {a: 10 * V for a in vals}, "earn_in": True,
          "economics": econ.NEW_SCHEDULES["mainnet"].to_dict(), "starter_jobs": [starter()]}
     g.update(over)
     return g
@@ -110,10 +110,7 @@ class GenesisCheckTests(unittest.TestCase):
         statuses = sorted(f.status for f in found["validator address"])
         self.assertEqual(statuses, ["fail", "warn"])  # the private address fails, plain HTTP is a warning
 
-    def test_evo_off_and_earn_in_off_are_warnings(self):
-        g = mainnet()
-        del g["es"]
-        self.assertEqual(self.status(g, "Evo Hash"), {"warn"})
+    def test_earn_in_off_is_a_warning(self):
         self.assertEqual(self.status(mainnet(earn_in=False), "earn-in"), {"warn"})
 
     def test_a_genesis_the_ledger_refuses_is_one_failure(self):
@@ -140,21 +137,21 @@ class CommandTests(unittest.TestCase):
             self.assertIn({"status": "fail", "title": "chain id"},
                           [{k: f[k] for k in ("status", "title")} for f in json.loads(r.stdout)])
 
-    def test_create_with_es_and_mainnet(self):
+    def test_create_with_mainnet(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d, "g.json")
             vals = [f"--validator={addr(i)}=https://v{i}.example.org:8545" for i in range(1, 5)]
             boot = [f"--bootstrap={addr(i)}=10" for i in range(1, 5)]
             spec = Path(d, "starter.json")
             spec.write_text(json.dumps(starter(fee_per_round=5 * V)))  # a fee is set to 0, and said so
-            r = self.run_cli("genesis", "create", "--chain-id", "vibehash-1", "--economics", "mainnet", "--es",
+            r = self.run_cli("genesis", "create", "--chain-id", "vibehash-1", "--economics", "mainnet",
                              *vals, *boot, "--starter-job", str(spec), "--out", str(out))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("vibehash genesis check", r.stdout)
             self.assertIn("fee_per_round is set to 0", r.stdout)
             self.assertIn("starter job starter-mlp", r.stdout)
             g = json.loads(out.read_text())
-            self.assertIs(g["es"], True)
+            self.assertNotIn("es", g)
             self.assertEqual([j["fee_per_round"] for j in g["starter_jobs"]], [0])
             self.assertFalse(gc.failed(gc.check(g)))
 

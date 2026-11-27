@@ -284,16 +284,7 @@ round it completes work instead of almost never, as in lottery mining.
     newcomer's bond grows with what it has earned, and a fraud slash or a
     forfeited round costs it that. While earning in, a worker is held to the
     newcomer limit (4 units). It only gets units staked workers didn't need,
-    so newcomers can't crowd them out. The exception is Evo: staked workers
-    could take every unit of an Evo round, and an Evo-only chain has no
-    other job to earn a stake on, so each Evo round's first 2 units go to
-    workers earning in, one at a time (`NEWCOMER_RESERVE`). Units are
-    handed out only once registration closes, so a round with nobody
-    earning in holds nothing back, and a unit no newcomer has room for
-    goes to a staked worker. A newcomer that missed its last turn, or was
-    slashed in it, gets only what's left, so a no-show can't keep units
-    from being worked. The round records the rule, and validators refuse a
-    new Evo round on an earn-in chain that leaves it out. A worker earning
+    so newcomers can't crowd them out. A worker earning
     in never checks others' work, so a
     swarm of free identities can't wave each other's fakes through: their
     work is checked by staked workers, or by the coordinator's own replay.
@@ -318,48 +309,13 @@ round it completes work instead of almost never, as in lottery mining.
     genesis). Its rounds release no fee, so it never runs out, and its
     workers are paid the subsidy alone. It runs only in rounds no paid job is
     ready for (`Coordinator.active_job_id`), so it never takes a turn from a
-    job someone pays for. It can be an Evo job on a genesis with
-    `"es": true`: `vibehash job template --evo MODEL` writes one whose
-    `tasks` (es_tasks.CURATED's 17 by default) take turns, `--rounds` (12) rounds each, the
-    learning rate's cosine starting again with each task (`es2.task_at`,
-    `es2.lr_at`), as the testnet's short jobs do one after another, but in one
-    job and one line. A round's task follows from its step, which every node
-    and worker reads from the job's state; a replay target keeps its own
-    round's task (its place in the job's history is its step). Its step is
-    anchored (`es2.Spec2.decay`, 1/64 with lr 1e-3): before each round's
-    step the weight change gives back that share of itself, so a job that
-    never ends stays near its base model instead of drifting away (unanchored,
-    the Evo v2 step broke Qwen2.5-0.5B within about 100 rounds; HANDOFF, "The
-    Evo collapse: cause and fix"). A starter job that trains on an
+    job someone pays for. A starter job that trains on an
     uploaded dataset needs every validator to hold the file from the start.
     Measured in `tests/test_starter_jobs.py`: a chain with no allocations and
     no stakes, one validator with bootstrap stake that doesn't mine, and
     three newcomers mints from its first round; the newcomers reach their
     5 VIBE stake in six rounds; a lazy cheater among them is caught by the
     coordinator's own checks from the first round and never paid.
-  - **What an Evo round scores its members on (2026-11-09).** A rule-2
-    round's step comes from z-scored pairs of member scores: by default each
-    member's mean log-probability of the replay targets (earlier rounds'
-    right answers), right/wrong before any exist. Three spec fields change
-    that. Each is left out of the spec when off, so older jobs hash and
-    replay as they did, and nodes before 0.5.28 refuse a job that has one
-    (`Spec2.from_json` knows no such field). `gold` scores members on the
-    round's own problems' right answers (`es2_rounds.gold_problems`,
-    `gold_text`), so a job learns from what its model gets wrong, not only
-    from what it already gets right. `target_tokens`, with a pool task
-    (`es_tasks.PoolTask`: problems with whole target replies, its file
-    shipped in the package and pinned by sha256), scores them on those
-    replies up to that many tokens while members write only short answers;
-    the answer check still teacher-forces each claimed answer through the
-    claimed member's model, and `flops_per_step` prices the targets'
-    scoring. `fixed_step` divides a round's step by every member it could
-    have had, not the members that landed, so a thin round moves the model
-    less. Like `task_tokens` and `loop_stop` before them they bring no block
-    version: blocks without such a job are valid to old and new nodes alike,
-    and an older node refuses a block that posts one, so every validator
-    must run 0.5.28 or later before anyone posts such a job. Measured:
-    `docs/EVO-POOLS.md`.
-
   The genesis hash commits to all three (starter jobs only when there are
   some). Genesis files without them keep their
   hash, and every worker must be given stake, as before. `vibehash testnet`
@@ -561,7 +517,7 @@ whatever devices a machine has.
 The fourth row is why the update check exists. Small models gain little from
 a GPU because Python's per-step overhead dominates. Intel XPU, Apple MPS and
 AMD ROCm haven't been measured yet; docs/GPUS.md has what's known about every
-GPU family, from documentation, and a bf16-against-float32 Evo measurement.
+GPU family, from documentation, and a bf16-against-float32 measurement.
 
 **Arbitration** (re-running a disputed segment or unit) runs on the node's
 backend, normally the CPU, with the same checks.
@@ -1070,7 +1026,7 @@ says `"decision": true`, which becomes the memo `ledger.DECISION_GATE`, and ever
 This needs no block version. On a chain without the gate, a decision job's post_job is refused by the new rule. A
 node from before refuses it too: it reads the spec as a fine-tune of an unknown family. So every block of every
 existing chain is valid or invalid exactly as before. A node from before can't join a gated chain by mistake, since
-it refuses the first block that posts a decision job, as with Evo's gate. Taking decision jobs on the public chain
+it refuses the first block that posts a decision job. Taking decision jobs on the public chain
 will take the referee's entries, then a block version, as fine-tunes did (`FINETUNE_VERSION`).
 
 ---
@@ -1143,16 +1099,9 @@ Being explicit about what this is and isn't:
        still lift a listed validator below the minimum back to a vote at once.
      - Bootstrap stake (§6) should be spread across several independent first
        validators, not one operator.
-  4. **Hugging Face, for DeepSeek's frozen weights.** The referee reads base
-     weights only from the pinned commit on Hugging Face, never from a party
-     to a dispute. A fine-tune's tensors, and DeepSeek-V4.1-Flash's trained
-     layers and head, are checked against per-tensor sha256 the job pins. The
-     frozen layers and the engram tables (440 GB) are read by range and
-     checked only at the file level, which a range can't be. So the referee
-     trusts Hugging Face to serve its own pinned files. The owner chose this
-     for the pilot (DEEPSEEK.md §8). The way out: anyone downloads the whole
-     model once, on any rented machine, and pins per-tensor and per-piece
-     hashes, which anyone can recheck.
+  4. **Hugging Face, for base weights.** The referee reads base weights only
+     from the pinned commit on Hugging Face, never from a party to a dispute,
+     and checks a fine-tune's tensors against per-tensor sha256 the job pins.
 - **Consensus at scale.** Votes go straight to every validator, which suits
   tens of validators, not thousands, and there's no light-client protocol
   yet. Timeouts are sized for testnets. Pure proof-of-useful-work consensus
@@ -1295,9 +1244,8 @@ accepted work, worker FLOPs above zero, to a worker who isn't an offender:
 the same work `_reward_txs` pays workers for, and that a proposer's 5% needs.
 It's that in every kind of round: an MLP's (a unit that verified), a sharded
 team's (a member whose cells and edges checked out), a fine-tune's (a claim a
-checker approved or that won its disputes), an Evo round's (approved, and
-nobody rejected it) and a DeepSeek prep round's (a unit kept into the work
-graph). Checking and scoring don't make a round one on their own: they are
+checker approved or that won its disputes), and, in old blocks, a DeepSeek
+prep round's (a unit kept into the work graph). Checking and scoring don't make a round one on their own: they are
 paid out of a round that pays for work. In a round where no work is
 accepted, a checker that caught a cheater is paid by the slash's bounty, and
 other checks, approvals of claims someone else rejected and fine-tune scores
@@ -1590,9 +1538,34 @@ chain. A node answers a worker's `register` from a release below its
 client that names no version is taken as before, and anyone can send any
 User-Agent. Validators agreeing on an upgrade is still to do (§9).
 
-Version 5 changes no ledger rule. It comes with fine-tune check rule 3 (§8, "Rule 3: B decides"): a node from before
-would refuse a rule-3 round and settle one differently (a replica that withdrew is blameless now), so it refuses the
-block instead, and its workers are told to upgrade before they check anything by rule 2.
+Version 5 comes with fine-tune check rule 3 (§8, "Rule 3: B decides"): a node from before would refuse a rule-3 round
+and settle one differently (a replica that withdrew is blameless now), so it refuses the block instead, and its workers
+are told to upgrade before they check anything by rule 2. It also stops DeepSeek jobs (`ledger.RETIRED_VERSION`, below).
+
+**Evo and DeepSeek, cut (2026-11-26).** VibeHash became a fine-tuning network, and two job kinds went: Evo (training by
+evolution strategies) and the DeepSeek-V4.1 top-layers job. Their code, tests and docs are gone; main at 458a849 (the
+code of release 0.5.28) is the last with them. What stays is what a chain that already holds them needs:
+- **Evo** only ran on a chain whose genesis had the memo `ledger.ES_GATE`. No such chain is one this code runs: a
+  genesis with the memo (or `"es": true`) is refused with a message naming 0.5.28 (`ledger.EVO_GENESIS`). Ignoring the
+  memo would read an Evo chain's rounds wrongly. `vibehash-public-1` never had it, and no block of it held an Evo
+  record (all 59,280 blocks read on 2026-11-26).
+- **DeepSeek** was never gated, and `vibehash-public-1` holds two DeepSeek jobs: `think-shorter-pilot` (posted at
+  height 7,146, cancelled at 7,499) and `think-shorter-pilot-2` (posted at 7,529, cancelled at 36,510), with 28,695
+  round summaries between them, five of which paid out (prep rounds at heights 7,542 to 7,550). The ledger must still
+  apply those blocks the same way: a node re-applies every block from genesis. So a DeepSeek spec parses as
+  `tasks.RetiredJob`, an InvalidJob carrying the three numbers the ledger reads (the job's id, fee a round and units a
+  round, `ledger._terms`). A block of version 3 or 4 may still post one, as then; the ledger applies its rounds' fees,
+  pay and slashes from their summaries as always. Two checks change for those old rounds: the bound on claimed work
+  (`2 · units · unit FLOPs`) is skipped, since only DeepSeek's code could work out a unit's FLOPs, and replay
+  (`replay.py`) doesn't re-run them: their record must match the hash its block commits to, and the rest is taken as
+  the validators who certified the block checked it. `chain verify` counts them apart; 0.5.28 re-runs them in full.
+- From block version 5 (`RETIRED_VERSION`) no DeepSeek job can be posted and no round of one sealed. Version 5 is
+  unreleased (0.5.28 makes version 4 blocks and refuses version 5), so this changes no block any node has seen.
+- **No new block version.** Every block of `vibehash-public-1` is valid to this code exactly when it was to 0.5.28:
+  the two posts and all their rounds apply, with the same balances, stakes, reputation and supply. The only thing an
+  old node would see differently is a new DeepSeek post or round, and those can only come in version 5 blocks, which
+  old nodes refuse anyway. A worker's register message no longer takes Evo's `numerics` field, nor a verdict its
+  `gap`: those are wire rules, not chain rules, and a 0.5.28 worker drops a refused field and sends again.
 
 Version 3 lets a post_job be a fine-tune (`tasks.is_finetune_spec`, §8): earlier versions refuse one, as the nodes
 before them did, so a chain holds none until its validators all know them.

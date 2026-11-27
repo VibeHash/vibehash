@@ -25,7 +25,6 @@ PUBLIC_NODE = "https://node.vibehash.org"  # the public network: where commands 
 RELEASE_PUBKEYS: list[str] = ["5cc651c0d3c5bc2f78d44d864bf825bf12db9ff8efcec32e442872fcd405b3d9"]
 RELEASES = "https://github.com/VibeHash/vibehash/releases/latest/download"  # where the manifest and its requirements are
 
-PUBLIC_EVO_NODE = "https://evo.vibehash.org:8443"  # the public Evo Hash network (vibehash-evo-1): the menu's Evo Hash
 
 
 def home() -> Path:
@@ -70,17 +69,6 @@ def load() -> dict:
         except (OSError, ValueError):
             return {}
     return {}
-
-
-def deepseek_pilot() -> bool:
-    """Whether the DeepSeek pilot is switched on for this process (VIBEHASH_DEEPSEEK_PILOT=1). DeepSeek is frozen: without
-    it nothing asks about DeepSeek or nags to turn it on; the Settings toggle and `worker --deepseek yes` still work."""
-    return os.environ.get("VIBEHASH_DEEPSEEK_PILOT") == "1"
-
-
-def deepseek_choice(cfg: dict | None = None) -> str:
-    """The saved DeepSeek choice, "yes" or "no", or "ask" (not chosen yet, and only in the pilot). The default is "no"."""
-    return (load() if cfg is None else cfg).get("deepseek", "ask" if deepseek_pilot() else "no")
 
 
 JOB_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")  # tasks.py's rule for job ids, kept here so settings stays light

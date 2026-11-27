@@ -39,12 +39,6 @@ _UNBUILT = object()
 RETRIES = 4
 BUSY_RETRIES = 6  # for 429 (rate limited) and 503 (busy): the node turned the request away unprocessed
 PARALLEL_REQUESTS = 4  # in flight at once for a round's reveals or a unit's uploads: plenty, and gentle on a small node
-# A round's Evo claims checked together (EsWork.check_many). A check runs as long as its longest answer and its longest
-# replay target, however few rows share the passes, so more claims cost little more: on vibe-08b-2's line (RTX 4070
-# SUPER, 2026-11-08) 4 claims took 17.5 s, 8 and 12 took 18.9 s, every member's gaps and log-probabilities the same
-# bits in any group (4 until then: a checker given 5 to 8 paid for two groups). Their verdicts go out after each
-# group, so a round with more claims than this still sends some before a short verify phase ends.
-ES_CHECK_BATCH = 16
 # A dispute's state tensors in flight at once (tasks.MOVE_PARALLEL times moves by it): a state is a blob a tensor, 336
 # for Qwen3-0.6B's adapters, and one at a time to a distant node took a defender past its move (round 7280).
 TRACE_REQUESTS = 8
@@ -495,23 +489,14 @@ class WorkerClient:
 
     def __init__(self, node_url: str, keys: KeyPair, memory_mb: int | None = None, flops_override: float | None = None,
                  poll_s: float = 0.5, behavior: str = "honest", verifier_behavior: str = "honest", device: str = "auto",
-                 cache_dir: str | Path | None = None, deepseek: bool = False, job=None):
-        """`deepseek`: take DeepSeek jobs' work, whose model files (~30 GB) it fetches into the model store
-        (modelstore.py) without asking: the owner said yes (`worker --deepseek yes`, or the menu's item).
-        `job`: mine only those jobs' rounds, one id or several (job_ids; None: every job it can do); `choose` changes
+                 cache_dir: str | Path | None = None, job=None):
+        """`job`: mine only those jobs' rounds, one id or several (job_ids; None: every job it can do); `choose` changes
         it as it runs."""
         self.home = self.node = NodeClient(node_url)
-        self.deepseek = deepseek
         self.choice = JobChoice(job)
         self._open_asked = 0.0  # when it last asked whether the chosen job still has budget left (_sits_out)
-        from .deepseek_client import DeepSeekWork
-        self.ds = DeepSeekWork(self)  # a DeepSeek job's rounds (deepseek_client.py)
-        from .es_client import EsWork
-        self.es = EsWork(self)  # an evolution-strategies job's rounds (es_client.py)
         self.backend = get_backend(device, log)
         self.hardware_class = hardware.hardware_class(self.backend)  # registered each round, counted at /network
-        self.numerics = hardware.numerics(self.backend)  # how it does Evo's arithmetic, also registered (hardware.py)
-        self.verdict_gaps = True  # sends a rule-2 check's worst gap with its verdict, until a node from before says no
         self.memory_override = memory_mb
         self.flops_override = flops_override
         self.poll_s = poll_s
@@ -524,7 +509,6 @@ class WorkerClient:
         self.jobs: dict[str, TrainingJob] = {}
         self.speed: dict[str, float] = {}
         self.cannot: dict[str, str] = {}  # jobs this worker can't run, and why
-        self.recheck: dict[str, float] = {}  # of those, the ones to ask about again, and when (time.monotonic)
         self.done: dict[tuple[int, str], bool] = {}
         self.units: dict[int, list] = {}
         self.start_blob: dict[int, str] = {}
@@ -600,7 +584,7 @@ class WorkerClient:
             except NodeError:
                 record = None
             if not isinstance(self.record, _NoLog):  # the round log reads the same block, and two facts of the record
-                self._sealed[rnd] = (raw, {"attempt": record.get("attempt"), "prep": "prep" in record}
+                self._sealed[rnd] = (raw, {"attempt": record.get("attempt")}
                                      if isinstance(record, dict) else None)
             seen = self.secret_commits.pop((rnd, record.get("attempt")), None) if isinstance(record, dict) else None
             if seen and record.get("beacon_commit") != seen:
@@ -655,54 +639,21 @@ class WorkerClient:
             return self.backend.memory_mb() or hardware.total_memory_mb()
         return hardware.total_memory_mb()
 
-    def _measured(self, job: TrainingJob, flops: int, seconds: float) -> None:
-        """An Evo job's speed, as this computer last did its units (with a fifth to spare, for uploads and a slower
-        round), in place of the 2e12 FLOP/s every GPU said: a 4070 answers at about 7.5e12, so it was handed a quarter
-        of what it could do, and with three workers a quarter of each round's pairs went to nobody. Never less than
-        that default: a slow round (the model rebuilt from the chain first) mustn't claim too little to be handed a
-        unit, and so never measure again. The node still ramps what it hands out by what each worker delivered
-        (Coordinator.capacity)."""
-        if self.flops_override or flops <= 0 or seconds <= 0:
-            return
-        self.speed[job.job_id] = max(self._es_default(), 0.8 * flops / seconds)
-        self.stats.flops_per_sec = self.speed[job.job_id]
-
-    def _es_default(self) -> float:
-        return 2e12 if self.backend.name != "cpu" else 2e10
-
     def job(self, job_id: str) -> TrainingJob:
-        if job_id in self.recheck and time.monotonic() >= self.recheck[job_id]:
-            # refused for something that may have passed (an Evo self-check that errored): asked about again
-            for refused in (self.jobs, self.cannot, self.recheck):
-                refused.pop(job_id, None)
         if job_id not in self.jobs:
             info = self.node.get(f"/job/{job_id}")
             job = TrainingJob.from_spec_json(json.dumps(info["spec"]), info["owner"], 0)
-            why = self.ds.why_not(job) if job.deepseek else self.es.why_not(job) if job.es else self.can_run(job)
+            why = self.can_run(job)
             if why:
                 self.jobs[job_id] = job
                 self.cannot[job_id] = why
-                wait = self.es.retry_in(job) if job.es else None
-                if wait is not None:
-                    self.recheck[job_id] = time.monotonic() + wait
-                log.warning("skipping it: %s%s", why,
-                            f" (asking again in {max(1, round(wait / 60))} min)" if wait is not None else "")
+                log.warning("skipping it: %s", why)
                 return job
-            if job.data_source["kind"] in ("npz", "tokens", "deepseek"):
+            if job.data_source["kind"] in ("npz", "tokens"):
                 sha = job.data_source["sha256"]
                 self.datasets.prune_partial(keep={sha})  # other datasets' downloads that never finished
                 path = self.node.download("dataset", sha, self.datasets)  # hash-checked on arrival
                 job.attach_data(load_dataset(path), sha)
-            if job.es:  # its base model, loaded on the GPU by why_not (es.runtime); no dataset
-                self.jobs[job_id] = job
-                self.speed[job_id] = self.flops_override or self._es_default()
-                log.info("job %s trains %s by evolution strategies on %s", job_id, job.spec.repo, self.es.device())
-                return job
-            if job.deepseek:  # its model files come unit by unit, through the model store (deepseek_client.py)
-                self.jobs[job_id] = job
-                self.speed[job_id] = self.flops_override or (5e12 if self.runs_on_gpu(job) else 1e10)
-                log.info("job %s is a DeepSeek job: taking its work on %s", job_id, self.ds.device())
-                return job
             if job.finetune:  # the base model, fetched once and kept on the GPU (finetune.runtime)
                 self.stats.activity = f"fetching {job.spec.repo} to fine-tune it"
                 log.info("job %s fine-tunes %s: loading it on %s", job_id, job.spec.repo, finetune.device_of(self.backend))
@@ -822,7 +773,7 @@ class WorkerClient:
         self.seen = (rnd, phase)
         if rnd is None or phase in ("register", "compute"):
             # An earlier round's checks, stopping at their next segment, are waited for before this round's work: but
-            # not before registering for it (the phase is 3 s, and an Evo check can take a minute: workers missed
+            # not before registering for it (the phase is 3 s, and a check can take a minute: workers missed
             # every other round's registration), unless registering first loads a job (a model on the GPU they use).
             # _tidy leaves the files alone while they run.
             if (self.checking is not None and self.checking.is_alive()
@@ -845,8 +796,6 @@ class WorkerClient:
             self.secret_commits.setdefault((rnd, s.get("attempt")), s["beacon_commit"])
             for old in [k for k in self.secret_commits if k[0] < rnd - 100]:  # rounds we never sent anything in
                 del self.secret_commits[old]
-        if self.ds.weights:  # a DeepSeek job's model files go when it ends
-            self.ds.ended(s.get("job_id") if rnd is not None else None)
         if rnd is None or key in self.done or self._sits_out(rnd, s):
             return
         if st.round != rnd:
@@ -865,28 +814,23 @@ class WorkerClient:
             body = {"round": rnd, "flops_per_sec": self.speed[job.job_id], "memory_mb": self.memory_for(job)}
             if self.hardware_class is not None:
                 body["hardware"] = self.hardware_class
-            if self.numerics is not None:
-                body["numerics"] = self.numerics
             while True:
                 try:
                     self._signed("register", body)
                     break
                 except NodeError as e:
-                    # A node from before the census, or before number setups, doesn't take the field (node.BODIES):
-                    # leave out the newest it might not know, and register that way from now on.
-                    extra = "numerics" if "numerics" in body else "hardware" if "hardware" in body else None
-                    if extra is None or e.status != 400 or "register message has only" not in str(e):
+                    # A node from before the census doesn't take the field (node.BODIES): leave it out, and register
+                    # that way from now on.
+                    if "hardware" not in body or e.status != 400 or "register message has only" not in str(e):
                         raise
-                    log.info("the node is older and doesn't take a %s; registering without one",
-                             "number setup" if extra == "numerics" else "hardware class")
-                    setattr(self, "numerics" if extra == "numerics" else "hardware_class", None)
-                    del body[extra]
+                    log.info("the node is older and doesn't take a hardware class; registering without one")
+                    self.hardware_class = None
+                    del body["hardware"]
             st.rounds += 1
             st.activity = "registered; waiting for work"
             log.info("round %d: registered", rnd)
             self.record.begin(rnd, attempt=s.get("attempt"), chain_id=s.get("chain_id", ""), job_id=job.job_id,
-                              kind=("deepseek" if job.deepseek else "es" if job.es else "finetune" if job.finetune
-                                    else "mlp"),
+                              kind="finetune" if job.finetune else "mlp",
                               speed=self.speed[job.job_id], leader=self.node.url)
             if self.choice.ids is not None:
                 self.record.note(rnd, mining=self.choice.describe())
@@ -904,43 +848,6 @@ class WorkerClient:
                 if why and self._told.get(job.job_id) != why:  # once a job, what the wait means for this worker
                     self._told[job.job_id] = why
                     log.info("%s", self._waiting(job, why, s))
-            if units and given.get("prep"):  # a DeepSeek prep round: units of the work graph, through the bucket
-                st.busy = True
-                self.record.note(rnd, kind="deepseek-prep")
-                t0 = time.perf_counter()
-                try:
-                    for c in self.ds.compute(rnd, job, units, given["prep"], given.get("want") or {}):
-                        if self._try(self._signed, "commit", {"round": rnd, "commitment": commitment_out(c)}, commitment_out(c)):
-                            st.committed += 1
-                            st.units += 1
-                            self.record.add(rnd, committed=1)
-                finally:
-                    st.busy = False
-                    self.record.add(rnd, train_s=time.perf_counter() - t0, trained=len(self.ds.unit_stats.get(rnd, [])))
-                    self.record.note(rnd, prep=self.ds.unit_stats.get(rnd, []), _unit_flops=[u.flops for u in units])
-                st.activity = "prep units committed; waiting for the reveal"
-                units = []
-            elif units and job.es:  # an ES round: answers committed to, rewards and all (es_client.py)
-                st.busy = True
-                t0, done_flops = time.perf_counter(), 0
-                try:
-                    for u in self.es.compute(rnd, job, units, given):
-                        st.committed += 1
-                        st.units += 1
-                        st.training_flops += u.flops
-                        done_flops += u.flops
-                        self.record.add(rnd, committed=1)
-                        self.record.append(rnd, "_unit_flops", u.flops)  # (so its line can count the units accepted)
-                finally:
-                    st.busy = False
-                    took = time.perf_counter() - t0
-                    self.record.add(rnd, train_s=took, trained=len(units))
-                    self._measured(job, done_flops, took)
-                st.activity = "Evo answers committed; waiting for the reveal"
-                units = []
-            elif units and job.deepseek:  # a DeepSeek training round: its records, once
-                self.record.note(rnd, kind="deepseek-training")
-                self.ds.records(rnd, job)
             if units:
                 self.untidy.add(rnd)
                 p = self.node.get("/round/params")
@@ -985,14 +892,6 @@ class WorkerClient:
                 log.info("round %d: computed %d units, committed %d", rnd, len(units), len(committed))
             self.units[rnd] = committed  # only committed units get revealed
         elif phase == "reveal" and s["beacon"]:
-            for body in [*self.ds.reveals(rnd), *self.es.reveals(rnd)]:  # a prep round's roots; an ES round's claims
-                res = self._try(self._signed, "reveal", {"round": rnd, "reveal": body}, body)
-                if res is not None:
-                    self.record.add(rnd, revealed=1)
-                if res and not res["ok"]:
-                    log.warning("round %d: %s unit %s rejected: %s", rnd, "Evo" if "es" in body else "prep", body["unit_id"],
-                                res["verdict"])
-                    self.record.append(rnd, "rejected", {"unit": body["unit_id"], "why": str(res["verdict"])[:300]})
             beacon = bytes.fromhex(s["beacon"])
             if self.units.get(rnd):
                 st.activity = "revealing the checkpoints the beacon picked"
@@ -1052,8 +951,6 @@ class WorkerClient:
         # down together first, and each verdict goes while the next task is checked; the checking itself stays in turn.
         self._prefetch(job, [t for t in tasks if t.get("kind", "check") == "check"])
         sender = ThreadPoolExecutor(PARALLEL_REQUESTS)
-        es_tasks = [t for t in tasks if t.get("kind") == "es"]
-        es_done: dict[str, tuple] = {}  # task id -> verdict, worked out ES_CHECK_BATCH claims at a time
         try:
             for i, t in enumerate(tasks, 1):
                 if self._verify_over(rnd):
@@ -1061,43 +958,6 @@ class WorkerClient:
                     break
                 kind = t.get("kind", "check")
                 body = {"round": rnd, "task_id": t["task_id"], "ok": True, "bad_segment": None}
-                if kind == "es":  # an ES claim: its sampled members' answers teacher-forced through their models
-                    st.activity = f"checking another worker's answers ({i} of {len(tasks)})"
-                    if t["task_id"] not in es_done:  # this claim and the next few together: the engine's passes run full
-                        k = es_tasks.index(t)
-                        group = es_tasks[k:k + ES_CHECK_BATCH]
-                        try:
-                            got = self.es.check_many(rnd, job, [(g, unit_in(g["unit"])) for g in group])
-                        except Exception:  # noqa: BLE001 - one claim that breaks the group: each checked alone below
-                            log.exception("round %d: couldn't check %d claims together; checking them one at a time",
-                                          rnd, len(group))
-                            got = [None] * len(group)
-                        es_done.update({g["task_id"]: v for g, v in zip(group, got)})
-                    if es_done[t["task_id"]] is None:
-                        try:
-                            es_done[t["task_id"]] = self.es.check(rnd, job, t, unit_in(t["unit"]))
-                        except Exception:  # noqa: BLE001 - one claim this computer couldn't check: not the rest's loss
-                            log.exception("round %d: couldn't check task %s; going on with the rest", rnd,
-                                          t.get("task_id"))
-                            continue
-                    ok, bad = es_done[t["task_id"]]
-                    body |= {"ok": bool(ok), "bad_segment": bad}
-                    gap = self.es.gaps.pop(t["task_id"], None)
-                    if gap is not None and self.verdict_gaps:
-                        body["gap"] = gap
-                    sender.submit(self._verdict, rnd, kind, body)
-                    st.checked += 1
-                    st.checks += 1
-                    continue
-                if kind == "prep":  # a DeepSeek prep unit: replayed, and its commitment held up against the replay
-                    st.activity = f"checking another miner's prep unit ({i} of {len(tasks)})"
-                    body["ok"] = bool(self.ds.check(rnd, job, t))
-                    sender.submit(self._verdict, rnd, kind, body)
-                    st.checked += 1
-                    st.checks += 1
-                    continue
-                if job.deepseek:  # a DeepSeek training round's checks and scores train on its records
-                    self.ds.records(rnd, job)
                 if kind == "score":
                     st.activity = "scoring the round's starting model on the held-back data"
                     body["score"] = list(self.worker.score(job, self._round_start(rnd, job)))
@@ -1143,21 +1003,7 @@ class WorkerClient:
             self.record.tally(rnd, "check_kinds", kind)
 
     def _send_verdict(self, body: dict):
-        try:
-            return self._signed("verdict", body)
-        except NodeError as e:
-            # A node from before gaps were sent doesn't take the field (node.BODIES): the verdict without it, and
-            # every verdict without one from now on. A gap it refused (never sent: es_client keeps them in range)
-            # mustn't cost the verdict either.
-            if "gap" not in body or e.status != 400:
-                raise
-            older = "verdict message has only" in str(e)
-            if not older and "gap" not in str(e):
-                raise
-            if older:
-                log.info("the node is older and doesn't take a check's gap; sending verdicts without one")
-                self.verdict_gaps = False
-            return self._signed("verdict", {k: v for k, v in body.items() if k != "gap"})
+        return self._signed("verdict", body)
 
     def _disputes(self, rnd: int, job: TrainingJob) -> None:
         """Make our move in each of this round's disputes that waits on us (dispute.py): as the defender, post the
@@ -1193,16 +1039,8 @@ class WorkerClient:
             from .worker import tamper
 
             cheat = tamper if self.worker.behavior == "tamper" else None
-            if job.deepseek:  # its program and weights (deepseek_tracer), on its records
-                from .deepseek_tracer import Party as DeepSeekParty
-                from .deepseek_unit import runtime as deepseek_runtime
-                if not self.ds.names.get(rnd):  # a training round's (a prep round's games: deepseek_client.prep_game)
-                    self.ds.records(rnd, job)
-                rt = deepseek_runtime(job.spec, finetune.device_of(self.backend))
-                party = DeepSeekParty(rt, job.spec, job.data, _Remote(self), cheat)
-            else:
-                rt = finetune.runtime(job.spec, job.data, finetune.device_of(self.backend))
-                party = Party(rt, job.spec, job.data, _Remote(self), cheat)
+            rt = finetune.runtime(job.spec, job.data, finetune.device_of(self.backend))
+            party = Party(rt, job.spec, job.data, _Remote(self), cheat)
             self.party = {rnd: party}
         return party
 
@@ -1217,12 +1055,8 @@ class WorkerClient:
             with self._moves_lock:
                 move = self.unsent.pop(key, None)
             if move is None:
-                mine = None
-                if job is not None and job.deepseek and g["unit"] in self.ds.names.get(rnd, {}):  # a prep unit's
-                    prog, p = self.ds.prep_game(rnd, job, g, party.remote)
-                else:
-                    prog, p = Program.of(job, int(g["seed"])), party
-                    mine = self._own(job, p, g)
+                prog, p = Program.of(job, int(g["seed"])), party
+                mine = self._own(job, p, g)
                 move = (p.pick(prog, g) if g["turn"] == "pick" else {"split": p.split(prog, g, mine)}
                         if g["turn"] == "split" else {"evidence": p.remote.put(p.evidence(prog, g))})
             # Made only once the node takes it: a send that fails is tried again next time round, until the game's
@@ -1245,8 +1079,8 @@ class WorkerClient:
     def _own(self, job: TrainingJob, party, g: dict) -> list | None:
         """For a game over a unit we trained: its checkpoints, by segment boundary, after taking the game's ends as
         states of our own (tracer.Party.adopt) where they're ours, so they needn't be fetched from the node. None for
-        another worker's unit, or a DeepSeek job's (its units train elsewhere: deepseek_client)."""
-        work = self.worker._work.get(g["unit"]) if job is not None and not job.deepseek else None
+        another worker's unit."""
+        work = self.worker._work.get(g["unit"]) if job is not None else None
         if work is None:
             return None
         root = g["root"]
@@ -1307,8 +1141,6 @@ class WorkerClient:
         log.info("worker %s starting on %s (%s); registers as %s", checksummed(self.keys.address),
                  self.backend.describe(), hardware.describe(),
                  hardware.class_name(self.hardware_class) if self.hardware_class else "no class")
-        if self.deepseek:
-            self.ds.sweep()
         while stop is None or not stop.is_set():
             try:
                 self.step()

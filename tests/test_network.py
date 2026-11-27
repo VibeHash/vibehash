@@ -414,50 +414,6 @@ class CommandLineTests(unittest.TestCase):
         census = api.get("/network")["hardware"]
         self.assertEqual((census["day"], census["reported"], census["classes"]), (1, 0, []), census)
 
-    def test_a_node_from_before_number_setups_still_takes_the_worker_and_its_class(self):
-        """An upgraded worker against a node that takes a hardware class but no number setup: only the setup is left
-        out, and the class is still counted."""
-        from vibehash import node as node_module
-
-        node, api, req, workers, clients, stop, stop_node, genesis, tmp = start_network(self, 1)
-        job = TrainingJob("old-node-job", req.address, budget=60 * VIBE, fee_per_round=10 * VIBE, units_per_round=4)
-        api.send_tx(req, "post_job", "system", job.budget, job.spec_json())
-        old = {**node_module.BODIES, "register": {"round", "flops_per_sec", "memory_mb", "hardware"}}
-        with mock.patch.object(node_module, "BODIES", old):
-            run_until(node, clients, stop, node.chain.tip.height + 3)
-        self.assertIsNone(clients[0].numerics)
-        self.assertIsNotNone(clients[0].hardware_class)
-        census = api.get("/network")["hardware"]
-        self.assertEqual((census["day"], census["reported"]), (1, 1), census)
-
-    def test_a_node_from_before_gaps_takes_the_verdict_without_one(self):
-        from vibehash.client import NodeError
-
-        _, _, _, _, clients, *_ = start_network(self, 1)
-        c = clients[0]
-        sent = []
-
-        def signed(kind, body):
-            if "gap" in body:
-                raise NodeError("a verdict message has only bad_segment, ok, round, score, task_id", 400)
-            sent.append(body)
-            return {"ok": True}
-        with mock.patch.object(c, "_signed", signed):
-            c._verdict(5, "es", {"round": 5, "task_id": "t1", "ok": True, "bad_segment": None, "gap": 0.0})
-            c._verdict(5, "es", {"round": 5, "task_id": "t2", "ok": True, "bad_segment": None})
-        self.assertEqual([b["task_id"] for b in sent], ["t1", "t2"])
-        self.assertFalse(c.verdict_gaps)  # and the rest of its verdicts go without one
-        c.verdict_gaps, sent[:] = True, []
-
-        def refuses_the_gap(kind, body):
-            if "gap" in body:
-                raise NodeError("a check's gap is a number from 0 to 1e6", 400)
-            sent.append(body)
-            return {"ok": True}
-        with mock.patch.object(c, "_signed", refuses_the_gap):
-            c._verdict(5, "es", {"round": 5, "task_id": "t3", "ok": False, "bad_segment": 0, "gap": 1e7})
-        self.assertEqual(sent, [{"round": 5, "task_id": "t3", "ok": False, "bad_segment": 0}])  # the rejection still goes
-        self.assertTrue(c.verdict_gaps)  # a node that takes gaps keeps getting them
 
     def test_worker_job_must_be_one_the_node_lists(self):
         """`worker --job JOB` (for pods and --plain): a job the node doesn't list with budget left stops it at once,
@@ -851,28 +807,6 @@ class RegisterWhileCheckingTest(unittest.TestCase):
         stepped.join(5)
         self.assertFalse(stepped.is_alive())
         self.assertEqual(sent[-1], ("register", 6))
-
-
-class EvoSpeedTest(unittest.TestCase):
-    def test_an_evo_worker_claims_the_speed_it_measured(self):
-        """Every GPU said 2e12 FLOP/s for Evo: a 4070 does about 7.5e12, so it was handed a quarter of what it could
-        do. It claims what it measured (less a fifth), and never less than the default, nor with --flops set."""
-        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(tmp.cleanup)
-        c = WorkerClient("http://127.0.0.1:9", KeyPair.generate(b"speedy"), device="cpu", cache_dir=tmp.name)
-        job = TrainingJob("evo", "req", 0, 10)
-        c.speed["evo"] = c._es_default()
-        c._measured(job, int(7.5e12 * 40), 40.0)  # two units' worth in 40 s
-        self.assertAlmostEqual(c.speed["evo"], 0.8 * 7.5e12)
-        c._measured(job, int(1e9), 600.0)  # a round spent rebuilding the model first: not below the default
-        self.assertEqual(c.speed["evo"], c._es_default())
-        c._measured(job, 0, 10.0)  # nothing finished: kept
-        self.assertEqual(c.speed["evo"], c._es_default())
-        fixed = WorkerClient("http://127.0.0.1:9", KeyPair.generate(b"fixed"), device="cpu", cache_dir=tmp.name,
-                             flops_override=1e12)
-        fixed.speed["evo"] = 1e12
-        fixed._measured(job, int(7.5e12 * 40), 40.0)
-        self.assertEqual(fixed.speed["evo"], 1e12)
 
 
 class RerunRoundTest(unittest.TestCase):

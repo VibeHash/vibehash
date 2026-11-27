@@ -41,10 +41,6 @@ class CliDocs(unittest.TestCase):
     def test_nothing_local_leaks(self):
         self.assertNotIn(str(Path.home()), self.text)
 
-    def test_cache_choices_each_get_a_line(self):
-        for choice in ("show", "clear", "sweep"):
-            self.assertIn(f"  - `{choice}`: ", self.text)
-
     def test_version_is_this_checkouts(self):
         """From a checkout, --version says pyproject.toml's release, not an older pip-installed copy's."""
         import contextlib

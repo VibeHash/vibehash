@@ -592,7 +592,7 @@ class HaltExitTests(unittest.TestCase):
     def test_follow_refuses_options_that_make_a_new_network(self):
         script = str(ROOT / "deploy" / "setup-node.sh")
         cases = [(["--follow", "https://node.example.org", "--fund", "vibe1x=5"], "make a new network"),
-                 (["--follow", "https://node.example.org", "--es"], "make a new network"),
+                 (["--follow", "https://node.example.org", "--stake", "vibe1x=5"], "make a new network"),
                  (["--follow", "ftp://node.example.org"], "a node's address"),
                  (["--follow", "https://node.example.org", "--genesis-hash", "abc"], "64 hex digits"),
                  (["--genesis-hash", "0" * 64], "goes with --follow")]

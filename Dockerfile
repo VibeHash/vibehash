@@ -5,8 +5,7 @@
 #   docker run --rm vibehash-check                      # every test, then scripts/reproduce.py --check
 #   docker run --rm vibehash-check python -m unittest tests.test_core   # or anything else
 #
-# Tests that need a CUDA GPU, OpenVINO, transformers/peft or VIBEHASH_REAL_MODELS=1 skip here. tests.test_deepseek
-# fetches DeepSeek's reference code from the Hub (~100 KB), so the run needs network access, as CI's does.
+# Tests that need a CUDA GPU, OpenVINO, transformers/peft or VIBEHASH_REAL_MODELS=1 skip here.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1

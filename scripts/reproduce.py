@@ -15,8 +15,7 @@ Sections:
              fail every tile, and the allowance stays under 1e-4 of a value (median).
 
 Not here: the network's catches (every cheater caught, no honest worker slashed), which tests/test_core.py
-checks. Not here yet, because they need PyTorch or a GPU: DESIGN.md §8's CPU-vs-GPU replay deltas, the Evo margins
-(docs/CROSS-HARDWARE.md, scripts/evo_margin_xgpu.py). referee.py's docstring cites "CalibrationTests" for the
+checks. Not here yet, because they need PyTorch or a GPU: DESIGN.md §8's CPU-vs-GPU replay deltas. referee.py's docstring cites "CalibrationTests" for the
 "1.02 of the scale" figure in DESIGN.md; no test of that name exists yet, so that figure has no reproduction.
 """
 from __future__ import annotations

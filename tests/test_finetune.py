@@ -668,13 +668,13 @@ class MergedModelTests(unittest.TestCase):
         self.merge("again")
         self.merge("again")  # an earlier merge's folder is replaced
 
-    def test_a_deepseek_job_is_told_to_take_its_adapter(self):
+    def test_only_a_language_models_adapter_is_merged(self):
         from types import SimpleNamespace
 
         from vibehash import cli
 
-        job = SimpleNamespace(spec=SimpleNamespace(kind="deepseek"), job_id="ds-1")
-        with self.assertRaisesRegex(SystemExit, "hundreds of GB"):
+        job = SimpleNamespace(spec=SimpleNamespace(kind="other"), job_id="x-1")
+        with self.assertRaisesRegex(SystemExit, "without it"):
             cli._download_merged(SimpleNamespace(out=None, float32=False), None, job, None, {}, None, "")
 
 

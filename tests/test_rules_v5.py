@@ -7,6 +7,7 @@ replica that withdrew blameless (tests/test_finetune.py, NodeFreeRoundTests). Ol
 """
 from __future__ import annotations
 
+import json
 import unittest
 
 import numpy as np
@@ -142,3 +143,142 @@ class Rule3Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- the job kinds that were cut: Evo and DeepSeek -------------------------------------------------------------------
+
+from vibehash.coordinator import Coordinator  # noqa: E402
+from vibehash.crypto import KeyPair, h256  # noqa: E402
+from vibehash.ledger import SYSTEM, Block, Chain, InvalidBlock, RoundSummary, Tx, apply_block, canonical  # noqa: E402
+from vibehash.replay import replay_block  # noqa: E402
+from vibehash.tasks import SYN_PER_VIBE, RetiredJob, TrainingJob, retired_kind  # noqa: E402
+
+V = SYN_PER_VIBE
+LEAD, MINER = KeyPair.generate(b"rules v5 lead"), KeyPair.generate(b"rules v5 miner")
+# think-shorter-pilot-2's spec as vibehash-public-1 holds it (posted at height 7,529), under another id.
+DEEPSEEK_SPEC = {
+    "base": "hf:deepseek-ai/DeepSeek-V4.1-Flash@314113f8a7dadb388215396ba5fbee2c610a04d6", "batch_size": 8,
+    "checkpoint_every": 4, "data": {"heldback": [1500, 2000], "kind": "deepseek", "train": [0, 1500],
+                                    "sha256": "f4d7f822cf54a9f5a7f21441759bee63e2d1294d4a747b89588f7fb762523a3a"},
+    "deepseek": {"chunk_tokens": 4096, "cut": 36, "pieces": 4, "row_ranges": 15}, "fee_per_round": 16 * V // 10,
+    "id": "think-shorter-test", "init_seed": 11, "lora": {"alpha": 32, "rank": 16, "targets": ["wq_a", "wq_b", "wkv", "wo_b"]},
+    "lr": 0.0001, "manifest": "5d069a8a464c59210d35973f5c52b0adaf630eb6a013af0b91267382e73c6f29", "max_update_ratio": 1.0,
+    "memory_mb": 8000, "model": {"config": "flash", "family": "deepseek_v41"}, "optimizer": "adam",
+    "precision": "float32", "seq_len": 512, "steps_per_unit": 16, "tolerance": 0.0001, "units_per_round": 16}
+EVO_SPEC = {"id": "evo-test", "fee_per_round": V, "base": "hf:Qwen/Qwen2.5-0.5B-Instruct@" + "0" * 40, "manifest": "0" * 64,
+            "model": {"family": "qwen2"}, "es": {"pairs": 8, "sigma": 0.001}, "init_seed": 11, "units_per_round": 8,
+            "memory_mb": 4000}
+
+
+def _memo(spec: dict) -> str:
+    return json.dumps(spec, sort_keys=True, separators=(",", ":"))
+
+
+def _chain() -> Chain:
+    return Chain({LEAD.address: 1000 * V, MINER.address: 10 * V}, {LEAD.address: 10 * V, MINER.address: 10 * V},
+                 chain_id="rules-v5-retired")
+
+
+def _seal(c: Chain, txs=(), summary=None, version: int = ledger.VERSION) -> Block:
+    block, dropped = c.build_block(summary, list(txs), c.tip.timestamp + 1, version=version)
+    if dropped:
+        raise InvalidBlock(f"dropped {len(dropped)} tx")
+    block.sign(LEAD)
+    c.append(block)
+    return block
+
+
+def _post(c: Chain, spec: dict, budget: int = 50 * V) -> Tx:
+    return Tx.signed(LEAD, "post_job", SYSTEM, budget, c.next_nonce(LEAD.address), _memo(spec), c.chain_id)
+
+
+def _round(job_id: str, record: dict | None = None, units: int = 6) -> RoundSummary:
+    flops = {MINER.address: 10**15}
+    return RoundSummary(job_id, units, flops, dict(flops), [], [MINER.address], [], "00" * 32, LEAD.address,
+                        h256(canonical(record)).hex() if record is not None else "")
+
+
+
+class RetiredJobTests(unittest.TestCase):
+    """Evo and DeepSeek were cut after 0.5.28 (DESIGN.md, "Evo and DeepSeek, cut"). vibehash-public-1 holds two DeepSeek
+    jobs and their rounds, which must apply exactly as before; from block version 5 nothing new of either kind."""
+
+    def test_specs_are_told_apart_as_the_old_code_did(self):
+        self.assertEqual(retired_kind(DEEPSEEK_SPEC), "deepseek")
+        self.assertEqual(retired_kind(EVO_SPEC), "evo")
+        self.assertIsNone(retired_kind({**DEEPSEEK_SPEC, "model": {"n_in": 3}}))  # an MLP's model: not one
+        self.assertIsNone(retired_kind({k: v for k, v in DEEPSEEK_SPEC.items() if k != "deepseek"}))  # a fine-tune's
+        self.assertIsNone(retired_kind({**EVO_SPEC, "lora": {}}))
+        for spec, kind in ((DEEPSEEK_SPEC, "deepseek"), (EVO_SPEC, "evo")):
+            with self.assertRaises(RetiredJob) as e:
+                TrainingJob.from_spec_json(_memo(spec), LEAD.address, 1)
+            self.assertEqual((e.exception.kind, e.exception.job_id), (kind, spec["id"]))
+            self.assertIn("removed from VibeHash after 0.5.28", str(e.exception))
+        self.assertEqual((e.exception.fee_per_round, e.exception.units_per_round), (V, 8))
+
+    def test_an_old_block_posting_a_deepseek_job_applies_as_it_did(self):
+        c = _chain()
+        _seal(c, [_post(c, DEEPSEEK_SPEC)], version=4)
+        s = c.state
+        self.assertEqual((s.escrow["think-shorter-test"], s.job_owner["think-shorter-test"]), (50 * V, LEAD.address))
+        self.assertEqual(s.balance(LEAD.address), 950 * V)
+        # Its rounds settle from their summaries: the fee pro rata to the units accepted (6 of 16), and pay.
+        _seal(c, summary=_round("think-shorter-test"), version=4)
+        fee = [t.amount for t in c.tip.txs if t.kind == "fee_release"]
+        self.assertEqual(fee, [DEEPSEEK_SPEC["fee_per_round"] * 6 // 16])
+        self.assertEqual(c.state.escrow["think-shorter-test"], 50 * V - fee[0])
+        self.assertTrue(any(t.kind == "reward" and t.recipient == MINER.address for t in c.tip.txs))
+        # Its owner can still cancel it and get the rest back.
+        cancel = Tx.signed(LEAD, "cancel_job", SYSTEM, 0, c.next_nonce(LEAD.address), "think-shorter-test", c.chain_id)
+        _seal(c, [cancel], version=4)
+        self.assertEqual(c.state.escrow["think-shorter-test"], 0)
+        self.assertTrue(c.validate())
+
+    def test_nothing_new_of_a_cut_kind_from_version_5(self):
+        c = _chain()
+        with self.assertRaises(InvalidBlock):
+            c.check_tx(_post(c, DEEPSEEK_SPEC), [])  # (the mempool checks at the current version)
+        with self.assertRaises(InvalidBlock):
+            _seal(c, [_post(c, DEEPSEEK_SPEC)], version=5)
+        for version in (3, 4, 5):  # an Evo job was never on a chain this code runs
+            d = _chain()
+            with self.assertRaises(InvalidBlock, msg=version):
+                d.check_tx(_post(d, EVO_SPEC), [])
+            with self.assertRaises(InvalidBlock, msg=version):
+                _seal(d, [_post(d, EVO_SPEC)], version=version)
+        _seal(c, [_post(c, DEEPSEEK_SPEC)], version=4)  # (an old post, which still applies)
+        block, _ = c.build_block(_round("think-shorter-test", units=0), [], c.tip.timestamp + 1, version=5)
+        block.sign(LEAD)
+        with self.assertRaisesRegex(InvalidBlock, "a round of job think-shorter-test"):
+            c.append(block)
+        _seal(c, summary=_round("think-shorter-test", units=0), version=4)  # (in an old block it applied, and does)
+
+    def test_an_old_round_of_a_cut_kind_is_taken_as_certified_on_replay(self):
+        c = _chain()
+        _seal(c, [_post(c, DEEPSEEK_SPEC)], version=4)
+        record = {"job_id": "think-shorter-test", "prep": {"units": {}}, "version": 4}
+        block, _ = c.build_block(_round("think-shorter-test", record), [], c.tip.timestamp + 1, version=4)
+        block.sign(LEAD)
+        stats = {}
+        self.assertEqual(replay_block(c, block, record, stats=stats), [])
+        self.assertEqual(stats, {"retired": 1})
+        self.assertEqual(replay_block(c, block, {**record, "x": 1}), ["the record doesn't match the hash the block commits to"])
+        new, _ = c.build_block(_round("think-shorter-test", record), [], c.tip.timestamp + 1)
+        self.assertIn("is of a kind that was cut", replay_block(c, new, record)[0])
+
+    def test_the_coordinator_never_runs_one(self):
+        c = _chain()
+        _seal(c, [_post(c, DEEPSEEK_SPEC)], version=4)
+        coord = Coordinator(c, LEAD)
+        self.assertIsNone(coord.active_job_id())
+        self.assertIn("removed from VibeHash", coord.waiting["think-shorter-test"])
+        self.assertIn("owner can cancel it", coord.waiting["think-shorter-test"])
+
+    def test_an_evo_genesis_is_refused_with_a_clear_message(self):
+        g = {"chain_id": "an-evo-net", "allocations": {LEAD.address: 1}, "es": True}
+        with self.assertRaisesRegex(InvalidBlock, "Evo .* removed from VibeHash after 0.5.28"):
+            Chain.from_genesis(g)
+        genesis = Block(0, b"\x00" * 32, 0, None, [Tx("genesis", SYSTEM, SYSTEM, 0, memo=ledger.ES_GATE, chain_id="x")], "x")
+        with self.assertRaisesRegex(InvalidBlock, "run that chain with 0.5.28"):
+            apply_block(ledger.State(), genesis, "x", None)
+        Chain.from_genesis({"chain_id": "a-plain-net", "allocations": {LEAD.address: 1}})  # (one without it is fine)

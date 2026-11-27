@@ -20,8 +20,6 @@ Short definitions of the terms used across these docs, in alphabetical order.
 
 **Commitment.** A worker's sealed fingerprint of its result, sent before anything is revealed, so nobody can copy an answer or change theirs later.
 
-**DeepSeek prep.** The first stage of a DeepSeek job: running the model's frozen bottom layers over the job's text once, so miners then train only the top layers. The prep is itself mining work, in units miners run and check.
-
 **Dispute.** A fine-tune's disagreement between a worker and a checker, settled by narrowing it down to one small calculation that the node referees.
 
 **Double-signing.** A validator signing two conflicting votes or proposals at the same height. It costs all of the validator's stake and bans it from the set for good.
@@ -29,8 +27,6 @@ Short definitions of the terms used across these docs, in alphabetical order.
 **Earn-in.** A network rule letting workers start with no stake: their first 5 VIBE of pay becomes their stake.
 
 **Escrow.** A job's budget, locked when it's posted and paid out round by round for accepted work. Cancelling returns what's left.
-
-**Evo (Evo Hash).** Training by evolution strategies. Miners answer questions with slightly altered copies of the model, and blocks keep only the seeds and scores, so the trained model can be worked out from the chain.
 
 **Follower.** A node with no vote. It syncs and checks the chain, serves it, passes transactions on, and points workers at the current leader.
 

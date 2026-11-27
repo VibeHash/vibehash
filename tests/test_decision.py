@@ -99,7 +99,7 @@ class SpecTests(unittest.TestCase):
         self.assertIsInstance(again.spec, decision.DecisionSpec)
         self.assertEqual(again.spec, job.spec)
         self.assertEqual(again.spec.targets, ("qkv", "scorer"), "targets keep TARGETS' order")
-        self.assertTrue(again.finetune and again.decision and not again.deepseek)
+        self.assertTrue(again.finetune and again.decision)
         self.assertEqual(again.spec_json(), job.spec_json())
 
     def test_a_node_from_before_refuses_the_spec(self):

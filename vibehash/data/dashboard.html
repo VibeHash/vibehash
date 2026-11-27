@@ -165,9 +165,6 @@
   .ring .mid { position: absolute; inset: 0; display: grid; place-content: center; gap: 2px; }
   .ring .units { font: 760 3.3rem/1 var(--display); font-variant-numeric: tabular-nums; }
   .glance .earned { font: 760 2.9rem/1.05 var(--display); letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-  .offer { display: grid; gap: 8px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 10px; background: var(--ink); font-size: .92rem; }
-  .offer p { color: var(--mute); }
-  .offer code { font: .84rem var(--mono); color: var(--fg); background: var(--term); border: 1px solid var(--rule); border-radius: 6px; padding: 2px 6px; overflow-wrap: anywhere; }
 
   .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .chip { font: 600 .82rem var(--body); padding: 3px 11px; border-radius: 99px; border: 1px solid var(--rule); background: var(--ink); color: var(--mute); cursor: pointer; }
@@ -356,10 +353,6 @@
       <div class="stat"><dt>Doing now</dt><dd id="activity" style="font-size: 1.05rem; line-height: 1.35">Waiting for the worker</dd></div>
       <div class="stat"><dt>Reputation</dt><dd id="reputation">–</dd><div class="repbar"><i id="repbar"></i></div></div>
     </dl>
-    <div class="offer" id="offer" hidden>
-      <p id="offer-text">This job needs about 30 GB of model files, deleted when the job ends. Other jobs keep earning meanwhile.</p>
-      <div class="actions"><button class="btn gold small" type="button" id="offer-yes" hidden>Mine the DeepSeek job</button><code id="offer-cmd" hidden>vibehash worker --deepseek yes</code><button class="link" type="button" id="offer-more">What is it training?</button></div>
-    </div>
     <div class="op-grid">
     <div class="panel">
       <div class="filters">
@@ -451,7 +444,6 @@
     </div></div>
     <div class="group"><h3>Jobs</h3><div class="list">
       <div class="item"><div class="what"><b>What to mine</b><span id="set-vibe-now">All open jobs</span></div><button class="btn" type="button" id="set-vibe">Change</button></div>
-      <div class="item"><div class="what"><b>Mine DeepSeek jobs</b><span>DeepSeek jobs pay for big-GPU work and need about 30 GB of model files, deleted when each job ends. Mining restarts to pick this up.</span></div><label class="switch"><input type="checkbox" id="set-deepseek" aria-label="Mine DeepSeek jobs"><i></i></label></div>
     </div></div>
     <div class="group"><h3>App</h3><div class="list">
       <div class="item"><div class="what"><b>Start when I log in</b><span>Mining starts in the background at login, without this window. Open it from the pickaxe or the Start menu.</span></div><label class="switch"><input type="checkbox" id="set-startup" aria-label="Start when I log in"><i></i></label></div>
@@ -460,10 +452,6 @@
     <div class="group"><h3>Look and feel</h3><div class="list">
       <div class="item"><div class="what"><b>Reduce motion</b><span>Stops the pulsing and other movement in this window.</span></div><label class="switch"><input type="checkbox" id="set-calm" aria-label="Reduce motion"><i></i></label></div>
       <div class="item"><div class="what"><b>Operator view</b><span>The log, the rounds and the machine and node side by side, in place of the ring. For node operators.</span></div><label class="switch"><input type="checkbox" id="set-operator" aria-label="Operator view"><i></i></label></div>
-    </div></div>
-    <div class="group"><h3>Storage</h3><div class="list">
-      <div class="item"><div class="what"><b>Model files</b><span id="cache-text">Big downloads for the jobs you mine.</span><div class="meter"><i id="cache-meter"></i></div></div><label class="mute" for="set-cap">Cap</label><input type="number" id="set-cap" min="5" max="2000" step="5" style="width:84px"><span class="mute">GB</span></div>
-      <div class="item"><div class="what"><b>Clear model files</b><span id="clear-note">Frees the space now. Pause mining first; the next job downloads what it needs again.</span></div><button class="btn bad" type="button" id="cache-clear">Clear</button></div>
     </div></div>
     <div class="group"><h3>Network</h3><div class="list">
       <div class="item"><div class="what"><b id="node-url">–</b><span id="node-kind">&nbsp;</span></div><span class="pill" id="node-ms">…</span></div>
@@ -608,7 +596,7 @@
       document.body.classList.toggle("riding", b.dataset.tab === "mining");  // the band floats over the glance only there
       if (b.dataset.tab === "network" || b.dataset.tab === "jobs") network(true);
       if (b.dataset.tab === "wallet") history();
-      if (b.dataset.tab === "settings") { loadSettings(); loadCache(); loadNode(); }
+      if (b.dataset.tab === "settings") { loadSettings(); loadNode(); }
     });
   });
 
@@ -640,20 +628,15 @@
     else if (appHeld) { st = "Held off"; why = appHeld; dot = "dot held"; }
     else if (w) { st = w.busy ? "Mining" : "Waiting"; why = w.activity; dot = w.busy ? "dot on" : "dot held"; }
     else { st = api ? (appRunning ? "Starting" : "Not running") : "Not connected"; why = api ? appWords() : "the worker isn't answering (is it running?)"; dot = "dot"; }
-    var ds = deepseekWait(w);
-    if (ds && !appPaused && !appHeld) why = "DeepSeek job " + ds.id + " is available";
     $("state").textContent = st; $("why").textContent = why || ""; $("dot").className = dot;
     $("why").parentNode.title = w && w.activity && why !== w.activity ? st + ": " + w.activity : (why ? st + ": " + why : st);
-    headline(st, ds);
+    headline(st);
     $("foot-dot").className = w ? "dot on" : "dot"; $("foot-state").textContent = w ? "Connected" : "Not connected";
     scene(w);
   }
 
-  // The round's job is a DeepSeek job this worker didn't take: {id, kind} or null.
-  function deepseekWait(w) { return prefs && prefs.deepseek_pilot && w && !w.busy && w.skipped && w.skipped.kind === "deepseek" ? w.skipped : null; }  // the offer is for the pilot (VIBEHASH_DEEPSEEK_PILOT=1); the Settings toggle is always there
-  function headline(st, ds) {
-    var h = $("headline"), words = ds ? ["A DeepSeek job is ", "waiting for you"]
-      : st === "Mining" ? ["Your computer is training ", "real AI models"]
+  function headline(st) {
+    var h = $("headline"), words = st === "Mining" ? ["Your computer is training ", "real AI models"]
       : st === "Paused" ? ["Mining is ", "paused"]
       : st === "Held off" ? ["Mining is ", "held off for now"]
       : st === "Setting up" ? ["Getting ", "ready to mine"]
@@ -689,10 +672,8 @@
     if (earned != null) lastEarned = earned;
     var units = w.session.accepted_units != null ? w.session.accepted_units : w.session.units;
     $("g-sub").textContent = "earned this session · " + units + " units in " + w.session.rounds + " rounds";
-    var ds = deepseekWait(w);
-    $("activity").textContent = ds ? "DeepSeek job " + ds.id : (w.activity || "–");
-    $("job").textContent = ds ? jobTitle(ds.id, null) : w.job ? "Job " + w.job.id + " · " + jobTitle(w.job.id, null) : "No job right now";
-    offer(ds, w);
+    $("activity").textContent = w.activity || "–";
+    $("job").textContent = w.job ? "Job " + w.job.id + " · " + jobTitle(w.job.id, null) : "No job right now";
     $("eyebrow").textContent = w.round == null ? "Mining" : "Round " + Number(w.round).toLocaleString() + (w.job ? " · job " + w.job.id : "");
     var a = w.account || {};
     text("balance", vibe(a.balance));
@@ -748,59 +729,26 @@
     }).catch(function () { worker = null; status(); });
   }
 
-  // ---- a DeepSeek job this worker isn't taking: what it is, and taking it ----
-  function offer(ds, w) {
-    var box = $("offer");
-    box.hidden = !ds;
-    if (!ds) return;
-    var optedIn = prefs && prefs.deepseek === "yes";
-    if (optedIn || (!api && !/--deepseek yes/.test(w.activity || ""))) {  // it said yes, or can't: the worker's reason
-      $("offer-text").textContent = "This computer isn't taking it: " + (w.activity || "").replace(/^job \S+ /, "") + ". Other jobs keep earning meanwhile.";
-      $("offer-yes").hidden = $("offer-cmd").hidden = true;
-    } else {
-      $("offer-text").textContent = "It needs about 30 GB of model files, deleted when the job ends, and a strong GPU. Other jobs keep earning meanwhile.";
-      $("offer-yes").hidden = !api; $("offer-cmd").hidden = !!api;
-    }
-  }
-  function mineDeepseek(on, then) {
-    if (!api) return;
-    api.set_deepseek(on).then(function (r) { if (prefs) prefs.deepseek = r.deepseek; if (then) then(r); status(); }).catch(function () {});
-  }
-  $("offer-yes").addEventListener("click", function () {
-    ask("Mine the DeepSeek job?", "Vibe Hash downloads about 30 GB of DeepSeek model files to your model store and deletes them when the job ends. Mining restarts to pick this up. You can turn it off in Settings.", "Mine it",
-        function () { mineDeepseek(true, function () { $("offer-text").textContent = "Starting again to take DeepSeek work. The model files download as its rounds need them."; $("offer-yes").hidden = true; }); });
-  });
-  $("offer-more").addEventListener("click", function () { var b = document.querySelector('.tabs button[data-tab="jobs"]'); if (b) b.click(); });
-
   // ---- jobs, in plain words ----
   // What each job is for is written here (the chain keeps only its settings); anything not listed is described from
   // those settings. `match` is a piece of the job's id, as on vibehash.org's front page.
   var JOBS = [
     { match: "think-shorter", title: "Teaching DeepSeek V4.1 Flash to think shorter",
-      about: "Long thinking is what makes answers slow. This job trains an add-on that teaches DeepSeek V4.1 Flash to reach the right answer in a few short steps, from 1,500 grade-school maths problems with short worked solutions. 500 more are held back to score it." },
+      about: "A pilot on DeepSeek V4.1 Flash, cancelled while its data was being prepared. That kind of job has since been removed from Vibe Hash." },
     { match: "pokemon-pun", title: "Teaching a small model to make Pokémon puns",
       about: "A test job: Qwen3 0.6B, a small chat model, learns to answer in Pokémon puns from a set of example chats." },
     { match: "fruit-demo", title: "Telling fruit apart from five measurements",
       about: "The starter job: a small model, trained from scratch, learns to tell bananas, oranges and other fruit apart from their weight, length, width, sweetness and colour." }
   ];
-  var TASKS = { countdown: "number puzzles", arithmetic: "arithmetic", gsm8k: "maths word problems", svamp: "maths word problems",
-                asdiv: "maths word problems", aqua_rat: "maths questions", sciq: "science questions", arc_easy: "science questions",
-                arc_challenge: "hard science questions", openbookqa: "science questions", qasc: "science questions",
-                trivia_qa: "trivia", nq_open: "general-knowledge questions", web_questions: "general-knowledge questions",
-                commonsense_qa: "common-sense questions", winogrande: "common-sense questions", hellaswag: "common-sense questions",
-                piqa: "everyday physical common sense", boolq: "yes-or-no reading questions", sst2: "the tone of movie reviews",
-                emotion: "the emotion in a sentence", ag_news: "sorting news headlines", ifeval: "following instructions exactly" };
   var specs = {}, jobsSeen = [], jobsShow = "live";
   function known(id) { for (var i = 0; i < JOBS.length; i++) if (String(id).indexOf(JOBS[i].match) >= 0) return JOBS[i]; return null; }
   function baseName(base) { var m = /^hf:[^/]+\/([^@]+)/.exec(base || ""); return m ? m[1].replace(/-/g, " ") : (base || "a model"); }
-  function taskName(es) { var k = es && es.task; return TASKS[k] || (k ? String(k).replace(/_/g, " ") : "its task"); }
-  function kindOf(spec) { return !spec ? null : spec.deepseek ? "DeepSeek" : spec.es ? "Evo" : spec.base ? "Fine-tune" : "From scratch"; }
+  function kindOf(spec) { return !spec ? null : spec.deepseek ? "DeepSeek (removed)" : spec.base ? "Fine-tune" : "From scratch"; }
   function jobTitle(id, spec) {
     var k = known(id);
     if (k) return k.title;
     spec = spec || specs[id];
     if (!spec) return "job " + id;
-    if (spec.es) return "Improving " + baseName(spec.base) + " at " + taskName(spec.es);
     if (spec.base) return "Fine-tuning " + baseName(spec.base);
     var m = spec.model || {};
     return m.n_in ? "A small model sorting " + m.n_in + " measurements into " + m.n_out + " groups" : "Training a model from scratch";
@@ -809,9 +757,7 @@
     var k = known(id);
     if (k) return k.about;
     if (!spec) return "Loading what this job trains…";
-    if (spec.deepseek) return "Trains an add-on for the top layers of " + baseName(spec.base) + ". Its owner hasn't described it yet.";
-    if (spec.es) return "Evo: miners try small random changes to " + baseName(spec.base) + " and keep the ones that answer " + taskName(spec.es) +
-      " better. No gradients, so ordinary GPUs and CPUs can help.";
+    if (spec.deepseek) return "A DeepSeek job: that kind of job was removed from Vibe Hash, so nobody mines it.";
     if (spec.base) return "Teaches " + baseName(spec.base) + " a new style or skill with a small add-on, from example chats its owner supplied. Its owner hasn't described it yet.";
     var m = spec.model || {};
     return "A small model trained from scratch" + (m.n_in ? ", taking " + m.n_in + " numbers in and picking one of " + m.n_out + " answers" : "") + ". Its owner hasn't described it yet.";
@@ -859,7 +805,7 @@
       if (j.status !== "finished") {  // whether Pick your vibe has this one in its choice
         var chosen = !prefs || !prefs.jobs || prefs.jobs.indexOf(j.id) >= 0, ok = takes(j);
         mark.className = ok && chosen ? "in" : "out";
-        mark.textContent = !ok ? "Off · turn on DeepSeek jobs in Settings" : chosen ? "✓ In your vibe" : "Not in your vibe";
+        mark.textContent = !ok ? "Off · a kind of job Vibe Hash no longer runs" : chosen ? "✓ In your vibe" : "Not in your vibe";
         foot.appendChild(mark);
       }
       card.appendChild(foot);
@@ -879,7 +825,7 @@
   // saved`): null is every open job, new ones included; a list is those jobs only. Built from the node's open jobs.
   var vibeMode = "pick", vibeAll = true, vibePicked = {}, vibeOffered = false;
   function liveJobs() { return jobsSeen.filter(function (j) { return j.status !== "finished"; }); }
-  function takes(j) { var spec = specs[j.id]; return !(spec && spec.deepseek) || !!(prefs && prefs.deepseek === "yes"); }
+  function takes(j) { var spec = specs[j.id]; return !(spec && spec.deepseek); }  // (DeepSeek jobs were removed)
   function vibeName(jobs) { return !jobs ? "All open jobs" : jobs.length === 1 ? jobTitle(jobs[0], null) : jobs.length + " jobs"; }
   function showVibeName() {
     var name = vibeName(prefs ? prefs.jobs : null);
@@ -918,7 +864,7 @@
       box.className = "box"; box.setAttribute("aria-hidden", "true"); what.className = "what"; top.className = "top";
       t.textContent = jobTitle(j.id, spec);
       tag.className = "pill " + (live ? "good" : "wait"); tag.textContent = live ? "Training now" : "Waiting for miners";
-      meta.textContent = ok ? (kindOf(spec) || "Job") + " · " + j.id : "Needs about 30 GB and a big GPU · turn on DeepSeek jobs in Settings to take it";
+      meta.textContent = ok ? (kindOf(spec) || "Job") + " · " + j.id : "A kind of job Vibe Hash no longer runs · " + j.id;
       top.appendChild(t); top.appendChild(tag); what.appendChild(top); what.appendChild(meta);
       b.appendChild(box); b.appendChild(what);
       b.addEventListener("click", function () { vibePicked[j.id] = !vibePicked[j.id]; vibeAll = false; drawVibe(); });
@@ -1024,7 +970,7 @@
   $("stop").addEventListener("click", function () { ask("Stop mining?", "The worker leaves its round and the app closes. Start Vibe Hash again to carry on.", "Stop", function () { order("stop"); }); });
 
   // ---- settings ----
-  var settingsIds = ["set-fullscreen", "set-battery", "set-idle", "set-minutes", "set-startup", "set-avatar", "set-calm", "set-operator", "set-cap", "set-open", "cache-clear"];
+  var settingsIds = ["set-fullscreen", "set-battery", "set-idle", "set-minutes", "set-startup", "set-avatar", "set-calm", "set-operator", "set-open"];
   settingsIds.forEach(function (id) { $(id).disabled = true; });
   var welcomeOffered = false;
   function loadSettings() {
@@ -1040,7 +986,6 @@
       sel.value = String(c.idle_minutes); sel.disabled = !sup.idle_only;
       prefs = c;
       $("set-avatar").checked = !!c.avatar; $("set-startup").checked = !!c.startup; $("set-calm").checked = !!c.reduced_motion;
-      $("set-deepseek").checked = c.deepseek === "yes";
       document.body.classList.toggle("calm", !!c.reduced_motion);
       $("set-operator").checked = !!c.operator_view;
       if (document.body.classList.toggle("operator", !!c.operator_view)) history();
@@ -1065,28 +1010,10 @@
   $("set-minutes").addEventListener("change", function () { option("idle_minutes", Number($("set-minutes").value)); });
   $("set-calm").addEventListener("change", function () { document.body.classList.toggle("calm", $("set-calm").checked); option("reduced_motion", $("set-calm").checked); });
   $("set-operator").addEventListener("change", function () { document.body.classList.toggle("operator", $("set-operator").checked); option("operator_view", $("set-operator").checked); });
-  $("set-deepseek").addEventListener("change", function () { mineDeepseek($("set-deepseek").checked, loadSettings); });
   $("set-avatar").addEventListener("change", function () { if (api) api.set_avatar($("set-avatar").checked).catch(function () {}); });
   $("set-startup").addEventListener("change", function () { if (api) api.set_startup($("set-startup").checked).then(loadSettings).catch(function () {}); });
   $("set-open").addEventListener("click", function () { if (api) api.open_home().catch(function () {}); });
   $("set-welcome").addEventListener("click", function () { welcome(1); });
-  function gb(n) { return (n / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " GB"; }
-  function loadCache() {
-    if (!api) return;
-    api.cache().then(function (c) {
-      if (!c.ok) { $("cache-text").textContent = c.why; return; }
-      $("cache-text").textContent = gb(c.used) + " of " + gb(c.cap) + " in " + c.folder + " · " + c.files + " files";
-      $("cache-meter").style.width = Math.min(100, Math.round(100 * c.used / c.cap)) + "%";
-      if (document.activeElement !== $("set-cap")) $("set-cap").value = String(Math.round(c.cap / 1e9));
-      $("cache-clear").textContent = c.used ? "Clear " + gb(c.used) : "Nothing to clear"; $("cache-clear").disabled = !c.used;
-    }).catch(function () {});
-  }
-  $("set-cap").addEventListener("change", function () { if (api) api.set_cache_cap(Number($("set-cap").value)).then(loadCache).catch(function () {}); });
-  $("cache-clear").addEventListener("click", function () {
-    ask("Clear the model files?", "This deletes the downloaded model files. Jobs that need them download them again.", "Clear", function () {
-      api.clear_cache().then(function (r) { $("clear-note").textContent = r.ok ? "Freed " + gb(r.freed) + "." : r.why; loadCache(); }).catch(function () {});
-    });
-  });
   function loadNode() {
     if (!api) return;
     api.node().then(function (n) {

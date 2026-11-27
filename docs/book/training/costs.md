@@ -7,7 +7,7 @@ This page explains what you pay for a training job, how your budget is spent rou
 | | What it is | Default with `train` |
 |---|---|---|
 | **Budget** (`--budget`) | The most the whole job can spend, in VIBE. | 100 VIBE |
-| **Fee per round** (`--fee`) | What one round of training pays, when every unit of work in it passes. | 10 VIBE (an Evo job's: 1 VIBE) |
+| **Fee per round** (`--fee`) | What one round of training pays, when every unit of work in it passes. | 10 VIBE |
 
 Roughly, the budget divided by the fee is how many rounds you get: 100 VIBE at 10 VIBE a round is up to 10 rounds. `train` prints this before you post, and a fine-tune's plan also says how many passes over your data (epochs) that buys.
 

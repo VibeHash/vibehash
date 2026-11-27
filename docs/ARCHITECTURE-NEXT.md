@@ -21,7 +21,7 @@ once checking it is cheap. So they share one design, and 2 is built first becaus
 ## 1. The app
 
 **Today.** Everything is the `vibehash` command (`cli.py`), with a menu when run with no arguments
-(`menu.py`), a live mining scene in the terminal (`minerui.py`, `esui.py` for Evo) and a training
+(`menu.py`), a live mining scene in the terminal (`minerui.py`) and a training
 dashboard (`trainui.py`). The node already computes what a public page needs at `GET /network`
 (`netstats.py`: who mined in the last ten minutes, what is training, how well), and reputation is a
 number on every account (`economics.update_reputation`, shown by `vibehash balance`). `setup --yes` and

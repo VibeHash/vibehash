@@ -180,15 +180,13 @@ class SpecPublicTests(unittest.TestCase):
             self.assertEqual(back.public, kw.get("public"))
             self.assertEqual(back.spec_json(), job.spec_json())
 
-    def test_fine_tune_and_es_specs_refuse_public_for_now(self):
-        from vibehash.tasks import InvalidJob
-        from vibehash.es import ES_KEYS
-        from vibehash.tasks import FINETUNE_KEYS
-        self.assertNotIn("public", ES_KEYS | FINETUNE_KEYS)
-        for d in ({"id": "j", "lora": {}, "model": {"x": 1}, "public": True},
-                  {"id": "j", "es": {}, "model": {"x": 1}, "public": True}):
-            with self.assertRaisesRegex(InvalidJob, "public"):
-                TrainingJob.from_spec_json(json.dumps(d), OWNER.address, 0)
+    def test_fine_tune_specs_refuse_public_for_now(self):
+        from vibehash.tasks import FINETUNE_KEYS, InvalidJob
+        self.assertNotIn("public", FINETUNE_KEYS)  # (an Evo spec is refused whole: tasks.RetiredJob)
+        with self.assertRaisesRegex(InvalidJob, "public"):
+            TrainingJob.from_spec_json(json.dumps({"id": "j", "lora": {}, "model": {"x": 1}, "public": True}), OWNER.address, 0)
+        with self.assertRaisesRegex(InvalidJob, "removed"):
+            TrainingJob.from_spec_json(json.dumps({"id": "j", "es": {}, "model": {"x": 1}, "public": True}), OWNER.address, 0)
 
     def test_a_public_that_is_not_a_bool_is_accepted_as_unsaid(self):
         # Nodes before 0.5.28 ignore unknown MLP fields, so a post_job with a non-bool `public` is valid there: refusing

@@ -24,7 +24,6 @@ Every `vibehash` command and flag, written from the command line's own parser by
 - [`vibehash avatar`](avatar.md): a small always-on-top pickaxe on the desktop that shows what the worker is doing; click it for the window, right-click for pause, resume and more
 - [`vibehash window`](window.md): the app's window: the mining dashboard in a window of its own, beside a running `app` or `worker --watch`
 - [`vibehash admin`](admin.md): the operators' window: a globe of where devices connect from, the jobs to confirm, deny, cancel or post, the ledger live, the devices and the nodes
-- [`vibehash cache`](cache.md): big model files kept for jobs: where, how big and why; `cache clear` removes them
 - [`vibehash devices`](devices.md): list the CPUs and GPUs this computer can train on
 - [`vibehash selftest`](selftest.md): check this computer is ready to mine: a real training test, its GPUs, the node, the clock, disk space, and what it can take
 - [`vibehash balance`](balance.md): an address's balance, stake, coins unbonding and reputation
@@ -39,5 +38,4 @@ Every `vibehash` command and flag, written from the command line's own parser by
 - [`vibehash models`](models.md): popular open-weight models to fine-tune (coming), with their size, licence and the GPUs a team would need
 - [`vibehash predict`](predict.md): use a downloaded model on new rows of a CSV file
 - [`vibehash job`](job.md): training jobs: how one is going, follow it live, download its model, its history, or a starter job file
-- [`vibehash evo`](evo.md): Evo Hash's models
 - [`vibehash chain`](chain.md): audit the chain yourself, without trusting the node

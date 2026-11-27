@@ -1,5 +1,9 @@
 # GPUs: what can mine Vibe Hash, and how well
 
+> **Written while Evo was part of VibeHash.** Evo (and DeepSeek) were removed after 0.5.28; main at 458a849 has their
+> code. The Evo column, rows and risks below describe code that no longer exists. The classic and fine-tune parts still
+> hold.
+
 November 2026, Vibe Hash 0.5.26, PyTorch 2.15.0 (released 2026-10-28). Only an RTX 4070 SUPER and its CPU were
 on hand, so every other card here is from documentation, PyTorch's own source, and issue reports (sources at the
 end), plus measurements on the 4070 SUPER that stand in for other kinds of hardware where that's possible.

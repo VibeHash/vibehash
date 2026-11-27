@@ -55,7 +55,6 @@ PYPI = "https://pypi.org/pypi/vibehash/json"
 UPDATE_EVERY_S = 6 * 3600.0
 # Switches the Settings tab may set in config.json (and idle_minutes, one of presence.IDLE_CHOICES).
 OPTIONS = presence.OPTIONS + ("reduced_motion", "operator_view")  # the last two are the window's own: less movement, and the panes in place of the ring
-CAP_GB = (5, 2000)  # the model store's cap, as Settings' slider allows it
 # Keys whose values a diagnostic report never carries, at any depth (redact).
 SECRET = re.compile(r"word|mnemonic|seed|private|secret|password|passphrase|token|mfa", re.I)
 
@@ -187,7 +186,6 @@ class Api:
         return {"avatar": bool(cfg.get("avatar", True)), "welcomed": bool(cfg.get("welcomed", False)),
                 "startup": app_module.startup_is_on(), "home": str(settings.home()), "version": _version(),
                 **{k: bool(cfg.get(k, False)) for k in OPTIONS}, "idle_minutes": presence.idle_minutes(cfg),
-                "deepseek": settings.deepseek_choice(cfg), "deepseek_pilot": settings.deepseek_pilot(),
                 "idle_choices": list(presence.IDLE_CHOICES), "supported": presence.supported(),
                 "words_file": _words_file_present(), "words_pending": _words_pending(), **_launcher(),
                 "jobs": settings.saved_jobs(cfg), "jobs_ask": bool(cfg.get("jobs_ask", False)),
@@ -205,17 +203,6 @@ class Api:
             return {"ok": False, "why": f"no such setting: {name}"}
         settings.save(**{name: value})
         return {"ok": True, name: value}
-
-    def set_deepseek(self, on: bool) -> dict:
-        """Whether the worker takes DeepSeek work (about 30 GB of model files, deleted when the job ends), as
-        `vibehash worker --deepseek yes|no` would remember it. The worker reads it as it starts, so a running app is
-        told to start its worker again."""
-        if not isinstance(on, bool):
-            return {"ok": False, "why": "on is true or false"}
-        settings.save(deepseek="yes" if on else "no")
-        if app_module.running():
-            app_module.order("restart")
-        return {"ok": True, "deepseek": "yes" if on else "no"}
 
     def set_jobs(self, jobs, ask=None) -> dict:
         """Pick your vibe: the jobs the app's worker mines, a list of job ids, or None for every open job, new ones
@@ -281,37 +268,6 @@ class Api:
             return {"ok": False, "why": "not a link the app opens"}
         OPEN(url)
         return {"ok": True, "url": url}
-
-    # -- storage --
-
-    def cache(self) -> dict:
-        """The model store (big downloads: modelstore.py): where, how much it holds, its cap."""
-        from . import modelstore
-        try:
-            store = modelstore.Store.from_settings()
-            return {"ok": True, "folder": str(store.folder), "used": store.usage(), "cap": store.cap,
-                    "files": len(store.files), "cap_range_gb": list(CAP_GB)}
-        except OSError as e:
-            return {"ok": False, "why": str(e)}
-
-    def set_cache_cap(self, gb) -> dict:
-        from . import modelstore
-        if isinstance(gb, bool) or not isinstance(gb, (int, float)) or not CAP_GB[0] <= gb <= CAP_GB[1]:
-            return {"ok": False, "why": f"the cap is {CAP_GB[0]} to {CAP_GB[1]} GB"}
-        store = modelstore.Store.from_settings(cap=int(gb * modelstore.GB))
-        store.remember()
-        return {"ok": True, "cap": store.cap}
-
-    def clear_cache(self) -> dict:
-        """Empty the model store, only while nothing is mining: a worker mid-round may be reading those files."""
-        from . import modelstore
-        s = app_module.read_state() or {}
-        if app_module.running(s) and not s.get("paused") and (s.get("worker") or {}).get("running"):
-            return {"ok": False, "why": "pause mining first: the worker may be using these files"}
-        try:
-            return {"ok": True, "freed": modelstore.Store.from_settings().clear()}
-        except OSError as e:
-            return {"ok": False, "why": str(e)}
 
     # -- the network --
 

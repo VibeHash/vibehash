@@ -3,7 +3,7 @@
 Train a model on a CSV file: posts it as a job for the network to train.
 
 ```
-vibehash train [-h] [--base MODEL] [--rank RANK] [--lr LR] [--max-len MAX_LEN] [--units UNITS] [--yes] [--label LABEL] [--instructions INSTRUCTIONS] [--labels LABELS.json] [--evo] [--budget BUDGET] [--fee FEE] [--hidden HIDDEN] [--id ID] [--node NODE] [--wallet WALLET] [--plain] [--tor] [--proxy URL] [--tor-mode {control-only,strict}] [data]
+vibehash train [-h] [--base MODEL] [--rank RANK] [--lr LR] [--max-len MAX_LEN] [--units UNITS] [--yes] [--label LABEL] [--instructions INSTRUCTIONS] [--labels LABELS.json] [--budget BUDGET] [--fee FEE] [--hidden HIDDEN] [--id ID] [--node NODE] [--wallet WALLET] [--plain] [--tor] [--proxy URL] [--tor-mode {control-only,strict}] [data]
 ```
 
 Arguments:
@@ -21,9 +21,8 @@ Flags:
 - `--label LABEL`: the column to predict (default: the last one; a decision model's: label).
 - `--instructions INSTRUCTIONS`: decision models (a Laya checkpoint as --base, a file of text,label rows): the question the model answers about each text (default: Laya's "Classify the input into the correct category.").
 - `--labels LABELS.json`: decision models: a JSON object of {"label": "description"}, read as the options and their order; Laya reads each as "label: description".
-- `--evo`: Evo mode: post an Evo job, training --base (default Qwen/Qwen2.5-0.5B-Instruct) by evolution on puzzles the chain draws, no data file. For local test networks for now (`testnet --evo`).
 - `--budget BUDGET`: VIBE to spend, paid only for work that passes its checks (default 100).
-- `--fee FEE`: VIBE per round of training (default 10; an Evo job's 1).
+- `--fee FEE`: VIBE per round of training (default 10).
 - `--hidden HIDDEN`: hidden layer widths (default 128,128).
 - `--id ID`: job name (default: from the file name).
 - `--node NODE`: node address (default: the one `setup` saved).

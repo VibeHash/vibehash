@@ -232,16 +232,13 @@ class RoundLog:
 
     A line's fields, those that apply: time (when written), host, pid (for two workers on one computer), worker, node
     (and leader, if the round ran at another validator), registered (when), chain_id, round, attempt, job, kind (mlp,
-    finetune, deepseek-prep, deepseek-training), device, speed_flops_per_s (what it registered with), assigned,
+    finetune), device, speed_flops_per_s (what it registered with), assigned,
     trained, committed, revealed, accepted (units),
     accepted_flops, rejected ([{unit, why}] the node refused at the reveal), missed, slashed ([reasons]), caught
     ([reasons] others were slashed for, on this worker's word), checks (verdicts sent), checks_given, check_kinds,
     found_bad (results this worker rejected), dispute_moves, earned_vibe, paid ({work, verify, propose} in VIBE),
-    lost_vibe, bounty_vibe, balance_vibe, stake_vibe, reputation (after the round), train_s, upload_s, check_s, prep
-    ([a DeepSeek prep unit's own stats: seconds, tokens a second, peak GPU memory, transfers]), evo_s and evo_check_s
-    ({part: seconds} of an Evo round's answering and checks: catch_up, prompts, noise, gpu_wait, load, answer, replay,
-    texts, upload; fetch, validate, gaps; es_client._Laps), note, outcome (in
-    words), sealed, block_time, mining (the one job it was set to mine, when it wasn't mining every job)."""
+    lost_vibe, bounty_vibe, balance_vibe, stake_vibe, reputation (after the round), train_s, upload_s, check_s, note,
+    outcome (in words), sealed, block_time, mining (the one job it was set to mine, when it wasn't mining every job)."""
 
     def __init__(self, path, address: str, node: str, device: str, host: str | None = None):
         self.path, self.address, self.node, self.device = Path(path), address, node.rstrip("/"), device
@@ -363,9 +360,6 @@ def settle(e: dict, block, me: str, extra: dict | None = None) -> dict:
     """What a round's block says of this worker's part in it, for its line (RoundLog's fields). The block came from a
     node, so every field is checked before it's read."""
     out: dict = {"sealed": isinstance(block, dict)}
-    kind = e.get("kind")
-    if kind == "deepseek" and isinstance(extra, dict) and "prep" in extra:
-        out["kind"] = "deepseek-prep" if extra["prep"] else "deepseek-training"
     if isinstance(extra, dict) and extra.get("attempt") and e.get("attempt") and extra["attempt"] != e["attempt"]:
         out["note"] = "the block came from another attempt at this round than the one this worker joined (it was run again)"
     if not isinstance(block, dict):
@@ -626,7 +620,7 @@ def _model_words(spec: dict) -> str:
         rank, alpha = _uint(lora.get("rank")), _real(lora.get("alpha"))
         targets = [t for t in lora.get("targets") or [] if isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", t)] \
             if isinstance(lora.get("targets"), list) else []
-        kind = "DeepSeek top-layers fine-tune" if "deepseek" in spec else "fine-tune"
+        kind = "fine-tune"
         shape = ", ".join(x for x in (f"rank {rank}" if rank else "", f"alpha {alpha:g}" if alpha else "",
                                        f"on {', '.join(targets)}" if targets else "") if x)
         return f"a LoRA adapter ({kind}{'; ' + shape if shape else ''}) for `{base}`"

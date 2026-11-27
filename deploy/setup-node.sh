@@ -18,18 +18,17 @@
 # --enable-tor also gives the node a Tor hidden service (an .onion address), so Tor users can reach it without going
 # through Cloudflare's exit-node blocks.
 #
-# A second network on the same server (an Evo Hash testnet beside the main one, say) is a named node with its own
+# A second network on the same server (a staging testnet beside the main one, say) is a named node with its own
 # port, folders and service, sharing the server's Vibe Hash install:
 #
-#   sudo bash setup-node.sh --name evo --domain evo.vibehash.org --port 8443 --chain-id vibehash-evo-1 --es \
+#   sudo bash setup-node.sh --name staging --domain staging.example.org --port 8443 --chain-id example-staging-1 \
 #     --stake vibe1...=10 --fund vibe1...=10000
 #
 # --name NAME keeps it in /var/lib/vibehash-NAME and /etc/vibehash-NAME, run by the service vibehash-node-NAME.
-# --es makes a network that takes Evo Hash jobs, and --stake gives a wallet stake from the start (an Evo job's work
-# is checked only by staked workers, so newcomers can earn theirs only once someone is staked). Both, like --fund,
-# only count when the genesis is made, the first time. Upgrading one node upgrades the shared install, so restart
-# the others too (systemctl restart 'vibehash-node*') to run the same release. A node whose genesis takes Evo jobs also
-# gets the `datasets` library and the Evo tasks' questions, in its own folder: it re-scores miners' answers with them.
+# --stake gives a wallet stake from the start (a fine-tune's work is checked only by staked workers, so newcomers can
+# earn theirs only once someone is staked). It, like --fund, only counts when the genesis is made, the first time.
+# Upgrading one node upgrades the shared install, so restart the others too (systemctl restart 'vibehash-node*') to
+# run the same release.
 # The domain's A record must already point at this server (or at Cloudflare's proxy, in front of it). Getting the certificate accepts Let's Encrypt's terms
 # (https://letsencrypt.org/repository/). The email is optional: certificates renew by themselves, and Let's Encrypt
 # only uses it for account notices.
@@ -41,7 +40,7 @@
 #
 # The genesis is checked against what the seed itself says (/status) and, with --genesis-hash, against the hash you
 # read from a node you already trust (its /status genesis_hash, or `vibehash admin`), so a seed that isn't the
-# network's can't hand this server another chain. --fund, --stake, --es, --economics and --chain-id only shape a new
+# network's can't hand this server another chain. --fund, --stake, --economics and --chain-id only shape a new
 # genesis, so they don't go with --follow. The server starts as a follower; it becomes a validator only by staking
 # and joining (`vibehash validator join`), which the last lines say how to do.
 #
@@ -53,7 +52,7 @@
 # (journalctl -u vibehash-node), fix the cause, and start it with systemctl.
 set -euo pipefail
 
-DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 ES="" TOR="" STAKES=() TRUST_DNS=""
+DOMAIN="" EMAIL="" FUND="" CHAIN_ID="vibehash-public-1" ECONOMICS="mainnet" NAME="" PORT=443 TOR="" STAKES=() TRUST_DNS=""
 FOLLOW="" GENESIS_HASH="" SHAPES=""  # SHAPES: an option that only shapes a new genesis was given
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,7 +63,6 @@ while [ $# -gt 0 ]; do
     --economics) ECONOMICS="$2"; SHAPES=1; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
-    --es) ES=1; SHAPES=1; shift ;;
     --enable-tor) TOR=1; shift ;;
     --stake) STAKES+=("$2"); SHAPES=1; shift 2 ;;
     --trust-proxy-dns) TRUST_DNS=1; shift ;;
@@ -75,7 +73,7 @@ while [ $# -gt 0 ]; do
 done
 if [ -z "$DOMAIN" ]; then
   echo "usage: bash setup-node.sh --domain node.example.org [--fund vibe1...=VIBE] [--email you@example.org]"
-  echo "       [--name NAME --port PORT --chain-id ID] [--es] [--stake vibe1...=VIBE] [--enable-tor] [--trust-proxy-dns]"
+  echo "       [--name NAME --port PORT --chain-id ID] [--stake vibe1...=VIBE] [--enable-tor] [--trust-proxy-dns]"
   echo "       [--follow https://a-node-of-the-network --genesis-hash HEX]"
   exit 1
 fi
@@ -83,7 +81,7 @@ fi
 [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "--port takes a port number"; exit 1; }
 if [ -n "$FOLLOW" ]; then
   [[ "$FOLLOW" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || { echo "--follow takes a node's address, such as https://node.example.org"; exit 1; }
-  [ -z "$SHAPES" ] || { echo "--fund, --stake, --es, --economics and --chain-id make a new network: not with --follow"; exit 1; }
+  [ -z "$SHAPES" ] || { echo "--fund, --stake, --economics and --chain-id make a new network: not with --follow"; exit 1; }
   [ -z "$GENESIS_HASH" ] || [[ "$GENESIS_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo "--genesis-hash takes 64 hex digits"; exit 1; }
 elif [ -n "$GENESIS_HASH" ]; then
   echo "--genesis-hash goes with --follow"; exit 1
@@ -187,34 +185,12 @@ elif [ ! -f "$GENESIS" ]; then
   args=(genesis create --chain-id "$CHAIN_ID" --economics "$ECONOMICS" --out "$GENESIS"
         --bootstrap "$ADDRESS=10" --validator "$ADDRESS=$URL")
   [ -n "$FUND" ] && args+=(--alloc "$FUND")
-  [ -n "$ES" ] && args+=(--es)
   for s in "${STAKES[@]}"; do args+=(--stake "$s"); done
   as_node "$VH" "${args[@]}"
 fi
 
-# A network that takes Evo jobs: the node re-scores every miner's answers with the task's own questions (es_tasks),
-# which come from Hugging Face datasets. Without the `datasets` library every reveal fails ("TaskUnavailable") and no
-# Evo work is ever accepted. They go in the node's own folder (the service may write only there), fetched now for the
-# public Evo job's tasks so the first rounds don't time out waiting for downloads; other tasks come on first use.
-# Its rounds also get a 180 s verify phase: a checker teacher-forces two members' 512-token answers to 16 problems a
-# task, which took longer than an Evo job's own ~67 s on vibehash-evo-1, so checks were left undone and the checkers
-# missed the next round's registration (every other round empty). The node takes the longer of its own and the job's.
 NODE_ARGS=""
 [ -z "$FOLLOW" ] || NODE_ARGS="--peer $FOLLOW"  # where it syncs from (the validators it finds on chain as well)
-if python3 -c "import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get('es') is True else 1)" "$GENESIS"; then
-  NODE_ARGS="$NODE_ARGS --verify-s 180"
-  say "Getting the Evo tasks' questions (the node re-scores answers with them)"
-  "$VENV/bin/pip" install -q --upgrade 'datasets>=2.18'
-  grep -q '^HF_HOME=' "$ETC/env" || echo "HF_HOME=$DATA/hf" >> "$ETC/env"
-  set -a; . "$ETC/env"; set +a
-  install -d -m 750 -o vibehash -g vibehash "$HF_HOME"
-  as_node "$VENV/bin/python" - <<'PY'
-from vibehash import es_tasks
-for t in es_tasks.VIBE:
-    es_tasks.get(t).items(0, 1)
-print(f"{len(es_tasks.VIBE)} tasks ready")
-PY
-fi
 
 say "Opening the firewall for HTTP (certificate renewals) and HTTPS"
 # SSH is opened to everyone only the first time, while the firewall is still off, so this run can't lock you out.
@@ -305,7 +281,7 @@ install -d -m 750 -o vibehash -g vibehash "$DATA/backup"  # (the backup stage; t
 for f in "${SHARED[@]}"; do install -m 755 "$HERE/$f" /usr/local/lib/vibehash/; done
 ALERT=vibehash-alert$SUFFIX@ NAMEARG=${NAME:+--name $NAME}
 for f in "${UNITS[@]}"; do
-  stem=${f%%[@.]*}  # vibehash-backup.timer -> vibehash-backup-evo.timer, vibehash-alert@.service -> vibehash-alert-evo@.service
+  stem=${f%%[@.]*}  # vibehash-backup.timer -> vibehash-backup-staging.timer, vibehash-alert@.service -> vibehash-alert-staging@.service
   installed=$stem$SUFFIX${f#"$stem"}
   sed -e "s|@URL@|$URL|g; s|@ETC@|$ETC|g; s|@DATA@|$DATA|g; s|@ALERT@|$ALERT|g; s|@SUFFIX@|$SUFFIX|g; s|@NAMEARG@|$NAMEARG|g" \
     "$HERE/$f" > "/etc/systemd/system/$installed"

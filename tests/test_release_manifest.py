@@ -53,12 +53,10 @@ class PinTests(unittest.TestCase):
         out = RM.pin_wheel(RM.pin_wheel(COMPILED, "9.9.9", "b" * 64), "9.9.9", "b" * 64)
         self.assertEqual(out.count("vibehash=="), 1)
 
-    def test_neither_file_has_torch_and_the_evo_one_has_the_evo_extra(self):
-        for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
-            self.assertIn("--no-emit-package torch", " ".join(cmd))
-            self.assertIn("--universal", cmd)
+    def test_the_file_has_no_torch(self):
+        self.assertIn("--no-emit-package torch", " ".join(RM.COMPILE_BASE))
+        self.assertIn("--universal", RM.COMPILE_BASE)
         self.assertNotIn("evo", RM.COMPILE_BASE)
-        self.assertIn("evo", RM.COMPILE_EVO)
 
 
 class ProjectFieldTests(unittest.TestCase):
@@ -79,15 +77,14 @@ class ProjectFieldTests(unittest.TestCase):
 
 
 class CompileTests(unittest.TestCase):
-    def test_compile_writes_both_files_by_running_uv_and_needs_no_key(self):
+    def test_compile_writes_the_file_by_running_uv_and_needs_no_key(self):
         calls = []
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("RELEASE_SIGNING_KEY", None)
             RM.compile_requirements(Path(tmp) / "reqs", "9.9.9", run=lambda cmd, **kw: calls.append(cmd))
         self.assertEqual([c[-1].replace("\\", "/").rsplit("/", 1)[-1] for c in calls],
-                         ["requirements-9.9.9.txt", "requirements-9.9.9-evo.txt"])
+                         ["requirements-9.9.9.txt"])
         self.assertEqual(calls[0][:-2], RM.COMPILE_BASE)
-        self.assertEqual(calls[1][:-2], RM.COMPILE_EVO)
 
 
 class BuildTests(unittest.TestCase):
@@ -101,7 +98,6 @@ class BuildTests(unittest.TestCase):
         self.reqs = self.dist / "reqs"
         self.reqs.mkdir()
         (self.reqs / "requirements-9.9.9.txt").write_text(COMPILED, encoding="utf-8")
-        (self.reqs / "requirements-9.9.9-evo.txt").write_text(COMPILED + "transformers==4.0 \\\n    --hash=sha256:" + "d" * 64 + "\n", encoding="utf-8")
         self.key = crypto.KeyPair.generate(b"release-manifest-test")
 
     def run_it(self, key="hex", **kw):
@@ -109,21 +105,21 @@ class BuildTests(unittest.TestCase):
         return RM.make_release(self.dist, "9.9.9", env=env, now=1700000000, reqs=self.reqs, **kw)
 
     def test_the_manifest_has_exactly_the_agreed_fields(self):
+        """requirements_evo names the one file: Evo was cut after 0.5.28, and readers up to then require the field."""
         self.run_it()
         manifest = json.loads((self.reqs / "release.json").read_text(encoding="utf-8"))
         reqs = (self.reqs / "requirements-9.9.9.txt").read_bytes()
-        evo = (self.reqs / "requirements-9.9.9-evo.txt").read_bytes()
         self.assertEqual(manifest, {
             "version": "9.9.9", "wheel": self.wheel.name, "wheel_sha256": hashlib.sha256(b"PK fake wheel").hexdigest(),
             "requirements": "requirements-9.9.9.txt", "requirements_sha256": hashlib.sha256(reqs).hexdigest(),
-            "requirements_evo": "requirements-9.9.9-evo.txt", "requirements_evo_sha256": hashlib.sha256(evo).hexdigest(),
+            "requirements_evo": "requirements-9.9.9.txt", "requirements_evo_sha256": hashlib.sha256(reqs).hexdigest(),
             "published": 1700000000, "min_launcher": "1.2"})
         self.assertEqual(tuple(manifest), RM.FIELDS)
         self.assertEqual(len(RM.FIELDS), 9)
 
     def test_the_requirements_pin_the_built_wheel(self):
         self.run_it()
-        for name in ("requirements-9.9.9.txt", "requirements-9.9.9-evo.txt"):
+        for name in ("requirements-9.9.9.txt",):
             text = (self.reqs / name).read_text(encoding="utf-8")
             self.assertIn("vibehash==9.9.9 \\\n    --hash=sha256:" + hashlib.sha256(b"PK fake wheel").hexdigest(), text)
 
@@ -228,11 +224,10 @@ class WorkflowTests(unittest.TestCase):
         text = (ROOT / "scripts" / "uv-requirements.txt").read_text(encoding="utf-8")
         self.assertRegex(text, r"^uv==\d+\.\d+\.\d+(?: \\\n    --hash=sha256:[0-9a-f]{64})+\n$")
 
-    def test_the_two_compiles_are_the_ones_the_script_names(self):
+    def test_the_compile_is_the_one_the_script_names(self):
         for flag in ("--generate-hashes", "--universal", "--no-emit-package torch", "--python-version 3.10",
                      "--extra finetune", "--extra app"):
-            for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
-                self.assertIn(flag, " ".join(cmd))
+            self.assertIn(flag, " ".join(RM.COMPILE_BASE))
 
     def test_the_compiles_resolve_for_the_oldest_python_the_project_supports(self):
         """--python-version is uv's resolution floor: compiled for 3.12, `vibehash update` on 3.10 or 3.11 would meet
@@ -240,8 +235,8 @@ class WorkflowTests(unittest.TestCase):
         import re
         floor = re.fullmatch(r">=\s*(\d+\.\d+)", RM.project_field((ROOT / "pyproject.toml").read_text(encoding="utf-8"),
                                                                     "requires-python").strip()).group(1)
-        for cmd in (RM.COMPILE_BASE, RM.COMPILE_EVO):
-            self.assertEqual(cmd[cmd.index("--python-version") + 1], floor)
+        cmd = RM.COMPILE_BASE
+        self.assertEqual(cmd[cmd.index("--python-version") + 1], floor)
 
     def test_a_tag_build_of_the_launcher_needs_a_release_key_and_a_release_race_is_tolerated(self):
         step = self.launcher.split("Refuse to release a launcher that has no release key", 1)[1].split("- name:", 1)[0]

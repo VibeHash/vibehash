@@ -366,8 +366,8 @@ def spare_bytes(device) -> int:
 def no_fill():
     """PyTorch's deterministic mode (compute.TorchBackend) fills every new block of memory with NaN, about 9,000 extra
     kernels a fine-tune step. A fine-tune's ops write each tensor whole before anything reads it, so the fill changes no
-    number. It's off only while a fine-tune runs, and put back after: DeepSeek's code makes weights with torch.empty
-    and then loads them, and relies on the fill."""
+    number. It's off only while a fine-tune runs, and put back after: other code may make tensors with torch.empty and
+    rely on the fill."""
     det = getattr(torch.utils, "deterministic", None)
     if det is None or not hasattr(det, "fill_uninitialized_memory"):
         yield

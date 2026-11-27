@@ -3,19 +3,20 @@
 
 Two steps, in two jobs of the publish workflow, so the signing key never meets third-party code:
 
-    python scripts/release_manifest.py compile --out reqs     # `build` job, no key: runs uv (COMPILE_BASE, COMPILE_EVO)
+    python scripts/release_manifest.py compile --out reqs     # `build` job, no key: runs uv (COMPILE_BASE)
     python scripts/release_manifest.py sign --dist dist --reqs reqs   # `manifest` job, after PyPI: stdlib + vibehash.crypto only
 
-`compile` writes reqs/requirements-<version>.txt (the launcher's install set: the finetune and app extras) and
-reqs/requirements-<version>-evo.txt (those plus the evo extra, for the menu's Evo Hash and `vibehash update --evo`).
-They go in their own artifact, not dist/, which the PyPI upload reads. `sign` does three things:
-1. pins the wheel: the `vibehash==<version>` line of both files gets the built wheel's own sha256 (added if the
+`compile` writes reqs/requirements-<version>.txt (the launcher's install set: the finetune and app extras). It goes in
+its own artifact, not dist/, which the PyPI upload reads. `sign` does three things:
+1. pins the wheel: the `vibehash==<version>` line of the file gets the built wheel's own sha256 (added if the
    compile left it out, which it does: `uv pip compile pyproject.toml` lists the dependencies, not the project);
 2. writes reqs/release.json, the manifest, a JSON object with these fields:
        version, wheel, wheel_sha256, requirements, requirements_sha256, requirements_evo, requirements_evo_sha256,
        published, min_launcher
    (the requirements are hashed after step 1; `published` is a unix time; `min_launcher` is the oldest launcher that
-   understands this manifest; readers require these fields and tolerate extras);
+   understands this manifest; readers require these fields and tolerate extras). Evo had a second file, with its
+   extra; Evo was cut after 0.5.28, but launchers and `vibehash update` up to 0.5.28 require the requirements_evo
+   fields, so they name the one file and its hash (an old `vibehash update --evo` then installs the base set);
 3. writes reqs/release.sig: the lowercase hex of the Ed25519 signature, by the key in $RELEASE_SIGNING_KEY (64 hex
    characters, the secret from scripts/make_release_key.py), over vibehash.crypto.canonical(manifest): the manifest as
    JSON with sorted keys, separators "," and ":", ASCII only, UTF-8 bytes. The signature covers the dict, not the file's
@@ -69,8 +70,6 @@ MIN_LAUNCHER = "1.2"  # the first launcher that verifies this manifest
 # --python-version is the resolution's floor, so it is requires-python's (3.10): a 3.10 or 3.11 install verifies too.
 COMPILE_BASE = ("uv pip compile pyproject.toml --extra finetune --extra app --generate-hashes --universal "
                 "--no-emit-package torch --python-version 3.10").split()
-COMPILE_EVO = ("uv pip compile pyproject.toml --extra finetune --extra app --extra evo --generate-hashes --universal "
-               "--no-emit-package torch --python-version 3.10").split()
 
 
 class NoKey(Exception):
@@ -106,31 +105,30 @@ def secret_from(env) -> bytes:
 
 
 def compile_requirements(out: Path, version: str, run=subprocess.run) -> None:
-    """Both requirements files into `out`, by running uv (no key is, or should be, in this process's environment)."""
+    """The requirements file into `out`, by running uv (no key is, or should be, in this process's environment)."""
     out.mkdir(parents=True, exist_ok=True)
     run([*COMPILE_BASE, "-o", str(out / f"requirements-{version}.txt")], check=True)
-    run([*COMPILE_EVO, "-o", str(out / f"requirements-{version}-evo.txt")], check=True)
 
 
 def make_release(dist: Path, version: str, env=None, now: int | None = None, min_launcher: str = MIN_LAUNCHER,
                  reqs: Path | None = None) -> dict:
-    """Write release.json and release.sig into `reqs` (default: `dist`), pinning the wheel in the two requirements files
+    """Write release.json and release.sig into `reqs` (default: `dist`), pinning the wheel in the requirements file
     there. Raises NoKey before touching anything when there is no key."""
     secret = secret_from(os.environ if env is None else env)
     reqs = dist if reqs is None else reqs
     wheels = sorted(dist.glob(f"vibehash-{version}-*.whl"))
     if len(wheels) != 1:
         raise SystemExit(f"expected exactly one vibehash-{version}-*.whl in {dist}, found {len(wheels)}")
-    names = (f"requirements-{version}.txt", f"requirements-{version}-evo.txt")
+    name = f"requirements-{version}.txt"
     wheel_sha = hashlib.sha256(wheels[0].read_bytes()).hexdigest()
-    texts = [pin_wheel((reqs / n).read_text(encoding="utf-8"), version, wheel_sha).encode("utf-8") for n in names]
+    text = pin_wheel((reqs / name).read_text(encoding="utf-8"), version, wheel_sha).encode("utf-8")
+    digest = hashlib.sha256(text).hexdigest()
     manifest = {"version": version, "wheel": wheels[0].name, "wheel_sha256": wheel_sha,
-                "requirements": names[0], "requirements_sha256": hashlib.sha256(texts[0]).hexdigest(),
-                "requirements_evo": names[1], "requirements_evo_sha256": hashlib.sha256(texts[1]).hexdigest(),
+                "requirements": name, "requirements_sha256": digest,
+                "requirements_evo": name, "requirements_evo_sha256": digest,  # (for readers up to 0.5.28: see above)
                 "published": int(time.time()) if now is None else int(now), "min_launcher": min_launcher}
     sig = crypto.sign(secret, crypto.canonical(manifest))
-    for name, text in zip(names, texts):
-        (reqs / name).write_bytes(text)
+    (reqs / name).write_bytes(text)
     (reqs / "release.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (reqs / "release.sig").write_text(sig.hex() + "\n", encoding="ascii")
     return manifest
