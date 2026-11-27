@@ -426,6 +426,9 @@ class Coordinator:
     def active_job_id(self) -> str | None:
         """Jobs with budget left take turns a round at a time, so a new job never waits for an old one to run out.
         The turn order comes from the chain: the job after the one the last round trained."""
+        held = self.chain.state.escrow
+        for job_id in [j for j in self.waiting if held.get(j, 0) <= 0]:  # a job that's spent or cancelled waits no more
+            del self.waiting[job_id]
         ready = []
         for job_id, escrow in self.chain.state.escrow.items():
             if escrow > 0:

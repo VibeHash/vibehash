@@ -273,6 +273,10 @@ class RetiredJobTests(unittest.TestCase):
         self.assertIsNone(coord.active_job_id())
         self.assertIn("removed from VibeHash", coord.waiting["think-shorter-test"])
         self.assertIn("owner can cancel it", coord.waiting["think-shorter-test"])
+        cancel = Tx.signed(LEAD, "cancel_job", SYSTEM, 0, c.next_nonce(LEAD.address), "think-shorter-test", c.chain_id)
+        _seal(c, [cancel], version=4)
+        self.assertIsNone(coord.active_job_id())
+        self.assertNotIn("think-shorter-test", coord.waiting, "a cancelled job waits no more (/status stops saying so)")
 
     def test_an_evo_genesis_is_refused_with_a_clear_message(self):
         g = {"chain_id": "an-evo-net", "allocations": {LEAD.address: 1}, "es": True}
